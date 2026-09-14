@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Qona MBS - Mobile Banking System</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <!-- Login Screen -->
+  <div id="login-screen" class="screen active">
+    <div class="login-container">
+      <div class="login-card">
+        <h1>Qona MBS</h1>
+        <p class="login-subtitle">Mobile Banking System</p>
+
+        <form id="login-form">
+          <div class="form-group">
+            <label for="login-phone">Phone Number</label>
+            <input type="text" id="login-phone" placeholder="0712345678" required>
+          </div>
+
+          <div class="form-group">
+            <label for="login-pin">PIN</label>
+            <input type="password" id="login-pin" placeholder="Enter PIN" maxlength="6" required>
+          </div>
+
+          <button type="submit" class="btn btn-primary">Login</button>
+
+          <p class="form-divider">Don't have an account?</p>
+          <button type="button" class="btn btn-secondary" id="show-register">Create Account</button>
+        </form>
+
+        <div id="login-error" class="error-message" style="display: none;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Register Screen -->
+  <div id="register-screen" class="screen">
+    <div class="login-container">
+      <div class="login-card">
+        <h1>Create Account</h1>
+        <p class="login-subtitle">Join Qona DT SACCO</p>
+
+        <form id="register-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="reg-first-name">First Name</label>
+              <input type="text" id="reg-first-name" placeholder="John" required>
+            </div>
+            <div class="form-group">
+              <label for="reg-last-name">Last Name</label>
+              <input type="text" id="reg-last-name" placeholder="Doe" required>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="reg-dob">Date of Birth</label>
+            <input type="date" id="reg-dob" required>
+          </div>
+
+          <div class="form-group">
+            <label for="reg-id">ID Number</label>
+            <input type="text" id="reg-id" placeholder="12345678" required>
+          </div>
+
+          <div class="form-group">
+            <label for="reg-phone">Phone Number</label>
+            <input type="text" id="reg-phone" placeholder="0712345678" required>
+          </div>
+
+          <div class="form-group">
+            <label for="reg-email">Email</label>
+            <input type="email" id="reg-email" placeholder="john@example.com" required>
+          </div>
+
+          <div class="form-group">
+            <label for="reg-pin">PIN (4-6 digits)</label>
+            <input type="password" id="reg-pin" placeholder="Enter PIN" maxlength="6" required>
+          </div>
+
+          <button type="submit" class="btn btn-primary">Create Account</button>
+          <button type="button" class="btn btn-secondary" id="show-login">Back to Login</button>
+        </form>
+
+        <div id="register-error" class="error-message" style="display: none;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main App -->
+  <div id="app-container" class="app-container" style="display: none;">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h2>Qona MBS</h2>
+        <button class="sidebar-toggle" id="sidebar-toggle">☰</button>
+      </div>
+
+      <nav class="sidebar-nav">
+        <a href="#" class="nav-item active" data-view="dashboard">
+          <span class="nav-icon">📊</span>
+          <span class="nav-label">Dashboard</span>
+        </a>
+        <a href="#" class="nav-item" data-view="accounts">
+          <span class="nav-icon">💰</span>
+          <span class="nav-label">Accounts</span>
+        </a>
+        <a href="#" class="nav-item" data-view="transactions">
+          <span class="nav-icon">📝</span>
+          <span class="nav-label">Transactions</span>
+        </a>
+        <a href="#" class="nav-item" data-view="transfer">
+          <span class="nav-icon">➡️</span>
+          <span class="nav-label">Transfer</span>
+        </a>
+        <a href="#" class="nav-item" data-view="beneficiaries">
+          <span class="nav-icon">👥</span>
+          <span class="nav-label">Beneficiaries</span>
+        </a>
+        <a href="#" class="nav-item" data-view="settings">
+          <span class="nav-icon">⚙️</span>
+          <span class="nav-label">Settings</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button class="btn btn-small" id="logout-btn">Logout</button>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Dashboard View -->
+      <section id="view-dashboard" class="view active">
+        <div class="view-header">
+          <h1>Dashboard</h1>
+          <p class="member-name" id="member-name">Welcome</p>
+        </div>
+
+        <div class="dashboard-stats">
+          <div class="stat-card">
+            <div class="stat-icon">💵</div>
+            <div class="stat-content">
+              <p class="stat-label">Total Balance</p>
+              <p class="stat-value" id="total-balance">KES 0.00</p>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon">📈</div>
+            <div class="stat-content">
+              <p class="stat-label">This Month Deposits</p>
+              <p class="stat-value" id="total-deposits">KES 0.00</p>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon">📉</div>
+            <div class="stat-content">
+              <p class="stat-label">This Month Withdrawals</p>
+              <p class="stat-value" id="total-withdrawals">KES 0.00</p>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon">🔄</div>
+            <div class="stat-content">
+              <p class="stat-label">This Month Transfers</p>
+              <p class="stat-value" id="total-transfers">KES 0.00</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="dashboard-section">
+          <div class="section-header">
+            <h2>Quick Access Accounts</h2>
+          </div>
+          <div class="accounts-grid" id="quick-accounts">
+            <!-- Populated by app.js -->
+          </div>
+        </div>
+
+        <div class="dashboard-section">
+          <div class="section-header">
+            <h2>Recent Transactions</h2>
+          </div>
+          <div class="transactions-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                  <th>Amount</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="dashboard-transactions">
+                <!-- Populated by app.js -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Accounts View -->
+      <section id="view-accounts" class="view">
+        <div class="view-header">
+          <h1>My Accounts</h1>
+        </div>
+
+        <div class="accounts-grid" id="all-accounts">
+          <!-- Populated by app.js -->
+        </div>
+      </section>
+
+      <!-- Transactions View -->
+      <section id="view-transactions" class="view">
+        <div class="view-header">
+          <h1>Transactions</h1>
+        </div>
+
+        <div class="filter-bar">
+          <input type="text" id="transaction-search" class="search-input" placeholder="Search by reference or description...">
+          <select id="transaction-type-filter" class="filter-select">
+            <option value="">All Types</option>
+            <option value="DEPOSIT">Deposits</option>
+            <option value="WITHDRAWAL">Withdrawals</option>
+            <option value="TRANSFER">Transfers</option>
+          </select>
+          <select id="transaction-status-filter" class="filter-select">
+            <option value="">All Status</option>
+            <option value="SUCCESS">Successful</option>
+            <option value="PENDING">Pending</option>
+            <option value="FAILED">Failed</option>
+          </select>
+        </div>
+
+        <div class="transactions-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Description</th>
+                <th>Amount</th>
+                <th>Reference</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="transactions-list">
+              <!-- Populated by app.js -->
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pagination">
+          <button id="prev-page" class="btn btn-small" disabled>← Previous</button>
+          <span id="page-info">Page 1</span>
+          <button id="next-page" class="btn btn-small">Next →</button>
+        </div>
+      </section>
+
+      <!-- Transfer View -->
+      <section id="view-transfer" class="view">
+        <div class="view-header">
+          <h1>Transfer Money</h1>
+        </div>
+
+        <div class="transfer-container">
+          <div class="transfer-card">
+            <h2>Select Transfer Type</h2>
+            <button class="btn btn-primary" id="own-account-transfer">Own Accounts</button>
+            <button class="btn btn-secondary" id="internal-transfer">To Another Member</button>
+          </div>
+
+          <!-- Own Account Transfer Form -->
+          <div id="own-transfer-form" class="transfer-form" style="display: none;">
+            <h2>Transfer Between Your Accounts</h2>
+            <form id="own-transfer-submit">
+              <div class="form-group">
+                <label for="own-from-account">From Account</label>
+                <select id="own-from-account" required>
+                  <option value="">Select account</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="own-to-account">To Account</label>
+                <select id="own-to-account" required>
+                  <option value="">Select account</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="own-amount">Amount (KES)</label>
+                <input type="number" id="own-amount" step="0.01" min="0" placeholder="0.00" required>
+              </div>
+
+              <div class="form-group">
+                <label for="own-description">Description (optional)</label>
+                <input type="text" id="own-description" placeholder="e.g. Emergency fund transfer">
+              </div>
+
+              <button type="submit" class="btn btn-primary">Continue</button>
+              <button type="button" class="btn btn-secondary" onclick="resetTransferForm()">Cancel</button>
+            </form>
+          </div>
+
+          <!-- Internal Transfer Form -->
+          <div id="internal-transfer-form" class="transfer-form" style="display: none;">
+            <h2>Transfer to Another Member</h2>
+            <form id="internal-transfer-submit">
+              <div class="form-group">
+                <label for="internal-phone">Recipient Phone Number</label>
+                <input type="text" id="internal-phone" placeholder="0712345678" required>
+                <button type="button" class="btn btn-small" id="lookup-recipient">Look Up</button>
+              </div>
+
+              <div id="recipient-info" class="recipient-info" style="display: none;">
+                <p>Recipient: <strong id="recipient-name"></strong></p>
+                <p>Account: <strong id="recipient-account"></strong></p>
+              </div>
+
+              <div class="form-group">
+                <label for="internal-amount">Amount (KES)</label>
+                <input type="number" id="internal-amount" step="0.01" min="0" placeholder="0.00" required>
+              </div>
+
+              <div class="form-group">
+                <label for="internal-description">Description (optional)</label>
+                <input type="text" id="internal-description" placeholder="e.g. Loan repayment">
+              </div>
+
+              <button type="submit" class="btn btn-primary">Continue</button>
+              <button type="button" class="btn btn-secondary" onclick="resetTransferForm()">Cancel</button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <!-- Beneficiaries View -->
+      <section id="view-beneficiaries" class="view">
+        <div class="view-header">
+          <h1>Beneficiaries</h1>
+          <button class="btn btn-small" id="add-beneficiary-btn">+ Add Beneficiary</button>
+        </div>
+
+        <div class="beneficiaries-list" id="beneficiaries-list">
+          <!-- Populated by app.js -->
+        </div>
+
+        <!-- Add Beneficiary Modal -->
+        <div id="add-beneficiary-modal" class="modal" style="display: none;">
+          <div class="modal-content">
+            <button class="modal-close" id="close-modal">&times;</button>
+            <h2>Add Beneficiary</h2>
+            <form id="add-beneficiary-form">
+              <div class="form-group">
+                <label for="ben-name">Beneficiary Name</label>
+                <input type="text" id="ben-name" required>
+              </div>
+
+              <div class="form-group">
+                <label for="ben-phone">Phone Number (optional)</label>
+                <input type="text" id="ben-phone" placeholder="0712345678">
+              </div>
+
+              <div class="form-group">
+                <label for="ben-account">Account Number (optional)</label>
+                <input type="text" id="ben-account">
+              </div>
+
+              <div class="form-group">
+                <label for="ben-relationship">Relationship</label>
+                <select id="ben-relationship">
+                  <option value="Spouse">Spouse</option>
+                  <option value="Child">Child</option>
+                  <option value="Parent">Parent</option>
+                  <option value="Sibling">Sibling</option>
+                  <option value="Friend">Friend</option>
+                  <option value="Business">Business Partner</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="ben-limit">Daily Limit (KES, optional)</label>
+                <input type="number" id="ben-limit" step="100" min="0" placeholder="No limit">
+              </div>
+
+              <button type="submit" class="btn btn-primary">Add Beneficiary</button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <!-- Settings View -->
+      <section id="view-settings" class="view">
+        <div class="view-header">
+          <h1>Settings</h1>
+        </div>
+
+        <div class="settings-card">
+          <h2>Account Settings</h2>
+          <p id="settings-member-name"></p>
+          <p id="settings-member-phone"></p>
+          <p id="settings-member-email"></p>
+          <button class="btn btn-secondary" id="change-pin-btn">Change PIN</button>
+        </div>
+
+        <div class="settings-card">
+          <h2>Session</h2>
+          <button class="btn btn-danger" id="logout-settings-btn">Logout</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Loading Spinner -->
+  <div id="loading-spinner" class="loading-spinner" style="display: none;">
+    <div class="spinner"></div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="toast"></div>
+
+  <script src="/utils/api.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

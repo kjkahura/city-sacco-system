@@ -1,0 +1,17 @@
+{
+  "name": "city-sacco-system",
+  "version": "1.0.0",
+  "description": "City SACCO dashboard with backend APIs and frontend UI.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "claude-build": "node claude-build.js",
+    "build": "npm run claude-build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.27.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.4"
+  }
+}
+
