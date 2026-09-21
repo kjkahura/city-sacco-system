@@ -59,6 +59,11 @@ const members = require('./routes/members');
 tenantApi.post('/members:search', ...members.searchMembers);
 tenantApi.use('/members', members);
 
+const savings = require('./routes/savings');
+tenantApi.use('/savings', savings);
+tenantApi.use('/loans', require('./routes/loans'));
+tenantApi.use('/accounting', savings.accounting);
+
 tenantApi.get('/', requireAuth(), (req, res) => res.json({
   tenant: req.tenant.slug,
   name: req.tenant.name,

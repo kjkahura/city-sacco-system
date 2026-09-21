@@ -10,7 +10,7 @@ operators) because they are sensible, not because Mambu invented them.
 cp .env.example .env          # set PGDATABASE and JWT_SECRET
 npm install
 npm run migrate               # platform schema, then every tenant
-npm test                      # 36 isolation assertions
+npm test                      # 84 assertions: isolation + lending
 npm start
 ```
 
@@ -77,10 +77,15 @@ src/
     provision.js       create schema, migrate, seed CoA, create first admin
     resolve.js         tenant resolution middleware, JWT, role guards
   auth/passwords.js    scrypt from node:crypto, no native build
-  routes/              auth, members
+  domain/
+    accounting.js      double-entry posting, reversal, trial balance
+    loans.js           lifecycle, schedule, allocation, guarantors, arrears
+    savings.js         deposit, withdraw, transfer, pledged-balance rules
+  routes/              auth, members, loans, savings, accounting
   lib/http.js          error envelope, pagination, filter operators
 bin/cli.js             migrate, provision, drift
-test/isolation.test.js
+test/isolation.test.js  36 assertions
+test/lending.test.js    48 assertions
 ```
 
 ## What the database enforces, not the app
@@ -141,15 +146,59 @@ Things a bank-shaped core banking system does not give you:
 - **Per-tenant `audit_log`** — separate from `platform.audit_log`, so a
   tenant's audit trail leaves with their schema dump.
 
+## Lending and savings
+
+Ported to SQL. Balance columns are only ever changed by SQL expressions on
+the `numeric` type, never read into JS, adjusted, and written back. That
+closes the read-modify-write race two tellers posting to the same loan would
+otherwise hit, and keeps the arithmetic in exact decimal. Ten concurrent
+repayments against one loan are in the test suite for exactly this.
+
+```
+POST /api/loans/eligibility            deposits multiplier check
+POST /api/loans                        apply
+POST /api/loans/:id/guarantors         pledge deposits as security
+POST /api/loans/:id/approve            state machine, 409 on bad transition
+POST /api/loans/:id/disbursements      posts to GL, generates the schedule
+POST /api/loans/:id/repayments         allocation, posts to GL
+POST /api/loans/:id/accrue-interest
+POST /api/loans/:id/write-off          calls the guarantors
+POST /api/loans/transactions/:ref/reversal
+POST /api/loans/arrears/run
+GET  /api/loans/:id/schedule|balances|transactions|guarantors
+
+POST /api/savings/:id/deposits|withdrawals|transfers
+POST /api/savings/transactions/:ref/reversal
+GET  /api/savings/:id/balance          total, pledged, available
+
+GET  /api/accounting/trial-balance|journal|gl
+```
+
+**Repayment allocation** is penalty, then fees, then interest, then
+principal. Anything left over is credited to the member's savings rather
+than parked on the loan as an unexplained balance, and the reversal path
+claws it back out again.
+
+**Guarantors** are the SACCO-specific piece. A member pledges their own
+deposits against someone else's loan. The pledge is checked against their
+free balance at the time it is made, it reduces their withdrawable balance
+while it stands, it is released when the loan is repaid, and it is marked
+`CALLED` rather than released on write-off.
+
+**The eligibility rule** is `principal <= deposits * product.max_multiplier`,
+the "three times your savings" convention.
+
+**Due dates** shift forward off weekends and off the `holidays` table, in
+SQL, so no installment falls on a day the SACCO is shut.
+
+The invariant the test suite asserts after *every single operation*,
+corrections included: the trial balance still balances.
+
 ## Not done yet
 
-1. **Loan and savings domain logic is not ported.** The tables and constraints
-   exist; the service layer (disbursement, repayment allocation, schedule
-   generation, interest accrual) still lives in the in-memory `/api/v2`
-   surface and needs rewriting against SQL.
-2. **Only `members` has routes.** It is the reference implementation of the
-   tenant-scoped pattern; the rest follow it.
-3. **No rate limiting, no refresh tokens, no MFA.** Tokens are 12-hour HS256.
+1. **Shares and dividends have tables but no service layer.** Declaration,
+   allocation by shareholding, and payout are not written.
+2. **No rate limiting, no refresh tokens, no MFA.** Tokens are 12-hour HS256.
    For real deployment add refresh rotation and consider RS256 so the signing
    key is not shared with verifiers.
 4. **No per-tenant backup automation.** `pg_dump -n tenant_x` is the primitive;
@@ -157,7 +206,11 @@ Things a bank-shaped core banking system does not give you:
 5. **No connection limits per tenant.** One SACCO running a heavy report can
    starve the shared pool. Add per-tenant concurrency caps before onboarding
    anyone large.
-6. **Migrations are not zero-downtime.** `migrate:all` takes each schema in
+6. **Migrations are not zero-downtime.**
+7. **Interest accrual is on-demand.** There is no scheduler; wire
+   `accrue-interest` and `arrears/run` to a cron or an end-of-day job.
+8. **Only FLAT schedules are exercised.** `REDUCING` is implemented in
+   `buildSchedule` but no seeded product uses it, so it is untested. `migrate:all` takes each schema in
    turn. Fine at tens of tenants, needs batching and a maintenance window
    strategy beyond that.
 
