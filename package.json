@@ -6,12 +6,17 @@
   "scripts": {
     "start": "node server.js",
     "claude-build": "node claude-build.js",
-    "build": "npm run claude-build"
+    "build": "npm run claude-build",
+    "test": "node scripts/smoke.js",
+    "coverage": "node scripts/coverage.js",
+    "routes": "node scripts/coverage.js --routes"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.27.0",
-    "cors": "^2.8.5",
-    "express": "^4.18.4"
+    "cors": "^2.8.6",
+    "express": "^4.22.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
-
