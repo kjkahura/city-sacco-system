@@ -10,7 +10,7 @@ operators) because they are sensible, not because Mambu invented them.
 cp .env.example .env          # set PGDATABASE and JWT_SECRET
 npm install
 npm run migrate               # platform schema, then every tenant
-npm test                      # 84 assertions: isolation + lending
+npm test                      # 134 assertions: isolation, lending, ops
 npm start
 ```
 
@@ -77,15 +77,26 @@ src/
     provision.js       create schema, migrate, seed CoA, create first admin
     resolve.js         tenant resolution middleware, JWT, role guards
   auth/passwords.js    scrypt from node:crypto, no native build
+  auth/
+    passwords.js       scrypt from node:crypto, no native build
+    tokens.js          refresh rotation with reuse detection
   domain/
     accounting.js      double-entry posting, reversal, trial balance
     loans.js           lifecycle, schedule, allocation, guarantors, arrears
     savings.js         deposit, withdraw, transfer, pledged-balance rules
-  routes/              auth, members, loans, savings, accounting
-  lib/http.js          error envelope, pagination, filter operators
-bin/cli.js             migrate, provision, drift
+    shares.js          share capital and the dividend cycle
+  ops/
+    eod.js             end-of-day jobs, idempotent per business date
+    backup.js          pg_dump per tenant, retention, restore verification
+    scheduler.js       in-process timer behind a Postgres advisory lock
+  routes/              auth, members, loans, savings, shares, accounting
+  lib/
+    http.js            error envelope, pagination, filter operators
+    limits.js          rate limiting and per-tenant concurrency gates
+bin/cli.js             migrate, provision, drift, eod, backup
 test/isolation.test.js  36 assertions
 test/lending.test.js    48 assertions
+test/ops.test.js        50 assertions
 ```
 
 ## What the database enforces, not the app
@@ -130,6 +141,13 @@ npm run cli tenant:create --slug citysacco --name "City SACCO" \
   --admin-email admin@citysacco.co.ke --admin-password "..."
 npm run cli tenant:list
 npm run cli tenant:drop --slug citysacco --confirm citysacco
+
+npm run cli eod:run [--date 2026-09-21] [--force]
+npm run cli eod:history --slug citysacco
+npm run cli backup:run [--slug citysacco]
+npm run cli backup:verify --slug citysacco
+npm run cli backup:prune --keep 14
+npm run cli tokens:prune --days 60
 ```
 
 ## SACCO-specific modelling
@@ -194,25 +212,94 @@ SQL, so no installment falls on a day the SACCO is shut.
 The invariant the test suite asserts after *every single operation*,
 corrections included: the trial balance still balances.
 
+## Shares and dividends
+
+Shares are equity, not a deposit. Buying them credits share capital; a
+dividend is a distribution out of retained earnings, not interest expense.
+Getting that wrong is the kind of thing an auditor finds.
+
+The cycle is three deliberate steps, because that is how an AGM decision
+actually moves:
+
+```
+POST /api/dividends                    declare a rate for a financial year
+POST /api/dividends/:year/allocate     allocate by holding at the record date
+POST /api/dividends/:year/pay          clear the payable into members' savings
+```
+
+Allocation uses shareholding **as at the record date**, derived from
+`share_movements` via `units_as_at()`, not whatever the balance happens to
+be when the job runs. Rounding residual goes to the largest holder so the
+sum of allocations equals the amount posted to the payable, exactly.
+
+A shareholder with no active savings account is **reported, not silently
+skipped**, and the dividend stays `ALLOCATED` until nobody is left unpaid.
+
+## Sessions
+
+Access tokens are 15 minutes. Refresh tokens are 30 days, single use, and
+stored only as a SHA-256 hash, so a database dump does not hand over live
+sessions.
+
+Rotation detects replay. Presenting a token that has already been spent
+revokes the **entire family**, logging out both the attacker and the real
+user. A forced re-login beats a silent session hijack. Changing a password
+revokes every session too.
+
+Rate limiting is keyed on both IP and account, so spraying one password
+across many accounts and hammering one account from many addresses are both
+caught. It is in-process: with N app instances the effective limit is N
+times the configured one. Move it to Redis before running more than one.
+
+## Operations
+
+**End of day** (`npm run cli eod:run`) accrues interest and marks arrears
+across every active tenant. It is idempotent by construction: a unique index
+on `(schema_name, job, business_date)` for any non-failed run means a second
+run for the same date is refused *by the database*, not by a flag someone
+might forget to check. Interest cannot be accrued twice. One tenant failing
+does not stop the fleet.
+
+**Backups** (`npm run cli backup:run`) are `pg_dump --format=custom -n
+tenant_<slug>`, one file per SACCO, with a SHA-256 recorded in
+`platform.backup_runs` and retention via `backup:prune --keep 14`.
+
+`npm run cli backup:verify --slug x` restores the newest dump into a scratch
+schema, counts the tables, and drops it. A backup nobody has restored is a
+hope, not a backup, so the restore path is exercised rather than assumed.
+The test suite runs a full backup, restore and integrity round trip.
+
+**Scheduling** is a plain timer behind `pg_try_advisory_lock`, so two
+instances cannot both fire a sweep. Set `SCHEDULER=on`. On Kubernetes, leave
+it off and use a CronJob calling the CLI instead.
+
+## Migrations at fleet scale
+
+`migrate:all` takes a Postgres advisory lock, so two deploys rolling at once
+cannot interleave DDL on the same schemas. It runs in bounded batches
+(default 4) rather than opening a connection per tenant, and captures errors
+per tenant so one bad schema does not abort the rest with no report of where
+it stopped. Each migration sets `lock_timeout`, so DDL that cannot get its
+lock fails fast instead of queueing every reader behind it.
+
+This is safer, not zero-downtime. A migration taking an ACCESS EXCLUSIVE
+lock still blocks that tenant while it runs. Keep migrations short and
+additive.
+
 ## Not done yet
 
-1. **Shares and dividends have tables but no service layer.** Declaration,
-   allocation by shareholding, and payout are not written.
-2. **No rate limiting, no refresh tokens, no MFA.** Tokens are 12-hour HS256.
-   For real deployment add refresh rotation and consider RS256 so the signing
-   key is not shared with verifiers.
-4. **No per-tenant backup automation.** `pg_dump -n tenant_x` is the primitive;
-   scheduling and retention are not built.
-5. **No connection limits per tenant.** One SACCO running a heavy report can
-   starve the shared pool. Add per-tenant concurrency caps before onboarding
-   anyone large.
-6. **Migrations are not zero-downtime.**
-7. **Interest accrual is on-demand.** There is no scheduler; wire
-   `accrue-interest` and `arrears/run` to a cron or an end-of-day job.
-8. **Only FLAT schedules are exercised.** `REDUCING` is implemented in
-   `buildSchedule` but no seeded product uses it, so it is untested. `migrate:all` takes each schema in
-   turn. Fine at tens of tenants, needs batching and a maintenance window
-   strategy beyond that.
+1. **No MFA.** Password plus a 15-minute token is the whole authentication
+   story. TOTP is the obvious next addition for `TENANT_ADMIN` roles.
+2. **Rate limits and concurrency gates are per-process.** Correct on one
+   node, N times looser on N nodes. Redis-backed counters before scaling out.
+3. **Backups are local disk.** No offsite copy, no encryption at rest on the
+   dump files. Both are needed before real member data.
+4. **No penalty accrual.** The columns and allocation order exist; nothing
+   calculates or posts a late-payment penalty yet.
+5. **Reversal of a share purchase is not implemented.** Savings and loan
+   transactions reverse; share movements do not.
+6. **No reporting beyond the trial balance.** No balance sheet, income
+   statement, or SASRA returns.
 
 ## Before real member data
 

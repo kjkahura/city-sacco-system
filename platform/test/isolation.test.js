@@ -122,8 +122,8 @@ async function call(method, path, { token, tenant, host, body } = {}) {
     const login = await call('POST', '/api/auth/login', {
       tenant: 'citysacco', body: { email: 'admin@isolationtest.local', password: 'correct horse battery' },
     });
-    check('login succeeds', login.status === 200, JSON.stringify(login.body).slice(0, 120));
-    const cityToken = login.body?.token;
+    check('login returns an access token', login.status === 200 && !!login.body?.accessToken, JSON.stringify(login.body).slice(0, 120));
+    const cityToken = login.body?.accessToken;
 
     const wrongPw = await call('POST', '/api/auth/login', {
       tenant: 'citysacco', body: { email: 'admin@isolationtest.local', password: 'a different long passphrase' },

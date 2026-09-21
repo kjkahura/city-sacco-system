@@ -4,6 +4,9 @@
 const { pool } = require('../src/db/pool');
 const { migratePlatform, migrateTenant, migrateAllTenants, drift } = require('../src/db/migrate');
 const provision = require('../src/tenancy/provision');
+const eod = require('../src/ops/eod');
+const backup = require('../src/ops/backup');
+const tokens = require('../src/auth/tokens');
 
 const [, , cmd, ...args] = process.argv;
 
@@ -67,6 +70,51 @@ const COMMANDS = {
     for (const t of rows) {
       console.log(`  ${t.slug.padEnd(24)} ${t.status.padEnd(12)} ${t.schema_name.padEnd(30)} ${t.name}`);
     }
+  },
+
+  async 'eod:run'() {
+    const results = await eod.runAll({
+      businessDate: arg('date'),
+      jobs: (arg('jobs') || 'accrueInterest,markArrears').split(','),
+      force: args.includes('--force'),
+    });
+    for (const r of results) {
+      console.log(r.error ? `  FAIL ${r.tenant} ${r.job}: ${r.error}`
+        : `  ok   ${r.tenant.padEnd(20)} ${r.job.padEnd(16)} ${r.skipped || JSON.stringify(r)}`);
+    }
+    if (results.some((r) => r.error)) process.exitCode = 1;
+  },
+
+  async 'eod:history'() {
+    for (const r of await eod.history({ slug: arg('slug'), limit: Number(arg('limit', 30)) })) {
+      console.log(`  ${String(r.business_date).slice(0,10)} ${(r.slug||'').padEnd(20)} ` +
+        `${r.job.padEnd(16)} ${r.status.padEnd(10)} ${r.error || JSON.stringify(r.detail)}`);
+    }
+  },
+
+  async 'backup:run'() {
+    const slug = arg('slug');
+    const out = slug ? [await backup.backupTenant(slug)] : await backup.backupAll({});
+    for (const b of out) {
+      console.log(b.ok === false ? `  FAIL ${b.slug}: ${b.error}`
+        : `  ok   ${b.slug.padEnd(20)} ${(b.bytes/1024).toFixed(1)}KB  ${b.file}`);
+    }
+    if (out.some((b) => b.ok === false)) process.exitCode = 1;
+  },
+
+  async 'backup:verify'() {
+    const out = await backup.verifyLatest(arg('slug'));
+    console.log(`  ${out.ok ? 'ok  ' : 'FAIL'} ${out.slug}: restored ${out.tablesRestored} tables from ${out.file}`);
+    if (!out.ok) process.exitCode = 1;
+  },
+
+  async 'backup:prune'() {
+    const pruned = await backup.prune({ keep: Number(arg('keep', 14)) });
+    console.log(`pruned ${pruned.length} old dumps`);
+  },
+
+  async 'tokens:prune'() {
+    console.log(`pruned ${await tokens.prune(Number(arg('days', 60)))} expired refresh tokens`);
   },
 
   async 'tenant:drop'() {
