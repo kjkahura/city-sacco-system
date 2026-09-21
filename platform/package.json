@@ -8,11 +8,14 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/isolation.test.js && node test/lending.test.js",
+    "test": "node test/isolation.test.js && node test/lending.test.js && node test/ops.test.js",
     "migrate": "node bin/cli.js migrate:platform && node bin/cli.js migrate:all",
     "cli": "node bin/cli.js",
     "test:isolation": "node test/isolation.test.js",
-    "test:lending": "node test/lending.test.js"
+    "test:lending": "node test/lending.test.js",
+    "test:ops": "node test/ops.test.js",
+    "eod": "node bin/cli.js eod:run",
+    "backup": "node bin/cli.js backup:run"
   },
   "keywords": [],
   "author": "",

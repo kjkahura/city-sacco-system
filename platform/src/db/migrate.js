@@ -78,7 +78,7 @@ async function migratePlatform() {
  * Each migration runs in its own transaction with search_path pinned to the
  * tenant, so an unqualified CREATE TABLE lands in the right schema.
  */
-async function migrateTenant(schemaName) {
+async function migrateTenant(schemaName, { lockTimeoutMs = 5_000 } = {}) {
   assertSchemaName(schemaName);
   const files = load('tenant');
   const client = await pool.connect();
@@ -105,6 +105,10 @@ async function migrateTenant(schemaName) {
       }
       await client.query('BEGIN');
       try {
+        // Fail fast rather than queueing every reader behind a blocked DDL
+        // statement. A migration that cannot get its lock is a migration to
+        // retry in a quiet window, not one to hold the tenant hostage for.
+        await client.query(`SET LOCAL lock_timeout = '${Number(lockTimeoutMs)}ms'`);
         await client.query(
           "SELECT set_config('search_path', format('%I, public', $1::text), true)", [schemaName]
         );
@@ -126,20 +130,55 @@ async function migrateTenant(schemaName) {
   return done;
 }
 
-/** Migrate every registered tenant. Reports per tenant rather than aborting. */
-async function migrateAllTenants() {
-  const { rows } = await pool.query(
-    "SELECT slug, schema_name FROM platform.tenants WHERE status <> 'CLOSED' ORDER BY slug"
-  );
-  const results = [];
-  for (const t of rows) {
-    try {
-      results.push({ tenant: t.slug, applied: await migrateTenant(t.schema_name), ok: true });
-    } catch (e) {
-      results.push({ tenant: t.slug, ok: false, error: e.message });
+const MIGRATION_LOCK = 41_777;
+
+/**
+ * Migrate every registered tenant.
+ *
+ * Three things make this safe to run against a live fleet:
+ *
+ *  - A Postgres advisory lock, so two deploys rolling at once cannot both
+ *    migrate the same schemas and interleave DDL.
+ *  - Bounded concurrency, so a hundred schemas do not open a hundred
+ *    connections and exhaust the pool the app is still serving from.
+ *  - Per-tenant error capture, so one bad schema does not abort the rest
+ *    and leave the fleet half-migrated with no report of where it stopped.
+ *
+ * It is still not zero-downtime for a given tenant: a migration that takes
+ * an ACCESS EXCLUSIVE lock blocks that tenant's queries while it runs. Keep
+ * individual migrations short and additive, and use lock_timeout so a
+ * blocked DDL statement fails fast instead of queueing every reader behind
+ * it.
+ */
+async function migrateAllTenants({ concurrency = 4, lockTimeoutMs = 5_000 } = {}) {
+  const lock = await pool.connect();
+  try {
+    const { rows: [got] } = await lock.query('SELECT pg_try_advisory_lock($1) AS ok', [MIGRATION_LOCK]);
+    if (!got.ok) {
+      throw new Error('another migration run holds the advisory lock; not starting a second');
     }
+
+    const { rows } = await pool.query(
+      "SELECT slug, schema_name FROM platform.tenants WHERE status <> 'CLOSED' ORDER BY slug"
+    );
+
+    const results = [];
+    for (let i = 0; i < rows.length; i += concurrency) {
+      const batch = rows.slice(i, i + concurrency);
+      const out = await Promise.all(batch.map(async (t) => {
+        try {
+          return { tenant: t.slug, applied: await migrateTenant(t.schema_name, { lockTimeoutMs }), ok: true };
+        } catch (e) {
+          return { tenant: t.slug, ok: false, error: e.message };
+        }
+      }));
+      results.push(...out);
+    }
+    return results;
+  } finally {
+    await lock.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK]).catch(() => {});
+    lock.release();
   }
-  return results;
 }
 
 /**
