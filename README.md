@@ -1,143 +1,60 @@
 # City SACCO System
 
-This project includes the uploaded City SACCO management platform UI and a backend API server.
+Multi-tenant core banking for SACCOs. The live system is **[`platform/`](platform/)** —
+everything else in this repository is specification or a front end candidate.
 
-## What is included
+```bash
+cd platform
+cp .env.example .env          # set PGDATABASE and JWT_SECRET
+npm install
+npm run migrate               # platform schema, then every tenant
+npm test                      # 240 assertions across five suites
+npm start
+```
 
-- `index.html` — dashboard UI from the uploaded SACCO platform design
-- `api-init.js` — frontend API hydration and UI data synchronization
-- `server.js` — Express backend with full SACCO API routes
-- `package.json` — Node.js dependencies and start script
+[`platform/README.md`](platform/README.md) is the real documentation: why one Postgres
+schema per tenant, how a request is routed to its tenant, what the database enforces
+rather than the application, migrations and drift at fleet scale, lending, savings,
+shares and dividends, penalties, MFA and sessions, rate limiting, encrypted offsite
+backups and key rotation, reporting, and what is deliberately not done yet.
 
-## How to run
+## What is in this repository
 
-1. Install Node.js if it is not already installed.
-2. In the project folder, install dependencies:
-   ```bash
-   npm install
-   ```
-3. Set your Claude API key in the environment:
-   ```bash
-   set CLAUDE_API_KEY=your_claude_api_key
-   ```
-   or in PowerShell:
-   ```powershell
-   $env:CLAUDE_API_KEY = 'your_claude_api_key'
-   ```
-4. Start the app:
-   ```bash
-   npm start
-   ```
-5. Run the Claude build helper:
-   ```bash
-   npm run build
-   ```
-6. Open the dashboard in your browser:
-   ```
-   http://localhost:3000
-   ```
+| Path | What it is |
+|---|---|
+| `platform/` | The system. Node + Postgres, schema per tenant, 240 passing assertions. |
+| `Qona-MBS/client/` | A vanilla JS single-page app, kept as a candidate member-facing front end. It is not wired to `platform/` yet. |
+| `*.md` at the root | Requirements and specifications: AML, guarantees, the Qona MBS requirement and technical specs, the Wakandi signup spec, the implementation overview and roadmap. |
 
-## Available API endpoints
+## What moved, and where to find it
 
-### Core Entities
-- `GET /api/overview`
-- `GET /api/clients` (paginated, searchable)
-- `GET /api/clients/{clientId}`
-- `POST /api/clients`
-- `PUT /api/clients/{clientId}`
-- `DELETE /api/clients/{clientId}`
-- `GET /api/loans`
-- `GET /api/loans/{loanId}`
-- `POST /api/loans`
-- `PUT /api/loans/{loanId}`
-- `DELETE /api/loans/{loanId}`
-- `GET /api/deposit-accounts`
-- `GET /api/deposit-accounts/{accountId}`
-- `POST /api/deposit-accounts`
-- `PUT /api/deposit-accounts/{accountId}`
-- `DELETE /api/deposit-accounts/{accountId}`
+An earlier version of this project was a different thing: an in-memory Express server
+with a dashboard UI, plus a second Sequelize-based server under `Qona-MBS/server/`.
+Both are superseded by `platform/`, which persists to Postgres, isolates tenants, and
+is tested.
 
-### Administration
-- `GET /api/users`
-- `POST /api/users`
-- `PUT /api/users/{email}`
-- `DELETE /api/users/{email}`
-- `GET /api/gl-accounts`
-- `POST /api/gl-accounts`
-- `PUT /api/gl-accounts/{code}`
-- `DELETE /api/gl-accounts/{code}`
-- `GET /api/loan-products`
-- `POST /api/loan-products`
-- `PUT /api/loan-products/{id}`
-- `DELETE /api/loan-products/{id}`
-- `GET /api/savings-products`
-- `POST /api/savings-products`
-- `PUT /api/savings-products/{id}`
-- `DELETE /api/savings-products/{id}`
-- `GET /api/share-products`
-- `POST /api/share-products`
-- `PUT /api/share-products/{id}`
-- `DELETE /api/share-products/{id}`
-- `GET /api/charges`
-- `POST /api/charges`
-- `PUT /api/charges/{name}`
-- `DELETE /api/charges/{name}`
-- `GET /api/branches`
-- `POST /api/branches`
-- `PUT /api/branches/{id}`
-- `DELETE /api/branches/{id}`
-- `GET /api/centres`
-- `POST /api/centres`
-- `PUT /api/centres/{id}`
-- `DELETE /api/centres/{id}`
-- `GET /api/groups`
-- `POST /api/groups`
-- `PUT /api/groups/{id}`
-- `DELETE /api/groups/{id}`
-- `GET /api/currencies`
-- `POST /api/currencies`
-- `PUT /api/currencies/{code}`
-- `DELETE /api/currencies/{code}`
-- `GET /api/transactions`
-- `POST /api/transactions`
-- `PUT /api/transactions/{id}`
-- `DELETE /api/transactions/{id}`
-- `GET /api/cards`
-- `POST /api/cards`
-- `PUT /api/cards/{id}`
-- `DELETE /api/cards/{id}`
+Nothing was thrown away. The complete tree as it stood before this cleanup is on the
+**`archive/pre-platform`** branch:
 
-### Advanced Features
-- `GET /api/notifications`
-- `POST /api/notifications`
-- `PUT /api/notifications/{id}/read`
-- `GET /api/background-processes`
-- `POST /api/background-processes/{id}/run`
-- `GET /api/documents`
-- `POST /api/documents`
-- `GET /api/workflows`
-- `POST /api/workflows/{id}/advance`
-- `GET /api/audit-logs`
-- `GET /api/reports/loan-portfolio`
-- `GET /api/reports/member-engagement`
-- `POST /api/bulk/members`
-- `POST /api/processes/accrue-interest`
+```bash
+git switch archive/pre-platform      # the whole thing, exactly as it was
+git show archive/pre-platform:server.js
+```
 
-### Configuration & Metadata
-- `GET /api/kyc-fields`
-- `GET /api/custom-fields`
-- `GET /api/reports/trial-balance`
-- `GET /api/reports/balance-sheet`
-- `GET /api/reports/income-statement`
-- `GET /api/search/clients?q=...`
-- `GET /api/search/members?q=...`
+Removed from `main`, still on that branch:
 
-## Notes
+- `server.js`, `api-init.js`, `app.js`, `index.html`, `style.css`, `claude-build.js`,
+  `guarantee-mockup.html` — the legacy dashboard API and its UI, all in-memory
+- `src/`, `scripts/`, `API_V2.md` — a 400-route Mambu-shaped API surface at `/api/v2`,
+  also in-memory. The API *conventions* survived into `platform/`; the code did not.
+- `Qona-MBS/server/` — a separate Sequelize/SQLite server with its own models
 
-- The `/api/clients`, `/api/loans`, and `/api/deposit-accounts` endpoints now support full create/update/delete operations for demo data.
-- Responses use Mambu-style field names such as `clientId`, `displayName`, `accountHolderType`, `productTypeKey`, and `accountState`.
-- Created REST-like resource endpoints for clients, loans, deposit accounts, branches, centres, groups, transactions, and cards.
-- The backend still uses in-memory demo data, but the response shape is now closer to Mambu API conventions.
-- The frontend uses the uploaded HTML page layout and loads data from the backend with `api-init.js`.
-- The backend stores in-memory demo data for the dashboard, loans, savings, members, products, and reports.
-- If you want, I can continue by wiring the form inputs to API POST/PUT requests and adding persistent storage.
+If a local `Qona-MBS/server/` directory still exists on your machine, it holds only
+untracked files (`node_modules`, `.env`, a dev SQLite database) and can be deleted
+by hand.
+
+## Status
+
+Not production. It has never been run against real member data, and
+`platform/README.md` lists what has to happen first — including prudential thresholds
+that are stored as data marked UNVERIFIED rather than as regulatory fact.
