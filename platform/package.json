@@ -1,0 +1,27 @@
+{
+  "name": "sacco-platform",
+  "version": "1.0.0",
+  "description": "Multi-tenant core banking platform for SACCOs. Schema per tenant.",
+  "main": "src/server.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test/isolation.test.js",
+    "migrate": "node bin/cli.js migrate:platform && node bin/cli.js migrate:all",
+    "cli": "node bin/cli.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
