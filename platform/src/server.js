@@ -61,6 +61,8 @@ admin.post('/backups/run', wrap((req) => (req.body?.slug
   : backup.backupAll({}))));
 admin.post('/backups/prune', wrap((req) => backup.prune(req.body || {})));
 admin.post('/backups/verify', wrap((req) => backup.verifyLatest(req.body?.slug)));
+admin.post('/backups/rekey', wrap((req) => backup.rekeyAll(req.body || {})));
+admin.get('/backups/keys', wrap(() => backup.keyReport({})));
 
 app.use('/admin', admin);
 
@@ -86,6 +88,7 @@ tenantApi.use('/accounting', savings.accounting);
 const shares = require('./routes/shares');
 tenantApi.use('/shares', shares);
 tenantApi.use('/dividends', shares.dividends);
+tenantApi.use('/reports', require('./routes/reports'));
 
 tenantApi.get('/', requireAuth(), (req, res) => res.json({
   tenant: req.tenant.slug,

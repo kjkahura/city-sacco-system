@@ -3,6 +3,7 @@
 const { pool } = require('../db/pool');
 const { withTenant } = require('../db/tenantContext');
 const L = require('../domain/loans');
+const P = require('../domain/penalties');
 
 /**
  * End-of-day processing.
@@ -51,6 +52,15 @@ const JOBS = {
       }
       return { loans: rows.length, accrued, total: Math.round(total * 100) / 100 };
     });
+  },
+
+  /**
+   * Charge late payment penalties. Runs after markArrears so the arrears
+   * state is current, and is safe to rerun: the unique index on
+   * (installment_id, charged_on) refuses a second charge for the same day.
+   */
+  async accruePenalties(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => P.accrueAll(c, { asOf: businessDate }));
   },
 
   /** Flag overdue installments and move loans into arrears. */
@@ -109,7 +119,8 @@ async function runJob(tenant, job, { businessDate = null, force = false } = {}) 
 }
 
 /** Run the full end-of-day sequence across every active tenant. */
-async function runAll({ businessDate = null, jobs = ['accrueInterest', 'markArrears'], force = false } = {}) {
+async function runAll({ businessDate = null,
+  jobs = ['accrueInterest', 'markArrears', 'accruePenalties'], force = false } = {}) {
   const { rows: tenants } = await pool.query(
     "SELECT id, slug, schema_name FROM platform.tenants WHERE status = 'ACTIVE' ORDER BY slug");
   const results = [];

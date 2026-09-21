@@ -113,6 +113,23 @@ const COMMANDS = {
     console.log(`pruned ${pruned.length} old dumps`);
   },
 
+  async 'backup:rekey'() {
+    const out = await backup.rekeyAll({ slug: arg('slug') });
+    console.log(`current key: ${out.currentKeyId}`);
+    for (const f of out.files) {
+      console.log(f.skipped ? `  --   ${f.slug}/${f.file} ${f.skipped}`
+        : f.ok ? `  ok   ${f.slug}/${f.file} ${f.from} -> ${f.to}`
+        : `  FAIL ${f.slug}/${f.file}: ${f.error}`);
+    }
+    if (out.files.some((f) => f.ok === false)) process.exitCode = 1;
+  },
+
+  async 'backup:keys'() {
+    for (const r of backup.keyReport({})) {
+      console.log(`  ${r.slug.padEnd(20)} v${r.version ?? '?'} key=${r.keyId || '(v1, unlabelled)'}  ${r.file}`);
+    }
+  },
+
   async 'tokens:prune'() {
     console.log(`pruned ${await tokens.prune(Number(arg('days', 60)))} expired refresh tokens`);
   },

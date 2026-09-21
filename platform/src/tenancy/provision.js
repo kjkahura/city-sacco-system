@@ -24,22 +24,30 @@ function toSchemaName(slug) {
   return `tenant_${slug}`;
 }
 
-/** Minimal chart of accounts every SACCO starts with. */
+/**
+ * Minimal chart of accounts every SACCO starts with.
+ *
+ * The fourth column is the regulatory class. Prudential ratios need to know
+ * which liabilities are member deposits and which assets count as liquid,
+ * and that cannot be derived from the account type alone. It is seeded here
+ * as well as backfilled by migration 003, because provisioning seeds these
+ * rows after migrations have already run.
+ */
 const SEED_GL = [
-  ['100-100', 'Loan Portfolio', 'ASSET', null],
-  ['100-200', 'Cash on Hand', 'ASSET', null],
-  ['100-210', 'Bank Account', 'ASSET', null],
-  ['100-220', 'Mobile Money Settlement', 'ASSET', null],
-  ['100-300', 'Interest Receivable', 'ASSET', null],
-  ['200-100', 'Member Deposits', 'LIABILITY', null],
-  ['200-200', 'Dividends Payable', 'LIABILITY', null],
-  ['300-100', 'Share Capital', 'EQUITY', null],
-  ['300-200', 'Retained Earnings', 'EQUITY', null],
-  ['400-100', 'Interest Income on Loans', 'INCOME', null],
-  ['400-200', 'Fee and Commission Income', 'INCOME', null],
-  ['500-100', 'Interest Expense on Deposits', 'EXPENSE', null],
-  ['500-200', 'Operating Expenses', 'EXPENSE', null],
-  ['500-300', 'Loan Loss Provision', 'EXPENSE', null],
+  ['100-100', 'Loan Portfolio',              'ASSET',     'LOAN_PORTFOLIO'],
+  ['100-200', 'Cash on Hand',                'ASSET',     'LIQUID_ASSET'],
+  ['100-210', 'Bank Account',                'ASSET',     'LIQUID_ASSET'],
+  ['100-220', 'Mobile Money Settlement',     'ASSET',     'LIQUID_ASSET'],
+  ['100-300', 'Interest Receivable',         'ASSET',     'OTHER_ASSET'],
+  ['200-100', 'Member Deposits',             'LIABILITY', 'MEMBER_DEPOSIT'],
+  ['200-200', 'Dividends Payable',           'LIABILITY', 'SHORT_TERM_LIABILITY'],
+  ['300-100', 'Share Capital',               'EQUITY',    'SHARE_CAPITAL'],
+  ['300-200', 'Retained Earnings',           'EQUITY',    'INSTITUTIONAL_CAPITAL'],
+  ['400-100', 'Interest Income on Loans',    'INCOME',    'INCOME'],
+  ['400-200', 'Fee and Commission Income',   'INCOME',    'INCOME'],
+  ['500-100', 'Interest Expense on Deposits','EXPENSE',   'EXPENSE'],
+  ['500-200', 'Operating Expenses',          'EXPENSE',   'EXPENSE'],
+  ['500-300', 'Loan Loss Provision',         'EXPENSE',   'EXPENSE'],
 ];
 
 const SEED_CHANNELS = [
@@ -99,10 +107,12 @@ async function provisionTenant({
     await migrateTenant(schemaName);
 
     await withTenant(schemaName, async (c) => {
-      for (const [code, gname, type, parent] of SEED_GL) {
+      for (const [code, gname, type, regClass] of SEED_GL) {
         await c.query(
-          'INSERT INTO gl_accounts (code, name, type, parent_code) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING',
-          [code, gname, type, parent]
+          `INSERT INTO gl_accounts (code, name, type, regulatory_class)
+           VALUES ($1,$2,$3,$4)
+           ON CONFLICT (code) DO UPDATE SET regulatory_class = EXCLUDED.regulatory_class`,
+          [code, gname, type, regClass]
         );
       }
       for (const [id, cname, ctype, gl] of SEED_CHANNELS) {

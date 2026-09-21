@@ -12,8 +12,9 @@ const { spawn } = require('child_process');
  *   dir       copy to another filesystem path. Real offsite when that path
  *             is an NFS mount, an attached volume, or a synced folder.
  *   command   shell out to whatever the operator already uses:
- *             aws s3 cp, rclone copy, gsutil, scp. The command receives
- *             {src} and {name} placeholders.
+ *             aws s3 cp, rclone copy, gsutil, scp. The push command receives
+ *             {src}, {name} and {slug}; the pull command set in
+ *             BACKUP_OFFSITE_PULL receives {dest}, {name} and {slug}.
  *
  * No cloud SDK, and no hand-rolled request signing. Shipping an untested
  * SigV4 implementation into a backup path would be worse than using the
@@ -67,18 +68,38 @@ async function ship(file, { target = process.env.BACKUP_OFFSITE, slug } = {}) {
   return { shipped: true, driver: 'command', command: parts[0] };
 }
 
-/** Fetch a backup back from the dir driver. The command driver is one-way
- *  here by design: pulling from S3 is the operator's own tooling. */
-async function fetch(name, { target = process.env.BACKUP_OFFSITE, slug, to } = {}) {
+/**
+ * Pull a backup back.
+ *
+ * A backup you cannot retrieve is not a backup, so the command driver is
+ * two-way as well: set BACKUP_OFFSITE_PULL to the inverse of your push
+ * command, e.g.
+ *   cmd:aws s3 cp s3://bucket/{slug}/{name} {dest}
+ */
+async function fetch(name, { target = process.env.BACKUP_OFFSITE,
+                             pull = process.env.BACKUP_OFFSITE_PULL, slug, to } = {}) {
   const cfg = parse(target);
-  if (!cfg || cfg.driver !== 'dir') {
-    throw new Error('fetch is only supported for the dir driver');
-  }
-  const src = path.join(cfg.dest, slug || '', name);
-  if (!fs.existsSync(src)) throw new Error(`offsite file not found: ${src}`);
+  if (!cfg) throw new Error('BACKUP_OFFSITE not configured');
   fs.mkdirSync(path.dirname(to), { recursive: true });
-  await fs.promises.copyFile(src, to);
-  return { path: to, bytes: fs.statSync(to).size };
+
+  if (cfg.driver === 'dir') {
+    const src = path.join(cfg.dest, slug || '', name);
+    if (!fs.existsSync(src)) throw new Error(`offsite file not found: ${src}`);
+    await fs.promises.copyFile(src, to);
+    return { path: to, bytes: fs.statSync(to).size, driver: 'dir' };
+  }
+
+  const pullCfg = parse(pull);
+  if (!pullCfg || pullCfg.driver !== 'command') {
+    throw new Error(
+      'pulling with the command driver needs BACKUP_OFFSITE_PULL set to the inverse '
+      + 'of your push command, e.g. cmd:aws s3 cp s3://bucket/{slug}/{name} {dest}');
+  }
+  const parts = pullCfg.cmd.split(/\s+/).filter(Boolean)
+    .map((a) => a.replace('{dest}', to).replace('{name}', name).replace('{slug}', slug || ''));
+  await run(parts[0], parts.slice(1));
+  if (!fs.existsSync(to)) throw new Error(`pull command completed but ${to} was not written`);
+  return { path: to, bytes: fs.statSync(to).size, driver: 'command' };
 }
 
 function list({ target = process.env.BACKUP_OFFSITE, slug } = {}) {
