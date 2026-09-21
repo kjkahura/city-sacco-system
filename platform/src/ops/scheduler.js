@@ -48,7 +48,7 @@ const TASKS = [
   {
     name: 'end-of-day',
     hour: Number(process.env.EOD_HOUR ?? 22),
-    run: () => eod.runAll({ jobs: ['accrueInterest', 'markArrears'] }),
+    run: () => eod.runAll({ jobs: ['accrueInterest', 'markArrears', 'accruePenalties'] }),
   },
   {
     name: 'backup',

@@ -5,3 +5,5 @@ node_modules/
 backups/
 .tmp-offsite/
 .tmp-backups2/
+.tmp-offsite-fin/
+.tmp-backups-fin/

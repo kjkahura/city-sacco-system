@@ -239,4 +239,61 @@ async function verifyLatest(slug, { dir = DIR } = {}) {
   }
 }
 
-module.exports = { backupTenant, backupAll, restoreTenant, prune, verifyLatest, DIR, crypt, offsite };
+/**
+ * Re-encrypt every stored backup with the current key.
+ *
+ * Run after rotating BACKUP_ENCRYPTION_KEY, with the old key still present
+ * in BACKUP_ENCRYPTION_KEYS_OLD. Each file is verified before it is
+ * replaced, and a failure leaves the original untouched, so a half-finished
+ * rekey never costs you a backup.
+ */
+async function rekeyAll({ dir = DIR, slug = null } = {}) {
+  const { rows } = await pool.query(
+    'SELECT slug FROM platform.tenants WHERE ($1::text IS NULL OR slug = $1)', [slug]);
+  const results = [];
+  const currentId = crypt.keyId(crypt.currentKey());
+
+  for (const t of rows) {
+    const d = path.join(dir, t.slug);
+    if (!fs.existsSync(d)) continue;
+    for (const f of fs.readdirSync(d).filter((x) => x.endsWith('.enc'))) {
+      const full = path.join(d, f);
+      const before = crypt.inspect(full);
+      if (before.keyId === currentId) {
+        results.push({ slug: t.slug, file: f, skipped: 'ALREADY_CURRENT_KEY' });
+        continue;
+      }
+      try {
+        const out = await crypt.rekeyFile(full);
+        const digest = await sha256File(full);
+        await pool.query(
+          'UPDATE platform.backup_runs SET sha256 = $1, bytes = $2 WHERE path = $3',
+          [digest, out.bytes, full]
+        );
+        results.push({ slug: t.slug, file: f, from: out.fromKeyId || 'v1', to: out.toKeyId, ok: true });
+      } catch (e) {
+        results.push({ slug: t.slug, file: f, ok: false, error: e.message });
+      }
+    }
+  }
+  return { currentKeyId: currentId, files: results };
+}
+
+/** Which key each stored backup is encrypted with. */
+function keyReport({ dir = DIR } = {}) {
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const slug of fs.readdirSync(dir)) {
+    const d = path.join(dir, slug);
+    if (!fs.statSync(d).isDirectory()) continue;
+    for (const f of fs.readdirSync(d).filter((x) => x.endsWith('.enc'))) {
+      out.push({ slug, file: f, ...crypt.inspect(path.join(d, f)) });
+    }
+  }
+  return out;
+}
+
+module.exports = {
+  backupTenant, backupAll, restoreTenant, prune, verifyLatest,
+  rekeyAll, keyReport, DIR, crypt, offsite,
+};

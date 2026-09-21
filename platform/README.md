@@ -10,7 +10,7 @@ operators) because they are sensible, not because Mambu invented them.
 cp .env.example .env          # set PGDATABASE and JWT_SECRET
 npm install
 npm run migrate               # platform schema, then every tenant
-npm test                      # 186 assertions across four suites
+npm test                      # 240 assertions across five suites
 npm start
 ```
 
@@ -85,12 +85,14 @@ src/
   domain/
     accounting.js      double-entry posting, reversal, trial balance
     loans.js           lifecycle, schedule, allocation, guarantors, arrears
+    penalties.js       late payment charges, grace, waiver
+    reports.js         balance sheet, income statement, prudential, PAR
     savings.js         deposit, withdraw, transfer, pledged-balance rules
     shares.js          share capital and the dividend cycle
   ops/
     eod.js             end-of-day jobs, idempotent per business date
     backup.js          pg_dump per tenant, retention, restore verification
-    crypt.js           AES-256-GCM streaming encryption for dumps
+    crypt.js           AES-256-GCM streaming encryption, key ring, rekey
     offsite.js         dir and command drivers for shipping backups
     scheduler.js       in-process timer behind a Postgres advisory lock
   routes/              auth, members, loans, savings, shares, accounting
@@ -103,6 +105,7 @@ test/isolation.test.js  36 assertions
 test/lending.test.js    48 assertions
 test/ops.test.js        50 assertions
 test/security.test.js   52 assertions
+test/finance.test.js    54 assertions
 ```
 
 ## What the database enforces, not the app
@@ -358,18 +361,96 @@ This is safer, not zero-downtime. A migration taking an ACCESS EXCLUSIVE
 lock still blocks that tenant while it runs. Keep migrations short and
 additive.
 
+## Penalties
+
+Charged per installment per day, with a per-product rate, a grace period,
+and a choice of basis: `OVERDUE` applies the rate to the amount actually in
+arrears, `OUTSTANDING` to the whole remaining principal. SACCOs price it
+both ways.
+
+Rerunning the accrual charges nothing extra. A unique index on
+`(installment_id, charged_on)` combined with `ON CONFLICT DO NOTHING` makes
+a repeat a genuine no-op. Worth being precise about why it is written that
+way: catching a unique violation in application code does not work inside a
+transaction, because Postgres aborts the entire transaction on any statement
+error and every later statement then fails. `ON CONFLICT` never raises.
+
+Penalties sit first in the repayment allocation order, ahead of fees.
+
+Waiving is common and is a management decision, so it reverses the posting
+rather than deleting the charge. Both the penalty and the waiver, with who
+waived it and why, stay on the record.
+
+## Reporting
+
+```
+GET /api/reports/balance-sheet?asAt=
+GET /api/reports/income-statement?from=&to=
+GET /api/reports/prudential?asAt=
+GET /api/reports/portfolio-at-risk?asAt=
+GET /api/reports/limits
+```
+
+All built from posted journal lines, so they cannot drift from the ledger.
+
+The balance sheet carries the current period surplus as its own equity line,
+labelled as not yet closed, because no year-end closing entry has run. The
+test asserts the sheet balances and that this figure equals the income
+statement's surplus.
+
+**Portfolio at risk** buckets outstanding principal by days late
+(1-30, 31-90, 91-180, 181-360, over 360) and reports PAR as a percentage.
+
+## Prudential ratios, and what they are not
+
+The ratios are computed from GL accounts tagged with a `regulatory_class`,
+because a balance sheet can be built from account type alone but prudential
+ratios cannot: they need to know which liabilities are member deposits,
+which assets count as liquid, and which equity is institutional rather than
+members' own share capital.
+
+**The thresholds are not verified.** They live in the `prudential_limits`
+table, seeded with commonly cited values and a `source_note` marking most of
+them UNVERIFIED. I could confirm the KES 10 million minimum core capital and
+the 15% liquidity floor from published sources; the individual capital
+ratios I could not confirm from anything I would build regulatory code on.
+
+The arithmetic is tested. The limits are yours to confirm against the
+current SASRA circular, and the report carries that disclaimer in its own
+payload so it cannot be mistaken for a filing.
+
+## Backup key rotation
+
+Each encrypted file records which key wrote it. `BACKUP_ENCRYPTION_KEY` is
+the current key; `BACKUP_ENCRYPTION_KEYS_OLD` holds retired ones so older
+dumps still restore.
+
+```bash
+# 1. put the new key in BACKUP_ENCRYPTION_KEY, the old one in KEYS_OLD
+npm run cli backup:keys     # which key each stored dump uses
+npm run cli backup:rekey    # re-encrypt everything with the current key
+# 2. once every file reports the new key, drop KEYS_OLD
+```
+
+Each file is decrypted, re-encrypted, verified by a full round trip, and
+only then replaced. A failure leaves the original untouched, so a
+half-finished rekey never costs you a backup. Files already on the current
+key are skipped.
+
+Pre-rotation files (format v1, no key id) are still readable: every
+configured key is tried in turn.
+
 ## Not done yet
 
-1. **No penalty accrual.** The columns and allocation order exist; nothing
-   calculates or posts a late-payment penalty.
-2. **Share purchases do not reverse.** Savings and loan transactions do.
-3. **No reporting beyond the trial balance.** No balance sheet, income
-   statement, or SASRA returns.
-4. **The offsite `command` driver is one-way.** `fetch` only works for the
-   `dir` driver; pulling from S3 is the operator's own tooling.
-5. **No key rotation for backups.** Changing `BACKUP_ENCRYPTION_KEY` makes
-   every older dump undecryptable. Keep the old key until its backups have
-   aged out of retention.
+1. **No statutory reserve transfer.** Kenyan SACCOs move a share of surplus
+   to a statutory reserve at year end. There is no year-end closing entry at
+   all yet, which is why the balance sheet shows an unclosed surplus line.
+2. **No loan loss provisioning schedule.** The GL account and write-off path
+   exist, but nothing provisions by PAR bucket.
+3. **No SASRA return formats.** The underlying figures are there; the actual
+   return templates are not, and would need the current forms.
+4. **Reports are unpaginated and uncached.** Fine at SACCO scale, will need
+   attention with millions of journal lines.
 
 ## Before real member data
 

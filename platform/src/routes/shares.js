@@ -53,6 +53,10 @@ router.post('/:id/transfers', ...tx(async (c, req, res, { actor }) => {
   res.status(201).json(await SH.transfer(c, req.params.id, { ...req.body, createdBy: actor }));
 }, APPROVER));
 
+router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
+  res.status(201).json(await SH.reversePurchase(c, req.params.reference, { ...req.body, createdBy: actor }));
+}, APPROVER));
+
 router.get('/:id/movements', requireAuth(), async (req, res, next) => {
   try {
     const rows = await withTenantRead(req.tenant.schema_name, async (c) => (await c.query(

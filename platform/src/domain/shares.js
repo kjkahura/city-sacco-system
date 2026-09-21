@@ -265,6 +265,64 @@ async function pay(c, financialYear, { createdBy } = {}) {
   };
 }
 
+/**
+ * Reverse a share purchase.
+ *
+ * Refused if the member no longer holds the units, because the shares may
+ * have been transferred on and reversing would drive the holding negative.
+ * Also refused once a dividend has been allocated against a record date on
+ * or after the purchase: the allocation used that holding, so unwinding the
+ * purchase silently would leave the dividend overstated with nothing to
+ * show why.
+ */
+async function reversePurchase(c, reference, { narration = 'Reversal', createdBy } = {}) {
+  const { rows } = await c.query(
+    'SELECT * FROM transactions WHERE reference = $1 FOR UPDATE', [reference]);
+  if (!rows.length) throw err('TRANSACTION_NOT_FOUND', 404);
+  const tx = rows[0];
+  if (tx.kind !== 'SHARE_PURCHASE') throw err('NOT_A_SHARE_PURCHASE');
+  if (tx.reversed_by) throw err('TRANSACTION_ALREADY_REVERSED', 409);
+
+  const units = round4(tx.allocation?.units);
+  if (!(units > 0)) throw err('TRANSACTION_HAS_NO_UNITS');
+
+  const a = await lock(c, tx.share_account_id);
+  if (Number(a.units) < units) {
+    throw err(
+      `CANNOT_REVERSE_UNITS_NO_LONGER_HELD: holds ${a.units}, purchase was ${units}`, 409);
+  }
+
+  const { rows: [blocking] } = await c.query(
+    `SELECT d.financial_year FROM dividend_allocations da
+     JOIN dividends d ON d.id = da.dividend_id
+     WHERE da.member_id = $1 AND d.record_date >= $2::date
+     ORDER BY d.financial_year LIMIT 1`,
+    [a.member_id, tx.value_date]
+  );
+  if (blocking) {
+    throw err(
+      `DIVIDEND_${blocking.financial_year}_ALREADY_ALLOCATED_ON_THIS_HOLDING; `
+      + 'reverse or adjust the dividend first', 409);
+  }
+
+  const entry = await acct.reverse(c, tx.entry_id, narration, createdBy);
+
+  await c.query('UPDATE share_accounts SET units = units - $1 WHERE id = $2', [units, a.id]);
+  await c.query(
+    `INSERT INTO share_movements (account_id, member_id, units, unit_price, amount, kind, entry_id, value_date)
+     VALUES ($1,$2,$3,$4,$5,'REVERSAL',$6,$7::date)`,
+    [a.id, a.member_id, -units, a.unit_price, tx.amount, entry.entryId, tx.value_date]
+  );
+
+  const rev = await savings.record(c, {
+    reference: savings.ref('REV'), kind: 'REVERSAL', memberId: a.member_id,
+    shareAccountId: a.id, amount: -tx.amount, entryId: entry.entryId,
+    allocation: { reversalOf: tx.reference, units: -units }, narration, createdBy,
+  });
+  await c.query('UPDATE transactions SET reversed_by = $1 WHERE id = $2', [rev.id, tx.id]);
+  return rev;
+}
+
 async function register(c, { asAt = null } = {}) {
   const { rows } = await c.query(
     `SELECT m.id AS member_id, m.member_no, m.first_name, m.last_name,
@@ -277,4 +335,4 @@ async function register(c, { asAt = null } = {}) {
   return rows;
 }
 
-module.exports = { open, purchase, transfer, declare, allocate, pay, register, lock };
+module.exports = { open, purchase, transfer, reversePurchase, declare, allocate, pay, register, lock };

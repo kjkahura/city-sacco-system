@@ -255,11 +255,9 @@ async function call(method, p, { token, tenant = SLUG, body } = {}) {
     check('plaintext dump is not left on disk',
       !fs.existsSync(b.file.replace(/\.enc$/, '')), 'plaintext still present');
 
-    const head = Buffer.alloc(8);
-    const fd = fs.openSync(b.file, 'r');
-    fs.readSync(fd, head, 0, 8, 0);
-    fs.closeSync(fd);
-    check('file carries the format magic', head.toString('utf8') === 'SACCOBK1', head.toString('utf8'));
+    const meta = crypt.inspect(b.file);
+    check('file carries the format magic and key id',
+      meta.version === 2 && /^[0-9a-f]{8}$/.test(meta.keyId), JSON.stringify(meta));
 
     const raw = fs.readFileSync(b.file);
     check('ciphertext does not contain the schema name in clear',

@@ -5,6 +5,7 @@ const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const { notFound, paginate, withPaginationHeaders } = require('../lib/http');
 const L = require('../domain/loans');
+const P = require('../domain/penalties');
 
 const router = express.Router();
 
@@ -149,6 +150,18 @@ router.post('/:id/write-off', ...tx(async (c, req, res, { actor }) => {
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
   res.status(201).json(await L.reverseTransaction(c, req.params.reference, { ...req.body, createdBy: actor }));
 }, APPROVER));
+
+router.get('/:id/penalties', ...read((c, req) => P.forLoan(c, req.params.id)));
+
+router.post('/:id/penalties/accrue', ...tx((c, req, _res, { actor }) =>
+  P.accrueForLoan(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+
+// Waiving reverses the posting rather than deleting the charge, so both the
+// penalty and the decision to waive it stay on the record.
+router.post('/penalties/:chargeId/waive', ...tx((c, req, _res, { actor }) =>
+  P.waive(c, req.params.chargeId, { ...req.body, createdBy: actor }), APPROVER));
+
+router.post('/penalties/run', ...tx((c, req) => P.accrueAll(c, req.body), APPROVER));
 
 router.post('/arrears/run', ...tx((c, req) => L.markArrears(c, req.body), APPROVER));
 
