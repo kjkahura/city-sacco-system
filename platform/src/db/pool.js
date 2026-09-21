@@ -1,6 +1,14 @@
 'use strict';
 
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+
+// pg returns numeric as a string to avoid silent precision loss. Money here is
+// numeric(18,2) in KES; the largest value that fits is far inside JS's safe
+// integer range once scaled by 100, so parsing to Number is lossless for this
+// domain and saves parseFloat noise at every call site. All arithmetic that
+// changes a balance is still done in SQL, on the numeric type, never in JS.
+types.setTypeParser(types.builtins.NUMERIC, (v) => (v === null ? null : Number(v)));
+types.setTypeParser(types.builtins.INT8, (v) => (v === null ? null : Number(v)));
 
 /**
  * One pool for the whole process, not one per tenant.
