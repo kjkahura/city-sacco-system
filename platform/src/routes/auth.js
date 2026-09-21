@@ -4,7 +4,8 @@ const express = require('express');
 const { pool } = require('../db/pool');
 const { verifyPassword, hashPassword } = require('../auth/passwords');
 const tokens = require('../auth/tokens');
-const { requireAuth } = require('../tenancy/resolve');
+const mfa = require('../auth/mfa');
+const { requireAuth, signToken } = require('../tenancy/resolve');
 const { apiError } = require('../lib/http');
 const { loginRateLimit, clearLoginAttempts } = require('../lib/limits');
 
@@ -27,7 +28,8 @@ router.post('/login', loginRateLimit(), async (req, res, next) => {
     if (!email || !password) return apiError(res, 400, 400, 'EMAIL_AND_PASSWORD_REQUIRED');
 
     const { rows } = await pool.query(
-      `SELECT u.id, u.email, u.password_hash, u.role, u.status, u.full_name, t.slug AS tenant_slug
+      `SELECT u.id, u.email, u.password_hash, u.role, u.status, u.full_name,
+              u.mfa_enabled, t.slug AS tenant_slug
        FROM platform.users u
        JOIN platform.tenants t ON t.id = u.tenant_id
        WHERE u.tenant_id = $1 AND lower(u.email) = lower($2)`,
@@ -46,8 +48,31 @@ router.post('/login', loginRateLimit(), async (req, res, next) => {
       return apiError(res, 401, 401, 'INVALID_CREDENTIALS');
     }
 
-    clearLoginAttempts(req);
+    await clearLoginAttempts(req);
     await recordAttempt(req, email, true);
+
+    // A correct password is the first factor. When the tenant's policy or
+    // the user's own enrolment demands a second, hand back a short-lived
+    // ticket rather than a session.
+    if (await mfa.isRequired(user, req.tenant)) {
+      if (!user.mfa_enabled) {
+        // Requiring MFA without a way in would lock a fresh tenant out of
+        // its own admin account: you cannot enrol without a session, and
+        // you cannot get a session without enrolling. Issue a token scoped
+        // to the enrolment endpoints and nothing else.
+        return res.status(403).json({
+          errors: [{ errorCode: 403, errorReason: 'MFA_ENROLMENT_REQUIRED' }],
+          enrolmentRequired: true,
+          enrolmentToken: signToken({
+            sub: user.id, email: user.email, role: user.role,
+            tid: user.tenant_slug, scope: 'mfa_enrolment',
+          }, '10m'),
+        });
+      }
+      const challenge = await mfa.issueChallenge(user, { ip: req.ip });
+      return res.json({ mfaRequired: true, ...challenge });
+    }
+
     await pool.query('UPDATE platform.users SET last_login_at = now() WHERE id = $1', [user.id]);
 
     const pair = await tokens.issue(user, {
@@ -126,6 +151,77 @@ router.post('/password', requireAuth(), async (req, res, next) => {
     const revoked = await tokens.revokeAll(req.auth.sub);
     res.json({ changed: true, sessionsRevoked: revoked });
   } catch (e) { next(e); }
+});
+
+// --- second factor --------------------------------------------------------
+
+/** Exchange an MFA ticket plus a code for a real session. */
+router.post('/mfa/verify', loginRateLimit({ perIp: 30, perAccount: 30 }), async (req, res, next) => {
+  try {
+    const { mfaTicket, code, recoveryCode } = req.body || {};
+    if (!mfaTicket) return apiError(res, 400, 400, 'MFA_TICKET_REQUIRED');
+    if (!code && !recoveryCode) return apiError(res, 400, 400, 'CODE_OR_RECOVERY_CODE_REQUIRED');
+
+    const { user, usedRecovery, recoveryCodesRemaining } =
+      await mfa.verifyChallenge(mfaTicket, { token: code, recoveryCode });
+
+    await pool.query('UPDATE platform.users SET last_login_at = now() WHERE id = $1', [user.id]);
+    const pair = await tokens.issue(user, { userAgent: req.get('user-agent'), ip: req.ip });
+
+    res.json({
+      ...pair,
+      user: { id: user.id, email: user.email, role: user.role, name: user.full_name },
+      ...(usedRecovery ? { usedRecoveryCode: true, recoveryCodesRemaining } : {}),
+    });
+  } catch (e) {
+    if (e.status) return apiError(res, e.status, e.status, e.message);
+    next(e);
+  }
+});
+
+router.get('/mfa', requireAuth(), async (req, res, next) => {
+  try { res.json(await mfa.status(req.auth.sub)); } catch (e) { next(e); }
+});
+
+/** Step 1: get a secret to scan. MFA is not on yet. */
+const allowEnrolmentScope = (req, res, next) => {
+  if (!req.auth) return apiError(res, 401, 401, 'AUTHENTICATION_REQUIRED');
+  if (req.auth.scope && req.auth.scope !== 'mfa_enrolment') {
+    return apiError(res, 403, 403, 'WRONG_TOKEN_SCOPE');
+  }
+  next();
+};
+
+router.post('/mfa/enrol', allowEnrolmentScope, async (req, res, next) => {
+  try {
+    res.json(await mfa.beginEnrolment(
+      { id: req.auth.sub, email: req.auth.email },
+      { issuer: req.tenant?.name || 'SACCO Platform' }
+    ));
+  } catch (e) { next(e); }
+});
+
+/** Step 2: prove the authenticator works, then it switches on. */
+router.post('/mfa/confirm', allowEnrolmentScope, async (req, res, next) => {
+  try {
+    if (!req.body?.code) return apiError(res, 400, 400, 'CODE_REQUIRED');
+    res.json(await mfa.completeEnrolment(req.auth.sub, req.body.code));
+  } catch (e) {
+    if (e.status) return apiError(res, e.status, e.status, e.message);
+    next(e);
+  }
+});
+
+router.post('/mfa/disable', requireAuth(), async (req, res, next) => {
+  try {
+    if (!req.body?.code) return apiError(res, 400, 400, 'CODE_REQUIRED');
+    const out = await mfa.disable(req.auth.sub, req.body.code);
+    await tokens.revokeAll(req.auth.sub);
+    res.json(out);
+  } catch (e) {
+    if (e.status) return apiError(res, e.status, e.status, e.message);
+    next(e);
+  }
 });
 
 module.exports = router;

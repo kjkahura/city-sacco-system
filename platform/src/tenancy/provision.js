@@ -61,6 +61,7 @@ const SEED_CHANNELS = [
 async function provisionTenant({
   slug, name, countryCode = 'KE', currencyCode = 'KES',
   timezone = 'Africa/Nairobi', plan = 'STANDARD',
+  mfaRequiredRoles = null,   // null keeps the secure default (TENANT_ADMIN)
   adminEmail, adminPassword, adminName,
 }) {
   const schemaName = toSchemaName(slug);
@@ -79,9 +80,11 @@ async function provisionTenant({
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `INSERT INTO platform.tenants (slug, schema_name, name, country_code, currency_code, timezone, plan, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'PROVISIONING') RETURNING *`,
-      [slug, schemaName, name, countryCode, currencyCode, timezone, plan]
+      `INSERT INTO platform.tenants (slug, schema_name, name, country_code, currency_code, timezone, plan, status,
+                                     mfa_required_roles)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'PROVISIONING',
+               COALESCE($8::text[], ARRAY['TENANT_ADMIN']::text[])) RETURNING *`,
+      [slug, schemaName, name, countryCode, currencyCode, timezone, plan, mfaRequiredRoles]
     );
     tenant = rows[0];
     await client.query('COMMIT');

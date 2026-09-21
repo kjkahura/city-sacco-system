@@ -1,81 +1,77 @@
 'use strict';
 
 const { apiError } = require('./http');
+const store = require('./ratestore');
 
 /**
  * Rate limiting and per-tenant concurrency.
  *
- * Both are in-process. On one node that is exactly right; across several you
- * want Redis, and the counters here become per-node. Said plainly rather
- * than pretended otherwise: with N nodes the effective limit is N times the
- * configured one.
+ * Rate counters go through ratestore, which is Redis-backed when REDIS_URL
+ * is set and in-process otherwise. With Redis the limit is fleet-wide;
+ * without it, it is per-node and the effective limit is N times looser.
+ *
+ * Concurrency gates are deliberately still per-process. They protect this
+ * node's connection pool, which is a local resource, so a local counter is
+ * the correct scope rather than a limitation.
  */
 
 // --------------------------------------------------------------------------
-// Sliding-window rate limiter
+// Rate limiting
 // --------------------------------------------------------------------------
 
-const buckets = new Map();
-
-function hit(key, limit, windowMs) {
-  const now = Date.now();
-  let b = buckets.get(key);
-  if (!b || now - b.start >= windowMs) {
-    b = { start: now, count: 0 };
-    buckets.set(key, b);
-  }
-  b.count += 1;
-  return { allowed: b.count <= limit, count: b.count, resetMs: b.start + windowMs - now };
+function windowKey(prefix, id, windowMs) {
+  // Bucketing the key by window start keeps Redis keys self-expiring and
+  // makes the window behave the same on both backends.
+  return `rl:${prefix}:${id}:${Math.floor(Date.now() / windowMs)}`;
 }
-
-// Bounded cleanup so the map cannot grow without limit under key churn.
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, b] of buckets) if (now - b.start > 600_000) buckets.delete(k);
-}, 60_000).unref();
 
 /** General API limiter, keyed by tenant plus caller. */
 function rateLimit({ limit = 600, windowMs = 60_000, keyFn } = {}) {
-  return (req, res, next) => {
-    const perTenant = req.tenant?.rate_limit_per_min || limit;
-    const key = keyFn ? keyFn(req)
-      : `${req.tenant?.slug || 'anon'}:${req.auth?.sub || req.ip}`;
-    const r = hit(key, perTenant, windowMs);
-    res.set('x-ratelimit-limit', String(perTenant));
-    res.set('x-ratelimit-remaining', String(Math.max(0, perTenant - r.count)));
-    if (!r.allowed) {
-      res.set('retry-after', String(Math.ceil(r.resetMs / 1000)));
-      return apiError(res, 429, 429, 'RATE_LIMIT_EXCEEDED');
-    }
-    next();
+  return async (req, res, next) => {
+    try {
+      const max = req.tenant?.rate_limit_per_min || limit;
+      const id = keyFn ? keyFn(req) : `${req.tenant?.slug || 'anon'}:${req.auth?.sub || req.ip}`;
+      const r = await store.incr(windowKey('api', id, windowMs), windowMs);
+      res.set('x-ratelimit-limit', String(max));
+      res.set('x-ratelimit-remaining', String(Math.max(0, max - r.count)));
+      if (r.count > max) {
+        res.set('retry-after', String(Math.ceil(r.resetMs / 1000)));
+        return apiError(res, 429, 429, 'RATE_LIMIT_EXCEEDED');
+      }
+      next();
+    } catch (e) { next(e); }
   };
 }
 
 /**
- * Login limiter. Tighter, and keyed on the account as well as the IP so
- * spraying one password across many accounts from one address is caught,
- * and so is hammering one account from many addresses.
+ * Login limiter. Keyed on the account as well as the IP, so spraying one
+ * password across many accounts from one address is caught, and so is
+ * hammering one account from many addresses.
  */
 function loginRateLimit({ perIp = 20, perAccount = 8, windowMs = 900_000 } = {}) {
-  return (req, res, next) => {
-    const email = String(req.body?.email || '').toLowerCase();
-    const tenant = req.tenant?.slug || 'unknown';
-    const byIp = hit(`login:ip:${req.ip}`, perIp, windowMs);
-    const byAccount = hit(`login:acct:${tenant}:${email}`, perAccount, windowMs);
-    if (!byIp.allowed || !byAccount.allowed) {
-      const worst = Math.max(byIp.resetMs, byAccount.resetMs);
-      res.set('retry-after', String(Math.ceil(worst / 1000)));
-      return apiError(res, 429, 429, 'TOO_MANY_LOGIN_ATTEMPTS');
-    }
-    next();
+  return async (req, res, next) => {
+    try {
+      const email = String(req.body?.email || '').toLowerCase();
+      const tenant = req.tenant?.slug || 'unknown';
+      const [byIp, byAccount] = await Promise.all([
+        store.incr(windowKey('login:ip', req.ip, windowMs), windowMs),
+        store.incr(windowKey('login:acct', `${tenant}:${email}`, windowMs), windowMs),
+      ]);
+      if (byIp.count > perIp || byAccount.count > perAccount) {
+        res.set('retry-after', String(Math.ceil(Math.max(byIp.resetMs, byAccount.resetMs) / 1000)));
+        return apiError(res, 429, 429, 'TOO_MANY_LOGIN_ATTEMPTS');
+      }
+      next();
+    } catch (e) { next(e); }
   };
 }
 
-/** Reset a key after a successful login, so one fat-fingered password
+/** Clear the account counter after a success, so one fat-fingered password
  *  does not count against the user for the next fifteen minutes. */
-function clearLoginAttempts(req) {
+async function clearLoginAttempts(req, { windowMs = 900_000 } = {}) {
   const email = String(req.body?.email || '').toLowerCase();
-  buckets.delete(`login:acct:${req.tenant?.slug || 'unknown'}:${email}`);
+  const tenant = req.tenant?.slug || 'unknown';
+  await store.reset(windowKey('login:acct', `${tenant}:${email}`, windowMs));
 }
 
 // --------------------------------------------------------------------------
@@ -86,8 +82,7 @@ function clearLoginAttempts(req) {
  * A counting semaphore per tenant, sized from tenants.max_concurrent_queries.
  *
  * Without this, one SACCO running a heavy report can hold every connection
- * in the shared pool and every other tenant sees timeouts. With it, that
- * SACCO queues against itself and everyone else is unaffected.
+ * in the shared pool and every other tenant sees timeouts.
  */
 const gates = new Map();
 
@@ -114,22 +109,16 @@ function acquire(slug, size, timeoutMs = 10_000) {
 
 function release(g) {
   const next = g.queue.shift();
-  if (next) {
-    clearTimeout(next.timer);
-    next.resolve(() => release(g));
-  } else {
-    g.active = Math.max(0, g.active - 1);
-  }
+  if (next) { clearTimeout(next.timer); next.resolve(() => release(g)); }
+  else g.active = Math.max(0, g.active - 1);
 }
 
-/** Express middleware wrapping the request in the tenant's gate. */
 function tenantConcurrency({ timeoutMs = 10_000 } = {}) {
   return async (req, res, next) => {
     if (!req.tenant) return next();
-    const size = req.tenant.max_concurrent_queries || 6;
     let rel;
     try {
-      rel = await acquire(req.tenant.slug, size, timeoutMs);
+      rel = await acquire(req.tenant.slug, req.tenant.max_concurrent_queries || 6, timeoutMs);
     } catch (e) {
       return apiError(res, 503, 503, e.message);
     }
@@ -142,8 +131,8 @@ function tenantConcurrency({ timeoutMs = 10_000 } = {}) {
 }
 
 const stats = () => ({
-  rateBuckets: buckets.size,
+  rateStore: store.health(),
   gates: [...gates].map(([slug, g]) => ({ slug, size: g.size, active: g.active, queued: g.queue.length })),
 });
 
-module.exports = { rateLimit, loginRateLimit, clearLoginAttempts, tenantConcurrency, acquire, stats, hit };
+module.exports = { rateLimit, loginRateLimit, clearLoginAttempts, tenantConcurrency, acquire, stats, store };

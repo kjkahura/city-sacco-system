@@ -70,6 +70,7 @@ async function call(method, p, { token, tenant = SLUG, body } = {}) {
     await pool.query('DELETE FROM platform.tenants WHERE slug=$1', [SLUG]);
     await provision.provisionTenant({
       slug: SLUG, name: 'Ops Test SACCO',
+      mfaRequiredRoles: [],  // this SACCO has not turned MFA on yet
       adminEmail: 'admin@opstest.local', adminPassword: 'a sufficiently long passphrase',
     });
     const mig = await migrateAllTenants({ concurrency: 4 });

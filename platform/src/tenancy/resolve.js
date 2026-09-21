@@ -19,8 +19,14 @@ const TTL_MS = 60_000;
 async function lookupTenant(slug) {
   const hit = cache.get(slug);
   if (hit && hit.expires > Date.now()) return hit.tenant;
+  // Select every policy column the request path reads. An earlier version
+  // listed columns by hand and silently dropped mfa_required_roles,
+  // max_concurrent_queries and rate_limit_per_min, so per-tenant limits
+  // quietly fell back to the global defaults.
   const { rows } = await pool.query(
-    'SELECT id, slug, schema_name, name, status, currency_code, timezone FROM platform.tenants WHERE slug = $1',
+    `SELECT id, slug, schema_name, name, status, currency_code, timezone,
+            max_concurrent_queries, rate_limit_per_min, mfa_required_roles
+     FROM platform.tenants WHERE slug = $1`,
     [slug]
   );
   const tenant = rows[0] || null;
@@ -93,6 +99,12 @@ function resolveTenant({ required = true } = {}) {
 function requireAuth(...roles) {
   return (req, res, next) => {
     if (!req.auth) return next(new TenantError('authentication required', 401));
+    // A scoped token (currently only mfa_enrolment) is not a session. It
+    // exists so a user who must enrol can reach the enrolment endpoints and
+    // nothing else.
+    if (req.auth.scope) {
+      return next(new TenantError(`token is scoped to ${req.auth.scope} and cannot be used here`, 403));
+    }
     if (req.tenant && req.auth.tid && req.auth.tid !== req.tenant.slug) {
       return next(new TenantError('token tenant mismatch', 403));
     }

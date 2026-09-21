@@ -3,3 +3,5 @@ node_modules/
 *.log
 .tmp-backups/
 backups/
+.tmp-offsite/
+.tmp-backups2/

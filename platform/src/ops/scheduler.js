@@ -4,6 +4,7 @@ const { pool } = require('../db/pool');
 const eod = require('./eod');
 const backup = require('./backup');
 const tokens = require('../auth/tokens');
+const mfa = require('../auth/mfa');
 
 /**
  * Scheduler.
@@ -61,7 +62,10 @@ const TASKS = [
   {
     name: 'token-prune',
     hour: Number(process.env.TOKEN_PRUNE_HOUR ?? 3),
-    run: async () => ({ pruned: await tokens.prune() }),
+    run: async () => ({
+      refreshTokens: await tokens.prune(),
+      mfaChallenges: await mfa.pruneChallenges(),
+    }),
   },
 ];
 
