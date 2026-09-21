@@ -6,6 +6,8 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { pool } = require('../db/pool');
 const { assertSchemaName } = require('../db/tenantContext');
+const crypt = require('./crypt');
+const offsite = require('./offsite');
 
 /**
  * Per-tenant backup.
@@ -68,19 +70,51 @@ async function backupTenant(slug, { dir = DIR } = {}) {
 
     const { size } = fs.statSync(file);
     if (!size) throw new Error('pg_dump produced an empty file');
-    const digest = await sha256File(file);
+
+    // Encrypt at rest. The plaintext dump is removed once the encrypted
+    // copy verifies, so a readable book is never left lying on disk.
+    let finalPath = file;
+    let encrypted = false;
+    if (crypt.isConfigured()) {
+      const enc = `${file}.enc`;
+      await crypt.encryptFile(file, enc);
+      // Round-trip before deleting the plaintext. An encrypted file that
+      // cannot be decrypted is not a backup.
+      const probe = `${file}.probe`;
+      await crypt.decryptFile(enc, probe);
+      if (fs.statSync(probe).size !== size) throw new Error('encryption round trip size mismatch');
+      fs.unlinkSync(probe);
+      fs.unlinkSync(file);
+      finalPath = enc;
+      encrypted = true;
+    }
+
+    const digest = await sha256File(finalPath);
+    const bytes = fs.statSync(finalPath).size;
+
+    let shipped = null;
+    if (encrypted || !crypt.isConfigured()) {
+      try {
+        shipped = await offsite.ship(finalPath, { slug });
+      } catch (e) {
+        // A failed offsite copy must not throw away a good local backup,
+        // but it must be visible rather than swallowed.
+        shipped = { shipped: false, error: e.message };
+      }
+    }
 
     await pool.query(
-      `UPDATE platform.backup_runs SET status='SUCCEEDED', bytes=$1, sha256=$2, finished_at=now()
-       WHERE id=$3`, [size, digest, runRow.id]
+      `UPDATE platform.backup_runs SET status='SUCCEEDED', bytes=$1, sha256=$2,
+         path=$3, finished_at=now() WHERE id=$4`,
+      [bytes, digest, finalPath, runRow.id]
     );
-    return { slug, file, bytes: size, sha256: digest };
+    return { slug, file: finalPath, bytes, sha256: digest, encrypted, offsite: shipped };
   } catch (e) {
     await pool.query(
       "UPDATE platform.backup_runs SET status='FAILED', error=$1, finished_at=now() WHERE id=$2",
       [e.message.slice(0, 1000), runRow.id]
     );
-    try { fs.unlinkSync(file); } catch {}
+    for (const f of [file, `${file}.enc`, `${file}.probe`]) { try { fs.unlinkSync(f); } catch {} }
     throw e;
   }
 }
@@ -135,7 +169,7 @@ async function prune({ dir = DIR, keep = 14 } = {}) {
     const d = path.join(dir, t.slug);
     if (!fs.existsSync(d)) continue;
     const files = fs.readdirSync(d)
-      .filter((f) => f.endsWith('.dump'))
+      .filter((f) => f.endsWith('.dump') || f.endsWith('.enc'))
       .map((f) => ({ f, full: path.join(d, f), mtime: fs.statSync(path.join(d, f)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime);
     for (const old of files.slice(keep)) {
@@ -155,10 +189,19 @@ async function prune({ dir = DIR, keep = 14 } = {}) {
 async function verifyLatest(slug, { dir = DIR } = {}) {
   const d = path.join(dir, slug);
   if (!fs.existsSync(d)) throw new Error(`no backups for ${slug}`);
-  const newest = fs.readdirSync(d).filter((f) => f.endsWith('.dump'))
+  const newest = fs.readdirSync(d).filter((f) => f.endsWith('.dump') || f.endsWith('.enc'))
     .map((f) => ({ f, full: path.join(d, f), mtime: fs.statSync(path.join(d, f)).mtimeMs }))
     .sort((a, b) => b.mtime - a.mtime)[0];
   if (!newest) throw new Error(`no backups for ${slug}`);
+
+  // Decrypt to a temporary plaintext that is removed whatever happens.
+  let restoreFrom = newest.full;
+  let tmpPlain = null;
+  if (newest.full.endsWith('.enc')) {
+    tmpPlain = `${newest.full}.restore-${Date.now()}`;
+    await crypt.decryptFile(newest.full, tmpPlain);
+    restoreFrom = tmpPlain;
+  }
 
   const { rows: [t] } = await pool.query('SELECT schema_name FROM platform.tenants WHERE slug=$1', [slug]);
   const probe = `tenant_verify_${Date.now().toString(36)}`.slice(0, 40);
@@ -172,7 +215,7 @@ async function verifyLatest(slug, { dir = DIR } = {}) {
 
   await pool.query(rename);
   try {
-    await restoreTenant(newest.full, { targetSchema: t.schema_name, confirmOverwrite: true });
+    await restoreTenant(restoreFrom, { targetSchema: t.schema_name, confirmOverwrite: true });
     const { rows: [c] } = await pool.query(
       `SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema = $1)::int AS tables`,
       [t.schema_name]
@@ -181,14 +224,19 @@ async function verifyLatest(slug, { dir = DIR } = {}) {
       "SELECT format('DROP SCHEMA IF EXISTS %I CASCADE', $1::text)", [t.schema_name]);
     await pool.query(drop);
     await pool.query(back);
-    return { slug, file: newest.full, tablesRestored: c.tables, ok: c.tables > 0 };
+    if (tmpPlain) { try { fs.unlinkSync(tmpPlain); } catch {} }
+    return {
+      slug, file: newest.full, encrypted: Boolean(tmpPlain),
+      tablesRestored: c.tables, ok: c.tables > 0,
+    };
   } catch (e) {
     const { rows: [{ format: drop }] } = await pool.query(
       "SELECT format('DROP SCHEMA IF EXISTS %I CASCADE', $1::text)", [t.schema_name]);
     await pool.query(drop).catch(() => {});
     await pool.query(back).catch(() => {});
+    if (tmpPlain) { try { fs.unlinkSync(tmpPlain); } catch {} }
     throw e;
   }
 }
 
-module.exports = { backupTenant, backupAll, restoreTenant, prune, verifyLatest, DIR };
+module.exports = { backupTenant, backupAll, restoreTenant, prune, verifyLatest, DIR, crypt, offsite };

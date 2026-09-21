@@ -10,7 +10,7 @@ operators) because they are sensible, not because Mambu invented them.
 cp .env.example .env          # set PGDATABASE and JWT_SECRET
 npm install
 npm run migrate               # platform schema, then every tenant
-npm test                      # 134 assertions: isolation, lending, ops
+npm test                      # 186 assertions across four suites
 npm start
 ```
 
@@ -80,6 +80,8 @@ src/
   auth/
     passwords.js       scrypt from node:crypto, no native build
     tokens.js          refresh rotation with reuse detection
+    totp.js            RFC 6238, implemented on node:crypto
+    mfa.js             enrolment, challenge tickets, recovery codes
   domain/
     accounting.js      double-entry posting, reversal, trial balance
     loans.js           lifecycle, schedule, allocation, guarantors, arrears
@@ -88,15 +90,19 @@ src/
   ops/
     eod.js             end-of-day jobs, idempotent per business date
     backup.js          pg_dump per tenant, retention, restore verification
+    crypt.js           AES-256-GCM streaming encryption for dumps
+    offsite.js         dir and command drivers for shipping backups
     scheduler.js       in-process timer behind a Postgres advisory lock
   routes/              auth, members, loans, savings, shares, accounting
   lib/
     http.js            error envelope, pagination, filter operators
     limits.js          rate limiting and per-tenant concurrency gates
+    ratestore.js       Redis-backed counters, memory fallback
 bin/cli.js             migrate, provision, drift, eod, backup
 test/isolation.test.js  36 assertions
 test/lending.test.js    48 assertions
 test/ops.test.js        50 assertions
+test/security.test.js   52 assertions
 ```
 
 ## What the database enforces, not the app
@@ -149,6 +155,33 @@ npm run cli backup:verify --slug citysacco
 npm run cli backup:prune --keep 14
 npm run cli tokens:prune --days 60
 ```
+
+## Backups are encrypted and shipped offsite
+
+Set `BACKUP_ENCRYPTION_KEY` and dumps are compressed then encrypted with
+AES-256-GCM, a key derived per file with scrypt from a random salt, so two
+dumps never share key material. Streamed throughout, because a SACCO's dump
+can be gigabytes.
+
+GCM authenticates as well as encrypts: a dump altered on disk or in transit
+**fails to decrypt** rather than restoring silently corrupted data. The test
+flips one byte in the middle of a backup and confirms it is rejected.
+
+The plaintext dump is deleted only after the encrypted copy has been
+decrypted and size-checked. An encrypted file that cannot be decrypted is
+not a backup.
+
+`BACKUP_OFFSITE` takes either driver:
+
+```
+dir:/mnt/offsite                             another filesystem or mount
+cmd:aws s3 cp {src} s3://bucket/{slug}/{name}
+cmd:rclone copyto {src} remote:sacco/{slug}/{name}
+```
+
+No cloud SDK and no hand-rolled request signing. Shipping an untested SigV4
+implementation into a backup path would be worse than calling the tool the
+operator has already configured and can verify themselves.
 
 ## SACCO-specific modelling
 
@@ -235,21 +268,60 @@ sum of allocations equals the amount posted to the payable, exactly.
 A shareholder with no active savings account is **reported, not silently
 skipped**, and the dividend stays `ALLOCATED` until nobody is left unpaid.
 
-## Sessions
+## Sessions and MFA
 
 Access tokens are 15 minutes. Refresh tokens are 30 days, single use, and
 stored only as a SHA-256 hash, so a database dump does not hand over live
-sessions.
+sessions. Rotation detects replay: presenting a spent token revokes the
+**entire family**, logging out both the attacker and the real user. A forced
+re-login beats a silent session hijack. Changing a password revokes
+everything too.
 
-Rotation detects replay. Presenting a token that has already been spent
-revokes the **entire family**, logging out both the attacker and the real
-user. A forced re-login beats a silent session hijack. Changing a password
-revokes every session too.
+**TOTP** is implemented directly on `node:crypto`, about forty lines,
+checked against the RFC 6238 test vector. An authentication primitive is not
+somewhere to inherit a supply chain.
 
-Rate limiting is keyed on both IP and account, so spraying one password
-across many accounts and hammering one account from many addresses are both
-caught. It is in-process: with N app instances the effective limit is N
-times the configured one. Move it to Redis before running more than one.
+Enrolment is two steps. You get a secret, and MFA only switches on once you
+have proved the authenticator produces a working code, because enabling it
+without that check is how people lock themselves out of their own SACCO. Ten
+single-use recovery codes are issued at that point, hashed like any other
+credential and shown exactly once.
+
+Login with MFA is password, then a short-lived ticket, then the code. The
+half-authenticated state is an opaque hashed row in the database, so a
+client holding a ticket has nothing it can use against the API. A ticket
+burns after five wrong codes.
+
+**A code cannot be replayed inside its 30 second window.** The last accepted
+counter is recorded, and a code at that same counter is refused. Someone
+reading a code over your shoulder cannot use it.
+
+Which roles must have a second factor is per tenant
+(`tenants.mfa_required_roles`, default `TENANT_ADMIN`), so a SACCO can
+require it of admins before requiring it of every teller.
+
+There is one subtlety worth knowing about. Requiring MFA of an admin who has
+not enrolled would deadlock a fresh tenant: no session without a code, no
+code without a session. Login in that state returns 403 with an
+**enrolment-scoped token**, valid for ten minutes and accepted by the
+enrolment endpoints and nowhere else. The test suite confirms it is rejected
+on an ordinary route.
+
+## Rate limiting
+
+Counters go through `ratestore`: Redis when `REDIS_URL` is set, in-process
+otherwise. With Redis the limit is fleet-wide, and the test proves a second
+client sees the same counter. Without it, counters are per-node and the
+effective limit is N times looser on N instances.
+
+If Redis is configured but unreachable, the limiter **fails open** and falls
+back to memory. That is deliberate: a rate limiter is a guard rail, and
+failing closed would turn a Redis blip into a total outage for every SACCO.
+The degradation is logged and reported on `/health`.
+
+Concurrency gates stay per-process by design. They protect this node's
+connection pool, which is a local resource, so a local counter is the
+correct scope rather than a limitation.
 
 ## Operations
 
@@ -288,18 +360,16 @@ additive.
 
 ## Not done yet
 
-1. **No MFA.** Password plus a 15-minute token is the whole authentication
-   story. TOTP is the obvious next addition for `TENANT_ADMIN` roles.
-2. **Rate limits and concurrency gates are per-process.** Correct on one
-   node, N times looser on N nodes. Redis-backed counters before scaling out.
-3. **Backups are local disk.** No offsite copy, no encryption at rest on the
-   dump files. Both are needed before real member data.
-4. **No penalty accrual.** The columns and allocation order exist; nothing
-   calculates or posts a late-payment penalty yet.
-5. **Reversal of a share purchase is not implemented.** Savings and loan
-   transactions reverse; share movements do not.
-6. **No reporting beyond the trial balance.** No balance sheet, income
+1. **No penalty accrual.** The columns and allocation order exist; nothing
+   calculates or posts a late-payment penalty.
+2. **Share purchases do not reverse.** Savings and loan transactions do.
+3. **No reporting beyond the trial balance.** No balance sheet, income
    statement, or SASRA returns.
+4. **The offsite `command` driver is one-way.** `fetch` only works for the
+   `dir` driver; pulling from S3 is the operator's own tooling.
+5. **No key rotation for backups.** Changing `BACKUP_ENCRYPTION_KEY` makes
+   every older dump undecryptable. Keep the old key until its backups have
+   aged out of retention.
 
 ## Before real member data
 

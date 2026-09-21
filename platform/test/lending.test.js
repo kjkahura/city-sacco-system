@@ -52,6 +52,7 @@ async function assertBalanced(label) {
     await pool.query('DELETE FROM platform.tenants WHERE slug=$1', [SLUG]);
     await provision.provisionTenant({
       slug: SLUG, name: 'Lending Test SACCO',
+      mfaRequiredRoles: [],  // this SACCO has not turned MFA on yet
       adminEmail: 'admin@lendtest.local', adminPassword: 'a sufficiently long passphrase',
     });
     check('tenant provisioned', true);

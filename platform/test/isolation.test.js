@@ -57,11 +57,12 @@ async function call(method, path, { token, tenant, host, body } = {}) {
     await pool.query("DELETE FROM platform.users WHERE email LIKE '%@isolationtest.local'");
 
     const a = await provision.provisionTenant({
-      slug: 'citysacco', name: 'City SACCO',
+      slug: 'citysacco', name: 'City SACCO', mfaRequiredRoles: [],  // this SACCO has not turned MFA on yet
       adminEmail: 'admin@isolationtest.local', adminPassword: 'correct horse battery',
     });
     const b = await provision.provisionTenant({
       slug: 'washasacco', name: 'Washa SACCO',
+      mfaRequiredRoles: [],  // this SACCO has not turned MFA on yet
       adminEmail: 'admin@isolationtest.local', adminPassword: 'a different long passphrase',
     });
     check('provisioned two tenants', a.status === 'ACTIVE' && b.status === 'ACTIVE');
@@ -75,10 +76,12 @@ async function call(method, path, { token, tenant, host, body } = {}) {
       check(`rejects unsafe schema name ${JSON.stringify(bad).slice(0, 40)}`, threw);
     }
     await throws('reserved slug refused', () => provision.provisionTenant({
-      slug: 'public', name: 'x', adminEmail: 'a@b.co', adminPassword: 'aaaaaaaaaaaa',
+      slug: 'public', name: 'x',
+      adminEmail: 'a@b.co', adminPassword: 'aaaaaaaaaaaa',
     }));
     await throws('slug with SQL refused', () => provision.provisionTenant({
-      slug: 'x"; DROP SCHEMA public; --', name: 'x', adminEmail: 'a@b.co', adminPassword: 'aaaaaaaaaaaa',
+      slug: 'x"; DROP SCHEMA public; --', name: 'x',
+      adminEmail: 'a@b.co', adminPassword: 'aaaaaaaaaaaa',
     }));
 
     section('data does not cross schemas');

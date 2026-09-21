@@ -4,7 +4,7 @@ const express = require('express');
 const { pool } = require('./db/pool');
 const { resolveTenant, requireAuth } = require('./tenancy/resolve');
 const { apiError } = require('./lib/http');
-const { rateLimit, tenantConcurrency, stats } = require('./lib/limits');
+const { rateLimit, tenantConcurrency, stats, store } = require('./lib/limits');
 const provision = require('./tenancy/provision');
 const { drift } = require('./db/migrate');
 const eod = require('./ops/eod');
@@ -29,6 +29,7 @@ app.get('/health', async (_req, res) => {
       status: 'ok',
       time: new Date().toISOString(),
       pool: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount },
+      rateStore: store.health(),
     });
   } catch (e) {
     res.status(503).json({ status: 'degraded', error: e.message });
@@ -106,6 +107,7 @@ app.use((err, _req, res, _next) => {
 
 if (require.main === module) {
   const port = Number(process.env.PORT || 4000);
+  store.connect().then((info) => console.log('[ratestore]', JSON.stringify(info)));
   app.listen(port, () => console.log(`sacco platform listening on :${port}`));
   if (process.env.SCHEDULER === 'on') require('./ops/scheduler').start({});
 }
