@@ -258,8 +258,11 @@ async function ask(fields, title) {
     const dlg = document.createElement('dialog');
     dlg.innerHTML = `<form method="dialog" class="card"><h2>${esc(title)}</h2>
       ${fields.map((f) => `<label>${esc(f.label)}
-        <input name="${esc(f.name)}" type="${f.type || 'text'}" value="${esc(f.value ?? '')}"
-          ${f.step ? `step="${f.step}"` : ''} ${f.required === false ? '' : 'required'}></label>`).join('')}
+        ${f.options
+    ? `<select name="${esc(f.name)}">${f.options.map((o) =>
+      `<option value="${esc(o)}" ${String(o) === String(f.value) ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`
+    : `<input name="${esc(f.name)}" type="${f.type || 'text'}" value="${esc(f.value ?? '')}"
+          ${f.step ? `step="${f.step}"` : ''} ${f.required === false ? '' : 'required'}>`}</label>`).join('')}
       <menu class="dialog-actions">
         <button value="cancel" class="secondary">Cancel</button>
         <button value="ok">Confirm</button>
@@ -873,8 +876,87 @@ async function renderReturn(t) {
   $('#back').addEventListener('click', returnsView);
 }
 
+// --------------------------------------------------------------------------
+// Loan products
+// --------------------------------------------------------------------------
+
+const PRODUCT_FIELDS = (p = {}) => [
+  { label: 'Name', name: 'name', value: p.name || '' },
+  { label: 'Interest method', name: 'method', options: ['FLAT', 'REDUCING'], value: p.method || 'FLAT' },
+  { label: 'Rate, percent per month', name: 'monthlyRate', type: 'number', step: '0.001', value: p.monthlyRate ?? 1 },
+  { label: 'Maximum term, months', name: 'maxTerm', type: 'number', value: p.maxTerm ?? 60 },
+  { label: 'Processing fee', name: 'processingFee', type: 'number', step: '0.01', value: p.processingFee ?? 0 },
+  { label: 'Times own deposits a member may borrow', name: 'maxMultiplier', type: 'number', step: '0.1', value: p.maxMultiplier ?? 3 },
+  { label: 'Enforce that multiplier at approval', name: 'enforceDepositMultiplier', options: ['true', 'false'], value: String(p.enforceDepositMultiplier ?? true) },
+  { label: 'Require guarantor cover at approval', name: 'requireGuarantorCover', options: ['true', 'false'], value: String(p.requireGuarantorCover ?? false) },
+  { label: 'Penalty, percent per day', name: 'penaltyRate', type: 'number', step: '0.001', value: p.penaltyRate ?? 0 },
+  { label: 'Penalty basis', name: 'penaltyBasis', options: ['OVERDUE', 'OUTSTANDING'], value: p.penaltyBasis || 'OVERDUE' },
+  { label: 'Accounting', name: 'accountingMethod', options: ['ACCRUAL', 'CASH'], value: p.accountingMethod || 'ACCRUAL' },
+  { label: 'Interest accrual', name: 'interestAccrual', options: ['DAILY', 'MONTHLY', 'NONE'], value: p.interestAccrual || 'DAILY' },
+  { label: 'Day count', name: 'dayCount', options: ['THIRTY_360', 'ACTUAL_365', 'ACTUAL_360', 'ACTUAL_ACTUAL'], value: p.dayCount || 'THIRTY_360' },
+];
+
+function productBody(d) {
+  const num = (v) => (v === '' || v === undefined ? undefined : Number(v));
+  return {
+    name: d.name, method: d.method, monthlyRate: num(d.monthlyRate), maxTerm: num(d.maxTerm),
+    processingFee: num(d.processingFee), maxMultiplier: num(d.maxMultiplier),
+    enforceDepositMultiplier: d.enforceDepositMultiplier === 'true',
+    requireGuarantorCover: d.requireGuarantorCover === 'true',
+    penaltyRate: num(d.penaltyRate), penaltyBasis: d.penaltyBasis,
+    accountingMethod: d.accountingMethod, interestAccrual: d.interestAccrual, dayCount: d.dayCount,
+  };
+}
+
+async function productsView() {
+  const r = await api('GET', '/api/loan-products');
+  if (!r.ok) throw new Error(r.error);
+  view().innerHTML = `
+    <div class="toolbar"><h1>Loan products</h1><span class="spacer"></span><button id="p-new">New product</button></div>
+    <p class="hint">Rates are copied onto a loan when it is applied for, so changing a product does not
+      reprice loans already running. The accounting method and GL accounts are read live.</p>
+    ${table([
+    { label: 'Id', key: 'id' },
+    { label: 'Name', key: 'name' },
+    { label: 'Method', key: 'method' },
+    { label: '% / month', num: true, key: 'monthlyRate' },
+    { label: 'Max term', num: true, key: 'maxTerm' },
+    { label: 'Fee', num: true, value: (p) => money(p.processingFee) },
+    { label: 'x deposits', num: true, value: (p) => `${p.maxMultiplier}${p.enforceDepositMultiplier ? '' : ' (not enforced)'}` },
+    { label: 'Accounting', value: (p) => `${p.accountingMethod} · ${p.interestAccrual} · ${p.dayCount}` },
+    { label: 'Loans', num: true, key: 'loans' },
+    { label: 'Active', value: (p) => (p.isActive ? 'yes' : 'no') },
+  ], r.body, { onRow: true, empty: 'No products' })}
+    <p class="hint">Click a product to change it.</p>`;
+
+  wireRows(r.body, async (p) => {
+    const d = await ask(PRODUCT_FIELDS(p), `Edit ${p.id}`);
+    if (!d) return;
+    const res = await api('PATCH', `/api/loan-products/${p.id}`, productBody(d));
+    toast(res.ok ? `${p.id} saved` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
+    if (res.ok) productsView();
+  });
+
+  $('#p-new').addEventListener('click', async () => {
+    const d = await ask([
+      { label: 'Id (2 to 16 letters, digits or underscore)', name: 'id' },
+      ...PRODUCT_FIELDS(),
+      { label: 'Portfolio GL account', name: 'glPortfolio', value: '100-100' },
+      { label: 'Interest income GL account', name: 'glInterestInc', value: '400-100' },
+      { label: 'Fee income GL account', name: 'glFeeInc', value: '400-200' },
+    ], 'New loan product');
+    if (!d) return;
+    const res = await api('POST', '/api/loan-products', {
+      id: d.id, ...productBody(d), glPortfolio: d.glPortfolio, glInterestInc: d.glInterestInc, glFeeInc: d.glFeeInc,
+    });
+    toast(res.ok ? `${res.body.id} created` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
+    if (res.ok) productsView();
+  });
+}
+
 const VIEWS = {
   members: membersView,
+  products: productsView,
   loans: loansView,
   teller: tellerView,
   reports: reportsView,

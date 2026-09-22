@@ -32,7 +32,8 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
 
   const { rows: [l] } = await c.query(
     `SELECT l.*, p.penalty_rate, p.penalty_basis, p.penalty_grace_days,
-            p.gl_penalty_inc, p.gl_portfolio, p.gl_interest_inc
+            p.gl_penalty_inc, p.gl_penalty_rec, p.gl_portfolio, p.gl_interest_inc,
+            p.accounting_method
      FROM loan_accounts l JOIN loan_products p ON p.id = l.product_id
      WHERE l.id = $1 FOR UPDATE OF l`,
     [loanId]
@@ -87,19 +88,27 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
     if (!ins.length) continue;            // already charged for this day
     const inserted = ins[0];
 
-    const entry = await acct.post(c, {
-      debits: [{ glCode: l.gl_portfolio, amount, memberId: l.member_id }],
-      credits: [{ glCode: glIncome, amount, memberId: l.member_id }],
-      narration: `Penalty ${l.account_no} installment ${inst.number}, ${late} days late`,
-      sourceType: 'LOAN_PENALTY', sourceId: l.id, bookingDate: date, createdBy,
-    });
-    await c.query('UPDATE penalty_charges SET entry_id = $1 WHERE id = $2', [entry.entryId, inserted.id]);
+    // Penalty applied: Dr Penalty Receivable, Cr Penalty Income (accrual).
+    // Under cash accounting nothing is booked until it is paid. It used to
+    // debit the portfolio, which inflated the loan book with income that
+    // had not been collected and then recognised it again on payment.
+    let entryId = null;
+    if (l.accounting_method !== 'CASH') {
+      const entry = await acct.post(c, {
+        debits: [{ glCode: l.gl_penalty_rec, amount, memberId: l.member_id }],
+        credits: [{ glCode: glIncome, amount, memberId: l.member_id }],
+        narration: `Penalty ${l.account_no} installment ${inst.number}, ${late} days late`,
+        sourceType: 'LOAN_PENALTY', sourceId: l.id, bookingDate: date, createdBy,
+      });
+      entryId = entry.entryId;
+      await c.query('UPDATE penalty_charges SET entry_id = $1 WHERE id = $2', [entryId, inserted.id]);
+    }
     await c.query(
       'UPDATE loan_accounts SET penalty_accrued = penalty_accrued + $1, updated_at = now() WHERE id = $2',
       [amount, l.id]
     );
 
-    charges.push({ ...inserted, entryId: entry.entryId });
+    charges.push({ ...inserted, entryId });
   }
 
   return charges;

@@ -42,6 +42,8 @@ const SEED_GL = [
   ['100-210', 'Bank Account',                'ASSET',     'LIQUID_ASSET'],
   ['100-220', 'Mobile Money Settlement',     'ASSET',     'LIQUID_ASSET'],
   ['100-300', 'Interest Receivable',         'ASSET',     'OTHER_ASSET'],
+  ['100-310', 'Fees Receivable',             'ASSET',     'OTHER_ASSET'],
+  ['100-320', 'Penalties Receivable',        'ASSET',     'OTHER_ASSET'],
   ['200-100', 'Member Deposits',             'LIABILITY', 'MEMBER_DEPOSIT'],
   ['200-200', 'Dividends Payable',           'LIABILITY', 'SHORT_TERM_LIABILITY'],
   ['300-100', 'Share Capital',               'EQUITY',    'SHARE_CAPITAL'],
@@ -52,6 +54,7 @@ const SEED_GL = [
   ['500-100', 'Interest Expense on Deposits','EXPENSE',   'EXPENSE'],
   ['500-200', 'Operating Expenses',          'EXPENSE',   'EXPENSE'],
   ['500-300', 'Loan Loss Provision',         'EXPENSE',   'EXPENSE'],
+  ['500-310', 'Loan Write-off Expense',      'EXPENSE',   'EXPENSE'],
 ];
 
 const SEED_CHANNELS = [

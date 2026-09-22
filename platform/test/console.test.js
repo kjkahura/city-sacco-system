@@ -172,6 +172,20 @@ const T = (fn) => withTenant(SCHEMA, fn);
     const x1 = await page.textContent('table tbody tr:last-child td:last-child');
     check('and it ties to the ledger', x1.trim() === '0.00', x1);
 
+    section('loan products');
+    await page.click('nav button[data-view=products]');
+    await page.waitForSelector('table tbody tr');
+    const productsText = await page.textContent('main');
+    check('the seeded product is listed with its accounting settings',
+      /NL01/.test(productsText) && /ACCRUAL · DAILY · THIRTY_360/.test(productsText));
+    await page.click('table tbody tr');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=monthlyRate]', '1.25');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /NL01 saved/.test(document.getElementById('toast').textContent));
+    await page.waitForFunction(() => /1\.25/.test(document.querySelector('main').textContent));
+    check('a product can be edited from the console', true);
+
     section('no JavaScript errors anywhere in that');
     check('the browser reported no page errors', jsErrors.length === 0, jsErrors.join(' | '));
   } catch (e) {

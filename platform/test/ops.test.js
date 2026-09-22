@@ -180,9 +180,13 @@ async function call(method, p, { token, tenant = SLUG, body } = {}) {
     section('REDUCING balance schedule');
     await T((c) => c.query(
       `INSERT INTO loan_products (id, name, method, monthly_rate, max_term, processing_fee,
-                                  gl_portfolio, gl_interest_inc, gl_fee_inc)
-       VALUES ('RB01','Reducing Balance Loan','REDUCING',2.000,12,0,'100-100','400-100','400-200')
+                                  gl_portfolio, gl_interest_inc, gl_fee_inc, enforce_deposit_multiplier)
+       VALUES ('RB01','Reducing Balance Loan','REDUCING',2.000,12,0,'100-100','400-100','400-200', false)
        ON CONFLICT DO NOTHING`));
+    // This member holds 4,500 in deposits and is about to borrow 120,000; the
+    // product above switches the multiplier rule off because the point of
+    // this section is the schedule shape, not eligibility. Eligibility has
+    // its own suite.
     const rbLoan = await T(async (c) => {
       const l = await L.apply(c, {
         memberId: m1.id, productId: 'RB01', principal: 120000, termMonths: 12, createdBy: 'test' });
@@ -205,7 +209,9 @@ async function call(method, p, { token, tenant = SLUG, body } = {}) {
 
     section('end of day is idempotent');
     const tenantRow = (await pool.query('SELECT * FROM platform.tenants WHERE slug=$1', [SLUG])).rows[0];
-    const day = '2026-06-15';
+    // Business dates after disbursement, since accrual now counts days.
+    const plus = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+    const day = plus(10);
     const run1 = await eod.runJob(tenantRow, 'accrueInterest', { businessDate: day });
     check('first accrual run does work', run1.accrued > 0, JSON.stringify(run1));
     const accrued1 = await R(async (c) => (await c.query(
@@ -217,7 +223,7 @@ async function call(method, p, { token, tenant = SLUG, body } = {}) {
       'SELECT SUM(interest_accrued) AS t FROM loan_accounts')).rows[0].t);
     check('interest was not accrued twice', accrued1 === accrued2, `${accrued1} vs ${accrued2}`);
 
-    const run3 = await eod.runJob(tenantRow, 'accrueInterest', { businessDate: '2026-06-16' });
+    const run3 = await eod.runJob(tenantRow, 'accrueInterest', { businessDate: plus(11) });
     check('a new business date does run', run3.accrued > 0, JSON.stringify(run3));
     await assertBalanced('eod accrual');
 

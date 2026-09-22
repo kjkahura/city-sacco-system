@@ -110,7 +110,19 @@ router.post('/eligibility', ...tx(async (c, req) =>
     memberId: req.body.memberId,
     productId: req.body.productId || 'NL01',
     principal: req.body.principal,
+    loanId: req.body.loanId || null,
   }), TELLER));
+
+// The picture approval will judge a specific application by, guarantors
+// included. Read-only: nothing is decided here.
+router.get('/:id/eligibility', ...read(async (c, req) => {
+  const { rows: [l] } = await c.query(
+    'SELECT * FROM loan_accounts WHERE id::text = $1 OR account_no = $1', [req.params.id]);
+  if (!l) return null;
+  return L.checkEligibility(c, {
+    memberId: l.member_id, productId: l.product_id, principal: l.principal, loanId: l.id,
+  });
+}));
 
 router.post('/', ...tx(async (c, req, res, { actor }) => {
   const loan = await L.apply(c, { ...req.body, createdBy: actor });

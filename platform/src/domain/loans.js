@@ -22,7 +22,10 @@ const TRANSITIONS = {
 
 async function lock(c, loanId) {
   const { rows } = await c.query(
-    `SELECT l.*, p.method, p.gl_portfolio, p.gl_interest_inc, p.gl_fee_inc,
+    `SELECT l.*, p.method, p.gl_portfolio, p.gl_interest_inc, p.gl_fee_inc, p.gl_penalty_inc,
+            p.gl_interest_rec, p.gl_fee_rec, p.gl_penalty_rec, p.gl_writeoff_exp,
+            p.accounting_method, p.interest_accrual, p.day_count, p.allocation_order,
+            p.enforce_deposit_multiplier, p.require_guarantor_cover, p.min_cover_percent,
             p.processing_fee, p.max_multiplier, p.monthly_rate AS product_rate
      FROM loan_accounts l
      JOIN loan_products p ON p.id = l.product_id
@@ -44,6 +47,112 @@ function balances(l) {
     total: round2(principal + interest + fees + penalty),
   };
 }
+
+// --------------------------------------------------------------------------
+// Accounting rules
+//
+// Modelled on the rules Mambu publishes for loan products ("Linking Products
+// to Accounting"). Under ACCRUAL, applying interest, a fee or a penalty
+// debits that component's receivable and credits its income; paying it
+// credits the receivable; writing it off clears the receivable against the
+// write-off expense. Under CASH nothing is recognised until paid, and the
+// payment credits income directly. Income is recognised exactly once either
+// way, which the code before this did not manage: it credited interest
+// income at accrual and again at repayment.
+// --------------------------------------------------------------------------
+
+const isAccrual = (l) => l.accounting_method !== 'CASH';
+
+/** GL account credited when a component is paid. */
+function paidCredit(l, component) {
+  switch (component) {
+    case 'PRINCIPAL': return l.gl_portfolio;
+    case 'INTEREST':  return isAccrual(l) ? l.gl_interest_rec : l.gl_interest_inc;
+    case 'FEE':       return isAccrual(l) ? l.gl_fee_rec : (l.gl_fee_inc || l.gl_interest_inc);
+    case 'PENALTY':   return isAccrual(l) ? l.gl_penalty_rec : (l.gl_penalty_inc || l.gl_interest_inc);
+    default: throw err(`UNKNOWN_COMPONENT: ${component}`);
+  }
+}
+
+/** GL account credited when a component is written off (accrual only). */
+function writeOffCredit(l, component) {
+  switch (component) {
+    case 'PRINCIPAL': return l.gl_portfolio;
+    case 'INTEREST':  return l.gl_interest_rec;
+    case 'FEE':       return l.gl_fee_rec;
+    case 'PENALTY':   return l.gl_penalty_rec;
+    default: throw err(`UNKNOWN_COMPONENT: ${component}`);
+  }
+}
+
+// --------------------------------------------------------------------------
+// Day count conventions
+//
+// Interest accrues per day, as it does in Mambu, so a member who repays early
+// owes interest for the days they had the money and a late payer keeps
+// accruing. A rate quoted per month is annualised as twelve times the
+// monthly rate and spread over the year by the product's convention.
+//
+// THIRTY_360 is the default because SACCO products are quoted per month:
+// under 30E/360 every calendar month is deemed thirty days, so "1% a month"
+// accrues to exactly 1% over any month, and the accrued interest on an
+// installment date equals the schedule's figure. The ACTUAL_* conventions
+// are what banks use and what Mambu defaults to.
+// --------------------------------------------------------------------------
+
+const DAY_MS = 86400000;
+const pad2 = (n) => String(n).padStart(2, '0');
+/** YYYY-MM-DD from a string or a Date. pg hands DATE back as a local-midnight Date. */
+const ymd = (d) => (d instanceof Date
+  ? `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+  : String(d).slice(0, 10));
+const toUTC = (d) => new Date(`${ymd(d)}T00:00:00Z`);
+const isoDate = (d) => d.toISOString().slice(0, 10);
+const isLeap = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+const lastDayOfFeb = (d) => d.getUTCMonth() === 1 && d.getUTCDate() === (isLeap(d.getUTCFullYear()) ? 29 : 28);
+
+/** Days from `from` (exclusive) to `to` (inclusive) under a convention. */
+function dayCount(from, to, convention) {
+  const a = toUTC(from);
+  const b = toUTC(to);
+  if (b <= a) return 0;
+  if (convention === 'THIRTY_360') {
+    // 30E/360 (ISDA): 31sts become 30ths, the last day of February becomes
+    // the 30th, so every month counts thirty days.
+    let d1 = a.getUTCDate(); let d2 = b.getUTCDate();
+    if (d1 === 31 || lastDayOfFeb(a)) d1 = 30;
+    if (d2 === 31 || lastDayOfFeb(b)) d2 = 30;
+    return (b.getUTCFullYear() - a.getUTCFullYear()) * 360
+      + (b.getUTCMonth() - a.getUTCMonth()) * 30 + (d2 - d1);
+  }
+  return Math.round((b - a) / DAY_MS);
+}
+
+/**
+ * Interest on `base` at `monthlyRate` percent per month from `from`
+ * (exclusive) to `to` (inclusive). ACTUAL_ACTUAL walks the days because a
+ * period can straddle a leap year and each day is a fraction of its own year.
+ */
+function interestFor(base, monthlyRate, from, to, convention) {
+  const annual = Number(monthlyRate) * 12 / 100;
+  if (convention === 'ACTUAL_ACTUAL') {
+    let total = 0;
+    for (let d = toUTC(from); d < toUTC(to);) {
+      d = new Date(d.getTime() + DAY_MS);
+      total += base * annual / (isLeap(d.getUTCFullYear()) ? 366 : 365);
+    }
+    return round2(total);
+  }
+  const days = dayCount(from, to, convention);
+  const yearDays = convention === 'ACTUAL_365' ? 365 : 360;
+  return round2(base * annual * days / yearDays);
+}
+
+const isMonthEnd = (d) => {
+  const x = toUTC(d);
+  const next = new Date(x.getTime() + DAY_MS);
+  return next.getUTCDate() === 1;
+};
 
 // --------------------------------------------------------------------------
 // Schedule
@@ -182,8 +291,15 @@ async function releaseGuarantors(c, loanId) {
 // Eligibility
 // --------------------------------------------------------------------------
 
-/** The SACCO rule: you may borrow up to N times your own deposits. */
-async function checkEligibility(c, { memberId, productId, principal }) {
+/**
+ * The SACCO rules: you may borrow up to N times your own deposits, and the
+ * loan must be covered by your deposits plus what guarantors have pledged.
+ *
+ * Returns the picture; `enforceEligibility` below is what refuses. Kept
+ * separate so a teller can show a member the ceiling before an application
+ * is written, and so approval and the preview cannot disagree about it.
+ */
+async function checkEligibility(c, { memberId, productId, principal, loanId = null }) {
   const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1', [productId]);
   if (!p) throw err('UNKNOWN_LOAN_PRODUCT', 404);
   const { rows: [d] } = await c.query(
@@ -191,15 +307,49 @@ async function checkEligibility(c, { memberId, productId, principal }) {
     [memberId]
   );
   const deposits = round2(d.total);
+  const requested = round2(principal);
   const ceiling = round2(deposits * Number(p.max_multiplier));
+  const pledged = loanId ? await guarantorCoverage(c, loanId) : 0;
+  const coverRequired = round2(requested * Number(p.min_cover_percent || 100) / 100);
+  const cover = round2(deposits + pledged);
+
+  const withinMultiplier = requested <= ceiling;
+  const covered = cover >= coverRequired;
+  const reasons = [];
+  if (p.enforce_deposit_multiplier && !withinMultiplier) reasons.push('LOAN_EXCEEDS_DEPOSIT_MULTIPLIER');
+  if (p.require_guarantor_cover && !covered) reasons.push('INSUFFICIENT_GUARANTOR_COVER');
+  if (p.min_principal && requested < Number(p.min_principal)) reasons.push('BELOW_PRODUCT_MINIMUM');
+  if (p.max_principal && requested > Number(p.max_principal)) reasons.push('ABOVE_PRODUCT_MAXIMUM');
+
   return {
     deposits,
     multiplier: Number(p.max_multiplier),
     ceiling,
-    requested: round2(principal),
-    eligible: round2(principal) <= ceiling,
-    shortfall: round2(Math.max(0, principal - ceiling)),
+    requested,
+    eligible: withinMultiplier,                 // kept for older clients
+    shortfall: round2(Math.max(0, requested - ceiling)),
+    pledged,
+    coverRequired,
+    cover,
+    coverShortfall: round2(Math.max(0, coverRequired - cover)),
+    rules: {
+      depositMultiplier: p.enforce_deposit_multiplier ? (withinMultiplier ? 'MET' : 'BREACHED') : 'NOT_ENFORCED',
+      guarantorCover: p.require_guarantor_cover ? (covered ? 'MET' : 'BREACHED') : 'NOT_ENFORCED',
+    },
+    approvable: reasons.length === 0,
+    reasons,
   };
+}
+
+/** Refuse a loan that breaks a rule its product enforces. */
+async function enforceEligibility(c, l) {
+  const e = await checkEligibility(c, {
+    memberId: l.member_id, productId: l.product_id, principal: l.principal, loanId: l.id,
+  });
+  if (!e.approvable) {
+    throw err(`${e.reasons[0]}: deposits ${e.deposits}, pledged ${e.pledged}, requested ${e.requested}`, 409);
+  }
+  return e;
 }
 
 // --------------------------------------------------------------------------
@@ -234,6 +384,9 @@ async function changeState(c, loanId, action, { createdBy } = {}) {
   if (!t.from.includes(l.status)) {
     throw err(`INVALID_STATE_TRANSITION: ${l.status} -> ${t.to}`, 409);
   }
+  // Approval is where the rules bite. Applying is a request and a teller may
+  // record one for any amount; approving it is the credit decision.
+  if (t.to === 'APPROVED') await enforceEligibility(c, l);
   const { rows } = await c.query(
     `UPDATE loan_accounts SET status = $1, updated_at = now(),
        approved_on = CASE WHEN $1 = 'APPROVED' THEN current_date ELSE approved_on END
@@ -277,15 +430,18 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
          fees_due = fees_due + $2,
          status = 'ACTIVE',
          disbursed_on = COALESCE($3::date, current_date),
+         accrued_through = COALESCE($3::date, current_date),
          updated_at = now()
      WHERE id = $4 RETURNING *`,
     [amt, round2(l.processing_fee || 0), valueDate || null, l.id]
   );
 
-  // Fee is income at disbursement, carried on the loan until repaid.
-  if (Number(l.processing_fee) > 0) {
+  // Fee applied: Dr Fee Receivable, Cr Fee Income (accrual). Under cash
+  // accounting nothing is booked until the fee is paid; the loan still
+  // carries it as due.
+  if (Number(l.processing_fee) > 0 && isAccrual(l)) {
     await acct.post(c, {
-      debits: [{ glCode: l.gl_portfolio, amount: l.processing_fee, memberId: l.member_id }],
+      debits: [{ glCode: l.gl_fee_rec, amount: l.processing_fee, memberId: l.member_id }],
       credits: [{ glCode: l.gl_fee_inc || l.gl_interest_inc, amount: l.processing_fee, memberId: l.member_id }],
       narration: `Processing fee ${l.account_no}`,
       sourceType: 'LOAN_FEE', sourceId: l.id, bookingDate: valueDate, createdBy,
@@ -303,9 +459,13 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
 }
 
 /**
- * Repayment allocation: penalty, then fees, then interest, then principal.
- * Anything left over goes to the member's savings rather than sitting as an
- * unexplained credit on the loan.
+ * Repayment allocation follows the product's `allocation_order` (default
+ * penalty, fee, interest, principal). Anything left over goes to the
+ * member's savings rather than sitting as an unexplained credit on the loan.
+ *
+ * Each component is credited to the account the accounting method says:
+ * under accrual, the receivable that was debited when it was applied; under
+ * cash, income. See paidCredit().
  */
 async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy } = {}) {
   const l = await lock(c, loanId);
@@ -317,19 +477,25 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
 
   const b = balances(l);
-  const take = (due) => { const t = round2(Math.min(left, Math.max(0, due))); left = round2(left - t); return t; };
-  const penalty = take(b.penalty);
-  const fees = take(b.fees);
-  const interest = take(b.interest);
-  const principal = take(b.principal);
+  const due = { PENALTY: b.penalty, FEE: b.fees, INTEREST: b.interest, PRINCIPAL: b.principal };
+  const paid = { PENALTY: 0, FEE: 0, INTEREST: 0, PRINCIPAL: 0 };
+  const order = Array.isArray(l.allocation_order) && l.allocation_order.length === 4
+    ? l.allocation_order : ['PENALTY', 'FEE', 'INTEREST', 'PRINCIPAL'];
+  for (const component of order) {
+    const t = round2(Math.min(left, Math.max(0, due[component])));
+    paid[component] = t;
+    left = round2(left - t);
+  }
+  const { PENALTY: penalty, FEE: fees, INTEREST: interest, PRINCIPAL: principal } = paid;
   const surplus = round2(left);
   const total = round2(penalty + fees + interest + principal + surplus);
 
   const credits = [];
-  if (principal) credits.push({ glCode: l.gl_portfolio, amount: principal, memberId: l.member_id });
-  if (interest) credits.push({ glCode: l.gl_interest_inc, amount: interest, memberId: l.member_id });
-  if (fees) credits.push({ glCode: l.gl_portfolio, amount: fees, memberId: l.member_id });
-  if (penalty) credits.push({ glCode: l.gl_interest_inc, amount: penalty, memberId: l.member_id });
+  for (const component of order) {
+    if (paid[component] > 0) {
+      credits.push({ glCode: paidCredit(l, component), amount: paid[component], memberId: l.member_id });
+    }
+  }
 
   let surplusAccount = null;
   if (surplus > 0) {
@@ -411,29 +577,82 @@ async function applyToInstallments(c, loanId, { principal, interest, fees }) {
   }
 }
 
+/**
+ * Accrue interest through `valueDate`.
+ *
+ * Idempotent by construction: the loan records how far it has been accrued
+ * (`accrued_through`) and each call books the days from there to the value
+ * date, then moves the marker. Calling it twice for the same date books
+ * nothing the second time; calling it after a missed week books the week.
+ * The old implementation booked one whole month per call, so a nightly job
+ * booked thirty months of interest in thirty days.
+ *
+ *   DAILY    interest for the elapsed days, by the product's day count
+ *   MONTHLY  one month's interest, on the last day of the month only
+ *   NONE     never accrues; interest is owed on the schedule and booked
+ *            when paid
+ *
+ * Under ACCRUAL the entry is Dr Interest Receivable, Cr Interest Income.
+ * Under CASH nothing is booked: the loan still tracks what is owed, and the
+ * eventual payment credits income.
+ */
 async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   const l = await lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) return null;
-  const rate = Number(l.monthly_rate) / 100;
+  if (l.interest_accrual === 'NONE') return null;
+
+  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const from = l.accrued_through || l.disbursed_on;
+  if (!from) return null;
+  const fromIso = ymd(from);
+  if (date <= fromIso) return null;
+
+  const rate = Number(l.monthly_rate);
   const base = l.method === 'REDUCING'
     ? round2(l.principal_disbursed - l.principal_paid)
     : Number(l.principal);
-  const amt = round2(base * rate);
+
+  let amt = 0;
+  let through = date;
+  if (l.interest_accrual === 'MONTHLY') {
+    if (!isMonthEnd(date)) return null;
+    // Every month-end after the marker and up to the value date, in case
+    // one was missed.
+    const start = toUTC(fromIso);
+    const end = toUTC(date);
+    let months = 0;
+    for (let y = start.getUTCFullYear(), m = start.getUTCMonth(); ; m += 1) {
+      const monthEnd = new Date(Date.UTC(y, m + 1, 0));
+      if (monthEnd > end) break;
+      if (monthEnd > start) months += 1;
+    }
+    amt = round2(base * rate / 100 * months);
+  } else {
+    amt = interestFor(base, rate, fromIso, date, l.day_count || 'THIRTY_360');
+    through = date;
+  }
+
+  await c.query(
+    'UPDATE loan_accounts SET interest_accrued = interest_accrued + $1, accrued_through = $2::date, updated_at = now() WHERE id = $3',
+    [amt, through, l.id]
+  );
   if (!(amt > 0)) return null;
 
-  const entry = await acct.post(c, {
-    debits: [{ glCode: '100-300', amount: amt, memberId: l.member_id }],
-    credits: [{ glCode: l.gl_interest_inc, amount: amt, memberId: l.member_id }],
-    narration: `Interest accrual ${l.account_no}`,
-    sourceType: 'LOAN_INTEREST_ACCRUAL', sourceId: l.id, bookingDate: valueDate, createdBy,
-  });
-  await c.query(
-    'UPDATE loan_accounts SET interest_accrued = interest_accrued + $1, updated_at = now() WHERE id = $2',
-    [amt, l.id]
-  );
+  let entryId = null;
+  if (isAccrual(l)) {
+    const entry = await acct.post(c, {
+      debits: [{ glCode: l.gl_interest_rec, amount: amt, memberId: l.member_id }],
+      credits: [{ glCode: l.gl_interest_inc, amount: amt, memberId: l.member_id }],
+      narration: `Interest accrual ${l.account_no} ${fromIso} to ${date}`,
+      sourceType: 'LOAN_INTEREST_ACCRUAL', sourceId: l.id, bookingDate: date, createdBy,
+    });
+    entryId = entry.entryId;
+  }
   return savings.record(c, {
     reference: savings.ref('LI'), kind: 'LOAN_INTEREST_ACCRUAL', memberId: l.member_id,
-    loanAccountId: l.id, amount: amt, valueDate, entryId: entry.entryId, createdBy,
+    loanAccountId: l.id, amount: amt, valueDate: date, entryId,
+    allocation: { from: fromIso, through, base, dayCount: l.day_count, method: l.interest_accrual },
+    createdBy,
   });
 }
 
@@ -443,9 +662,20 @@ async function writeOff(c, loanId, { narration, createdBy } = {}) {
   const b = balances(l);
   if (b.total <= 0) throw err('NOTHING_TO_WRITE_OFF', 409);
 
+  // Each component is cleared against the account that holds it: principal
+  // out of the portfolio, and under accrual the interest, fee and penalty
+  // receivables that were built up when they were applied. Under cash those
+  // three were never recognised, so only the principal is booked.
+  const credits = [{ glCode: writeOffCredit(l, 'PRINCIPAL'), amount: b.principal, memberId: l.member_id }];
+  if (isAccrual(l)) {
+    for (const [component, amount] of [['INTEREST', b.interest], ['FEE', b.fees], ['PENALTY', b.penalty]]) {
+      if (amount > 0) credits.push({ glCode: writeOffCredit(l, component), amount, memberId: l.member_id });
+    }
+  }
+  const booked = round2(credits.reduce((s2, x) => s2 + x.amount, 0));
   const entry = await acct.post(c, {
-    debits: [{ glCode: '500-300', amount: b.total, memberId: l.member_id }],
-    credits: [{ glCode: l.gl_portfolio, amount: b.total, memberId: l.member_id }],
+    debits: [{ glCode: l.gl_writeoff_exp, amount: booked, memberId: l.member_id }],
+    credits: credits.filter((x) => x.amount > 0),
     narration: narration || `Write off ${l.account_no}`,
     sourceType: 'LOAN_WRITE_OFF', sourceId: l.id, createdBy,
   });
@@ -547,5 +777,6 @@ module.exports = {
   TRANSITIONS, lock, balances, buildSchedule, shiftOffClosedDays,
   apply, changeState, disburse, repay, accrueInterest, writeOff,
   reverseTransaction, addGuarantor, guarantorCoverage, releaseGuarantors,
-  checkEligibility, markArrears, applyToInstallments,
+  checkEligibility, enforceEligibility, markArrears, applyToInstallments,
+  dayCount, interestFor, isMonthEnd, paidCredit, writeOffCredit,
 };

@@ -126,3 +126,7 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
   main { padding: 12px; }
   header { padding: 8px 12px; }
 }
+
+.toolbar h1 { margin: 0; }
+.toolbar .spacer { flex: 1; }
+dialog form.card { max-height: 85vh; overflow-y: auto; min-width: 360px; }

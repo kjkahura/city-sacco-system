@@ -86,7 +86,8 @@ src/
   domain/
     accounting.js      double-entry posting, reversal, trial balance
     close.js           financial years, year-end close, statutory reserve
-    loans.js           lifecycle, schedule, allocation, guarantors, arrears
+    loans.js           lifecycle, schedule, day counts, accrual, allocation,
+                       guarantors, eligibility, arrears
     penalties.js       late payment charges, grace, waiver
     provisioning.js    loan loss provisioning by PAR band
     reports.js         balance sheet, income statement, prudential, PAR
@@ -99,9 +100,9 @@ src/
     crypt.js           AES-256-GCM streaming encryption, key ring, rekey
     offsite.js         dir and command drivers for shipping backups
     scheduler.js       in-process timer behind a Postgres advisory lock
-  routes/              auth, members, loans, savings, shares, accounting,
-                       reports, finance (provisioning, periods, returns),
-                       portal (the member-facing API)
+  routes/              auth, members, loans, loanProducts, savings, shares,
+                       accounting, reports, finance (provisioning, periods,
+                       returns), portal (the member-facing API)
   lib/
     http.js            error envelope, filter operators, legacy slicing
     page.js            SQL-side paging: offset, limit, count(*) OVER ()
@@ -119,7 +120,8 @@ test/provisioning.test.js  36 assertions
 test/close.test.js         40 assertions
 test/reporting.test.js     45 assertions
 test/portal.test.js        49 assertions
-test/console.test.js       18 assertions, real browser, npm run test:browser
+test/loan-accounting.test.js 55 assertions
+test/console.test.js       20 assertions, real browser, npm run test:browser
 test/portal-ui.test.js     20 assertions, real browser, npm run test:browser
 ```
 
@@ -281,6 +283,90 @@ SQL, so no installment falls on a day the SACCO is shut.
 
 The invariant the test suite asserts after *every single operation*,
 corrections included: the trial balance still balances.
+
+## Loan products and their accounting
+
+A product is the template every loan under it follows: pricing, eligibility,
+allocation order, and the accounting rules. `GET/POST/PATCH
+/api/loan-products` manages them, with every GL mapping checked against the
+chart of accounts for existence and type, and the console has a Products
+screen. The rate is copied onto a loan at application, so repricing a
+product does not touch running loans; the accounting method and GL mappings
+are read live, so a wrong mapping can be corrected.
+
+### The posting rules
+
+Taken from Mambu's published behaviour for loan products
+([Linking Products to Accounting](https://docs.mambu.com/docs/linking-products-to-accounting/),
+[Cash vs Accruals Accounting](https://docs.mambu.com/docs/cash-vs-accruals-accounting/)).
+Each product picks `accounting_method`:
+
+| Event | ACCRUAL | CASH |
+|---|---|---|
+| Disbursement | Dr Portfolio, Cr Source | same |
+| Interest applied | Dr Interest Receivable, Cr Interest Income | nothing booked |
+| Fee applied | Dr Fee Receivable, Cr Fee Income | nothing booked |
+| Penalty applied | Dr Penalty Receivable, Cr Penalty Income | nothing booked |
+| Interest, fee, penalty paid | Dr Source, Cr the receivable | Dr Source, Cr income |
+| Principal paid | Dr Source, Cr Portfolio | same |
+| Write-off | Dr Write-off Expense, Cr Portfolio and each receivable | Dr Write-off Expense, Cr Portfolio |
+
+Income is recognised exactly once under either method. The code before this
+credited interest income at accrual and again at repayment, and debited
+penalties to the loan portfolio, so income was overstated and the portfolio
+carried uncollected penalties as if they were principal.
+`test/loan-accounting.test.js` asserts the receivable rises and falls and
+the income account moves once.
+
+Each product names its own receivable, income and write-off accounts
+(`gl_interest_rec`, `gl_fee_rec`, `gl_penalty_rec`, `gl_writeoff_exp`, and
+the income accounts), defaulting to the seeded ones.
+
+### Interest accrues per day
+
+As in Mambu, interest accrues daily
+([Interest Calculation Methods in Loans](https://docs.mambu.com/docs/interest-calculation-methods-in-loans/)):
+a member who repays early owes interest for the days they had the money, a
+late payer keeps accruing. Each loan records `accrued_through`; an accrual
+books the days from there to the business date and moves the marker, so
+running it twice for one date books nothing and running it after a missed
+week books the week. The previous implementation booked one month per call,
+and the nightly job called it nightly.
+
+`interest_accrual` per product: `DAILY` (default), `MONTHLY` (booked on the
+last day of the month, missed month-ends caught up), or `NONE`.
+
+`day_count` per product, applied to the annualised rate (twelve times the
+monthly rate):
+
+| Convention | Behaviour |
+|---|---|
+| `THIRTY_360` (default) | 30E/360. Every calendar month is thirty days, so "1% a month" accrues to exactly 1% over any month and the accrued figure on an installment date equals the schedule. |
+| `ACTUAL_365` | Mambu's default. Days that passed over 365. |
+| `ACTUAL_360` | Days that passed over 360. |
+| `ACTUAL_ACTUAL` | Each day is a fraction of its own year, leap years included. |
+
+30E/360 is the default because SACCO products are quoted per month and
+members expect the month's interest to be the month's interest. A product
+priced per annum should use an actual convention.
+
+### Eligibility is enforced at approval
+
+Applying records a request; approving is the credit decision, and that is
+where the product's rules bite. `enforce_deposit_multiplier` refuses a loan
+above `max_multiplier` times the member's deposits; `require_guarantor_cover`
+refuses one where deposits plus guarantor pledges fall short of
+`min_cover_percent` of the principal. `GET /api/loans/:id/eligibility`
+shows the same picture approval will judge by, guarantors included, so the
+preview and the decision cannot disagree.
+
+### Allocation order
+
+`allocation_order` is the product's list, default penalty, fee, interest,
+principal, the same idea as Mambu's drag-and-drop
+([Repayment Allocation Order](https://docs.mambu.com/docs/repayment-allocation-order/)).
+A partial repayment walks it. The database refuses an order that does not
+name all four components once.
 
 ## Shares and dividends
 
