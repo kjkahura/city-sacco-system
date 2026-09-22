@@ -121,7 +121,8 @@ test/close.test.js         40 assertions
 test/reporting.test.js     45 assertions
 test/portal.test.js        49 assertions
 test/loan-accounting.test.js 55 assertions
-test/console.test.js       20 assertions, real browser, npm run test:browser
+test/product-types.test.js 48 assertions
+test/console.test.js       23 assertions, real browser, npm run test:browser
 test/portal-ui.test.js     20 assertions, real browser, npm run test:browser
 ```
 
@@ -286,8 +287,9 @@ corrections included: the trial balance still balances.
 
 ## Loan products and their accounting
 
-A product is the template every loan under it follows: pricing, eligibility,
-allocation order, and the accounting rules. `GET/POST/PATCH
+A product is the template every loan under it follows: type, interest
+method, pricing, eligibility, allocation order, and the accounting rules.
+`GET/POST/PATCH
 /api/loan-products` manages them, with every GL mapping checked against the
 chart of accounts for existence and type, and the console has a Products
 screen. The rate is copied onto a loan at application, so repricing a
@@ -322,12 +324,67 @@ Each product names its own receivable, income and write-off accounts
 (`gl_interest_rec`, `gl_fee_rec`, `gl_penalty_rec`, `gl_writeoff_exp`, and
 the income accounts), defaulting to the seeded ones.
 
+### Product type decides what interest is
+
+Mambu separates two things a single `method` column had run together here:
+what kind of schedule a loan has, and how a period's interest is worked out
+([Loan Product Types](https://docs.mambu.com/docs/loan-product-types/),
+[Interest Calculation Methods in Loans](https://docs.mambu.com/docs/interest-calculation-methods-in-loans/)).
+Before this the accrual read the actual balance for `REDUCING` and the
+original principal for `FLAT`, whatever the product was meant to be, and a
+prepayment never touched the schedule.
+
+`product_type`, fixed once the product exists:
+
+| Type | What the member owes | Prepayment | After the last due date |
+|---|---|---|---|
+| `FIXED_TERM` (default; everything existing) | The interest on the schedule drawn at disbursement, pro rata through the period in progress. Paying principal early does not lower next month's interest; paying late does not raise it. | Settles installments in order. Schedule unchanged. | Nothing more accrues: the schedule's total is the total. Penalties cover lateness. |
+| `DYNAMIC_TERM` | Interest on the actual outstanding principal for the actual days, by the day count. | Settles what has fallen due; the rest reduces the balance and the future schedule is redrawn from it. | Keeps accruing if `accrue_late_interest` (default true), else stops at maturity. |
+
+`method`, how a period is priced:
+
+| Method | Mambu name | Period interest | Principal per period |
+|---|---|---|---|
+| `FLAT` | Fixed Flat | original principal × rate | equal shares |
+| `REDUCING` | Declining Balance | outstanding × rate | equal shares |
+| `REDUCING_EQUAL_INSTALLMENTS` | Declining Balance (Equal Installments) | outstanding × rate | payment − interest, the payment being the annuity on the principal |
+
+`FLAT` on a `DYNAMIC_TERM` product is refused by the API and by a check
+constraint: flat interest is charged on the original principal whatever the
+balance does, which is the definition of a fixed schedule.
+
+`prepayment_recalculation`, for dynamic products (Mambu's prepayment
+recalculation): `REDUCE_INSTALLMENT_AMOUNT` (default) keeps the remaining
+dates and spreads the new balance over them; `REDUCE_NUMBER_OF_INSTALLMENTS`
+keeps the installment as it was and drops dates off the end;
+`NONE` leaves the schedule as drawn. The first redrawn period starts on the
+payment date, so its interest is the rest of the period on the new balance
+plus any interest already accrued and unpaid. Reversing the payment puts the
+disbursement schedule back and redraws from the balance as it then stands.
+`loan_accounts.reschedule_count` and `rescheduled_at` say it happened.
+
+Worked example, `test/product-types.test.js`: two 120,000 loans at 1% a
+month over twelve months, each paying its first installment plus an extra
+principal sum a month in. The fixed one accrues 1,100 the next month (the
+schedule's figure on 110,000) and its interest stops at 7,800 however long
+it runs; the dynamic one accrues 800 (1% of the 80,000 actually out), its
+eleven remaining lines shrink to 7,272.73, or under
+`REDUCE_NUMBER_OF_INSTALLMENTS` with equal installments the payment stays
+10,661.85 and the loan ends three months early.
+
+What this does not do: charge the remaining scheduled interest when a
+fixed-term loan is settled early. Settlement pays what has accrued to that
+day. A product that must recover the whole schedule on early settlement is
+a setting still to be built, and a SACCO that wants early settlement to save
+the member interest should use `DYNAMIC_TERM`.
+
 ### Interest accrues per day
 
 As in Mambu, interest accrues daily
 ([Interest Calculation Methods in Loans](https://docs.mambu.com/docs/interest-calculation-methods-in-loans/)):
 a member who repays early owes interest for the days they had the money, a
-late payer keeps accruing. Each loan records `accrued_through`; an accrual
+late payer keeps accruing (both on dynamic-term products; a fixed-term loan
+accrues its schedule, above). Each loan records `accrued_through`; an accrual
 books the days from there to the business date and moves the marker, so
 running it twice for one date books nothing and running it after a missed
 week books the week. The previous implementation booked one month per call,
@@ -837,6 +894,10 @@ official forms are not.
 4. **Non-calendar financial years open by hand.** `ensureFinancialYear`
    opens calendar years only; a July to June SACCO uses `cli year:open`
    with explicit dates.
+5. **Early settlement of a fixed-term loan charges accrued interest only.**
+   Recovering the rest of the schedule on settlement is not a setting yet.
+   Mambu's other loan product types (tranched, revolving credit,
+   interest-free) are not modelled either.
 
 ## Before real member data
 

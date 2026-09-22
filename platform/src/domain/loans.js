@@ -26,6 +26,7 @@ async function lock(c, loanId) {
             p.gl_interest_rec, p.gl_fee_rec, p.gl_penalty_rec, p.gl_writeoff_exp,
             p.accounting_method, p.interest_accrual, p.day_count, p.allocation_order,
             p.enforce_deposit_multiplier, p.require_guarantor_cover, p.min_cover_percent,
+            p.prepayment_recalculation, p.accrue_late_interest,
             p.processing_fee, p.max_multiplier, p.monthly_rate AS product_rate
      FROM loan_accounts l
      JOIN loan_products p ON p.id = l.product_id
@@ -178,9 +179,86 @@ async function shiftOffClosedDays(c, iso) {
 }
 
 /**
- * Flat-rate schedule: interest is a fixed percentage of original principal
- * each period, which is how the Kenyan SACCO products here are priced.
- * REDUCING is modelled but products default to FLAT.
+ * `months` calendar months after `d`, clamped to the month end: the 31st of
+ * January plus one month is the 28th of February, not the 3rd of March,
+ * which is what Date.setMonth would have said.
+ */
+function addMonths(d, months) {
+  const x = toUTC(d);
+  const day = x.getUTCDate();
+  const target = new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth() + months, 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(day, lastDay));
+  return target;
+}
+
+/** The payment that clears `principal` at `rate` per period in `n` equal payments. */
+function annuityPayment(principal, rate, n) {
+  if (!(rate > 0)) return round2(principal / n);
+  return round2(principal * rate / (1 - (1 + rate) ** -n));
+}
+
+/**
+ * The installment lines for `principal` under an interest method.
+ *
+ *   FLAT                         interest = original principal × rate, principal in equal shares
+ *   REDUCING                     interest = outstanding × rate, principal in equal shares
+ *   REDUCING_EQUAL_INSTALLMENTS  interest = outstanding × rate, principal = payment − interest,
+ *                                with the same payment every period
+ *
+ * `count` periods are drawn. `firstFraction` scales the first period's
+ * interest when the plan starts part-way through a period (a dynamic loan
+ * rescheduled mid-month), and `fixedShare` pins each period's principal (or
+ * payment, for equal installments) to a given figure so the plan runs for as
+ * many periods as that takes: how "reduce the number of installments" works.
+ * The last line takes whatever rounding left over, so the lines always sum
+ * to the principal exactly.
+ */
+function planInstallments({ principal, rate, method, count, flatBase = principal, firstFraction = 1, fixedShare = null }) {
+  const P = round2(principal);
+  const lines = [];
+  if (!(P > 0)) return lines;
+  const equal = method === 'REDUCING_EQUAL_INSTALLMENTS';
+  const payment = equal ? (fixedShare ?? annuityPayment(P, rate, count)) : null;
+  const share = equal ? null : (fixedShare ?? round2(P / count));
+  const limit = fixedShare ? 1000 : count;
+
+  let outstanding = P;
+  for (let n = 1; n <= limit && outstanding > 0; n += 1) {
+    const fraction = n === 1 ? firstFraction : 1;
+    const interest = round2((method === 'FLAT' ? flatBase : outstanding) * rate * fraction);
+    let principalAmt = equal ? round2(payment - interest) : share;
+    const last = fixedShare ? principalAmt >= outstanding : n === count;
+    if (last || principalAmt > outstanding) principalAmt = outstanding;
+    if (!(principalAmt > 0) && !last) principalAmt = 0.01;   // a payment below interest never amortises
+    outstanding = round2(outstanding - principalAmt);
+    lines.push({ principal: principalAmt, interest });
+    if (last) break;
+  }
+  if (outstanding > 0) lines[lines.length - 1].principal = round2(lines[lines.length - 1].principal + outstanding);
+  return lines;
+}
+
+async function persistInstallments(c, loanId, installments) {
+  for (const i of installments) {
+    await c.query(
+      `INSERT INTO loan_installments (loan_id, number, due_date, principal_due, interest_due, fee_due)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [loanId, i.number, i.dueDate, i.principal, i.interest, i.fee || 0]
+    );
+  }
+}
+
+/**
+ * The schedule a loan is given at disbursement. Due dates fall one calendar
+ * month apart from the disbursement date and are pushed off weekends and
+ * holidays. Interest per period is the product's monthly rate on the basis
+ * the method names; see planInstallments.
+ *
+ * For a FIXED_TERM loan this schedule is the contract: the interest on it is
+ * what the member owes, however they pay. For a DYNAMIC_TERM loan it is the
+ * expectation if every installment is paid on its date; a prepayment
+ * regenerates it (see reschedule).
  */
 async function buildSchedule(c, l, { persist = true } = {}) {
   const principal = Number(l.principal);
@@ -188,48 +266,26 @@ async function buildSchedule(c, l, { persist = true } = {}) {
   const rate = Number(l.monthly_rate ?? l.product_rate) / 100;
   if (!principal || !months) throw err('LOAN_MISSING_PRINCIPAL_OR_TERM');
 
-  const start = l.disbursed_on ? new Date(l.disbursed_on) : new Date();
-  const perPrincipal = round2(principal / months);
+  const start = l.disbursed_on ? ymd(l.disbursed_on) : isoDate(new Date());
+  const lines = planInstallments({ principal, rate, method: l.method, count: months });
   const installments = [];
-
-  let remaining = principal;
-  let outstanding = principal;
-  for (let n = 1; n <= months; n += 1) {
-    const interest = l.method === 'REDUCING'
-      ? round2(outstanding * rate)
-      : round2(principal * rate);
-
-    const principalAmt = n === months ? round2(remaining) : perPrincipal;
-    remaining = round2(remaining - principalAmt);
-    outstanding = round2(outstanding - principalAmt);
-
-    const due = new Date(start);
-    due.setUTCMonth(due.getUTCMonth() + n);
-    const dueDate = await shiftOffClosedDays(c, due.toISOString().slice(0, 10));
-
+  for (let n = 1; n <= lines.length; n += 1) {
+    const dueDate = await shiftOffClosedDays(c, isoDate(addMonths(start, n)));
     installments.push({
-      number: n,
-      dueDate,
-      principal: principalAmt,
-      interest,
+      number: n, dueDate, ...lines[n - 1],
       fee: n === 1 ? round2(l.processing_fee || 0) : 0,
     });
   }
 
   if (persist) {
     await c.query('DELETE FROM loan_installments WHERE loan_id = $1', [l.id]);
-    for (const i of installments) {
-      await c.query(
-        `INSERT INTO loan_installments (loan_id, number, due_date, principal_due, interest_due, fee_due)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [l.id, i.number, i.dueDate, i.principal, i.interest, i.fee]
-      );
-    }
+    await persistInstallments(c, l.id, installments);
   }
 
   return {
     loanId: l.id,
     method: l.method,
+    productType: l.product_type,
     totals: {
       principal,
       interest: round2(installments.reduce((s, i) => s + i.interest, 0)),
@@ -237,6 +293,123 @@ async function buildSchedule(c, l, { persist = true } = {}) {
     },
     installments,
   };
+}
+
+/**
+ * Regenerate a DYNAMIC_TERM loan's future installments from its actual
+ * outstanding balance, after a repayment on `asOf`.
+ *
+ * Installments already due keep their figures: they were owed and, if
+ * unpaid, still are. Everything falling due after `asOf` is redrawn over
+ * what remains of the principal once those are netted off, the way the
+ * product says (Mambu's prepayment recalculation):
+ *
+ *   REDUCE_INSTALLMENT_AMOUNT       same number of installments, each smaller
+ *   REDUCE_NUMBER_OF_INSTALLMENTS   same installment as before, fewer of them
+ *   NONE                            the schedule stands as drawn
+ *
+ * The first redrawn period starts at `asOf`, so its interest is the part of
+ * the period still to run on the new balance, plus whatever interest had
+ * accrued on the old balance and is still unpaid.
+ */
+async function reschedule(c, l, asOf) {
+  if (l.product_type !== 'DYNAMIC_TERM') return null;
+  if (!l.prepayment_recalculation || l.prepayment_recalculation === 'NONE') return null;
+  const date = ymd(asOf);
+  const { rows } = await c.query('SELECT * FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]);
+  const past = rows.filter((r) => ymd(r.due_date) <= date);
+  const future = rows.filter((r) => ymd(r.due_date) > date);
+  if (!future.length) return null;
+
+  const b = balances(l);
+  const pastPrincipalStillDue = round2(past.reduce((s, r) => s + Math.max(0, r.principal_due - r.principal_paid), 0));
+  const remaining = round2(b.principal - pastPrincipalStillDue);
+  const rate = Number(l.monthly_rate) / 100;
+  const dc = l.day_count || 'THIRTY_360';
+
+  // The period the first redrawn line covers ran from the previous due date
+  // (or disbursement); only the part after asOf is priced on the new balance.
+  const periodStart = past.length ? ymd(past[past.length - 1].due_date) : ymd(l.disbursed_on);
+  const firstDue = ymd(future[0].due_date);
+  const periodDays = dayCount(periodStart, firstDue, dc) || 1;
+  const firstFraction = Math.min(1, Math.max(0, dayCount(date, firstDue, dc) / periodDays));
+
+  let fixedShare = null;
+  if (l.prepayment_recalculation === 'REDUCE_NUMBER_OF_INSTALLMENTS') {
+    const P = Number(l.principal);
+    const n = Number(l.term_months);
+    fixedShare = l.method === 'REDUCING_EQUAL_INSTALLMENTS' ? annuityPayment(P, rate, n) : round2(P / n);
+  }
+
+  let lines = planInstallments({
+    principal: remaining, rate, method: l.method, count: future.length, firstFraction, fixedShare,
+  });
+  if (lines.length > future.length) {
+    // More periods than dates: fold the tail into the last dated line.
+    const tail = lines.splice(future.length);
+    const last = lines[lines.length - 1];
+    last.principal = round2(last.principal + tail.reduce((s, x) => s + x.principal, 0));
+    last.interest = round2(last.interest + tail.reduce((s, x) => s + x.interest, 0));
+  }
+  if (lines.length) lines[0].interest = round2(lines[0].interest + Math.max(0, b.interest));
+
+  const installments = lines.map((line, i) => ({
+    number: future[i].number, dueDate: ymd(future[i].due_date), ...line,
+    fee: Number(future[i].fee_due) - Number(future[i].fee_paid) > 0 ? round2(future[i].fee_due - future[i].fee_paid) : 0,
+  }));
+
+  await c.query('DELETE FROM loan_installments WHERE loan_id = $1 AND id = ANY($2)', [l.id, future.map((r) => r.id)]);
+  await persistInstallments(c, l.id, installments);
+  await c.query(
+    'UPDATE loan_accounts SET rescheduled_at = now(), reschedule_count = reschedule_count + 1 WHERE id = $1', [l.id]
+  );
+  return {
+    recalculation: l.prepayment_recalculation, remaining, dropped: future.length - installments.length,
+    installments,
+  };
+}
+
+/** Last scheduled due date, or null when there is no schedule. */
+async function maturityDate(c, loanId) {
+  const { rows: [r] } = await c.query('SELECT max(due_date) AS d FROM loan_installments WHERE loan_id = $1', [loanId]);
+  return r?.d ? ymd(r.d) : null;
+}
+
+/** Principal a FIXED_TERM loan's schedule says is still out at `date` (nominal period ends). */
+function scheduledOutstanding(l, installments, date) {
+  const start = ymd(l.disbursed_on);
+  let out = Number(l.principal);
+  for (let n = 1; n <= installments.length; n += 1) {
+    if (date >= isoDate(addMonths(start, n))) out -= Number(installments[n - 1].principal_due);
+    else break;
+  }
+  return round2(Math.max(0, out));
+}
+
+/**
+ * Interest a FIXED_TERM loan has earned by `date`, reading the schedule:
+ * every period whose nominal end has passed counts in full, the period in
+ * progress counts pro rata by the day count, and nothing accrues after the
+ * final period. A fixed-term loan's interest is fixed; that is the point.
+ *
+ * Periods are measured on the nominal month boundaries from disbursement,
+ * not the shifted due dates, so a due date pushed off a weekend does not
+ * spread a month's interest over thirty-two days.
+ */
+function scheduledInterestThrough(l, installments, date, convention) {
+  const start = ymd(l.disbursed_on);
+  let total = 0;
+  for (let n = 1; n <= installments.length; n += 1) {
+    const from = isoDate(addMonths(start, n - 1));
+    const to = isoDate(addMonths(start, n));
+    const interest = Number(installments[n - 1].interest_due);
+    if (date >= to) { total += interest; continue; }
+    if (date <= from) break;
+    const periodDays = dayCount(from, to, convention) || 1;
+    total += interest * dayCount(from, date, convention) / periodDays;
+    break;
+  }
+  return round2(total);
 }
 
 // --------------------------------------------------------------------------
@@ -365,9 +538,10 @@ async function apply(c, { memberId, productId = 'NL01', principal, termMonths, a
     `SELECT 'LN' || lpad((count(*)+1)::text, 6, '0') AS n FROM loan_accounts`)).rows[0].n;
 
   const { rows } = await c.query(
-    `INSERT INTO loan_accounts (account_no, member_id, product_id, principal, term_months, monthly_rate, status)
-     VALUES ($1,$2,$3,$4,$5,$6,'PENDING_APPROVAL') RETURNING *`,
-    [no, memberId, productId, round2(principal), termMonths, p.monthly_rate]
+    `INSERT INTO loan_accounts (account_no, member_id, product_id, principal, term_months, monthly_rate,
+                                product_type, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'PENDING_APPROVAL') RETURNING *`,
+    [no, memberId, productId, round2(principal), termMonths, p.monthly_rate, p.product_type || 'FIXED_TERM']
   );
   await c.query(
     `INSERT INTO audit_log (actor, action, entity, entity_id, after)
@@ -448,7 +622,7 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
     });
   }
 
-  const fresh = { ...rows[0], method: l.method, product_rate: l.product_rate, processing_fee: l.processing_fee };
+  const fresh = { ...l, ...rows[0] };
   await buildSchedule(c, fresh);
 
   return savings.record(c, {
@@ -531,26 +705,45 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
       [surplus, surplusAccount.id]);
   }
 
-  await applyToInstallments(c, l.id, { principal, interest, fees });
+  const asOf = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const dynamic = l.product_type === 'DYNAMIC_TERM';
+  // A fixed-term loan's payment settles its installments in order, however
+  // early it comes. A dynamic loan's payment settles what has fallen due and
+  // anything beyond that is a prepayment: it reduces the balance, and the
+  // schedule for what remains is redrawn from that balance.
+  await applyToInstallments(c, l.id, { principal, interest, fees }, dynamic ? { dueBy: asOf } : {});
 
-  const after = balances((await lock(c, l.id)));
+  const fresh = await lock(c, l.id);
+  const after = balances(fresh);
+  let rescheduled = null;
   if (after.total <= 0) {
     await c.query("UPDATE loan_accounts SET status = 'CLOSED_REPAID', updated_at = now() WHERE id = $1", [l.id]);
     await releaseGuarantors(c, l.id);
   }
+  if (dynamic && (principal > 0 || interest > 0)) rescheduled = await reschedule(c, fresh, asOf);
 
   return savings.record(c, {
     reference: savings.ref('LR'), kind: 'LOAN_REPAYMENT', memberId: l.member_id,
     loanAccountId: l.id, channelId, amount: total, valueDate, entryId: entry.entryId,
-    allocation: { penalty, fees, interest, principal, surplus },
+    allocation: {
+      penalty, fees, interest, principal, surplus,
+      ...(rescheduled ? { rescheduled: { recalculation: rescheduled.recalculation, dropped: rescheduled.dropped } } : {}),
+    },
     narration, createdBy,
   });
 }
 
-async function applyToInstallments(c, loanId, { principal, interest, fees }) {
+/**
+ * Spread paid amounts over installments, earliest first. With `dueBy`, only
+ * installments due on or before that date take a share; what is left over
+ * is a prepayment the caller deals with.
+ */
+async function applyToInstallments(c, loanId, { principal, interest, fees }, { dueBy = null } = {}) {
   const { rows } = await c.query(
-    `SELECT * FROM loan_installments WHERE loan_id = $1 AND status <> 'PAID' ORDER BY number`,
-    [loanId]
+    `SELECT * FROM loan_installments WHERE loan_id = $1 AND status <> 'PAID'
+       AND ($2::date IS NULL OR due_date <= $2::date)
+     ORDER BY number`,
+    [loanId, dueBy]
   );
   let p = principal, i = interest, f = fees;
   for (const inst of rows) {
@@ -592,6 +785,18 @@ async function applyToInstallments(c, loanId, { principal, interest, fees }) {
  *   NONE     never accrues; interest is owed on the schedule and booked
  *            when paid
  *
+ * What a day of interest *is* depends on the product type:
+ *
+ *   FIXED_TERM    the schedule's interest, pro rata through the period in
+ *                 progress (scheduledInterestThrough). Prepaying principal
+ *                 does not lower it and paying late does not raise it, and
+ *                 nothing accrues after the last period: the interest on a
+ *                 fixed-term loan was fixed when the schedule was drawn.
+ *   DYNAMIC_TERM  the actual outstanding principal × the rate for the days
+ *                 elapsed, so early principal saves interest and a balance
+ *                 left running keeps costing it. Past the last due date it
+ *                 keeps accruing only if the product accrues late interest.
+ *
  * Under ACCRUAL the entry is Dr Interest Receivable, Cr Interest Income.
  * Under CASH nothing is booked: the loan still tracks what is owed, and the
  * eventual payment credits income.
@@ -601,16 +806,30 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) return null;
   if (l.interest_accrual === 'NONE') return null;
 
-  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  let date = valueDate ? ymd(valueDate) : isoDate(new Date());
   const from = l.accrued_through || l.disbursed_on;
   if (!from) return null;
   const fromIso = ymd(from);
   if (date <= fromIso) return null;
 
   const rate = Number(l.monthly_rate);
-  const base = l.method === 'REDUCING'
+  const dc = l.day_count || 'THIRTY_360';
+  const dynamic = l.product_type === 'DYNAMIC_TERM';
+  const { rows: installments } = await c.query(
+    'SELECT number, principal_due, interest_due, due_date FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]
+  );
+
+  if (dynamic && !l.accrue_late_interest && installments.length) {
+    // Interest stops at maturity; penalties take over from there.
+    const maturity = ymd(installments[installments.length - 1].due_date);
+    if (fromIso >= maturity) return null;
+    if (date > maturity) date = maturity;
+  }
+
+  // Interest on the basis a period is priced on, at `asOf`.
+  const base = dynamic
     ? round2(l.principal_disbursed - l.principal_paid)
-    : Number(l.principal);
+    : l.method === 'FLAT' ? Number(l.principal) : scheduledOutstanding(l, installments, fromIso);
 
   let amt = 0;
   let through = date;
@@ -627,9 +846,11 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
       if (monthEnd > start) months += 1;
     }
     amt = round2(base * rate / 100 * months);
+  } else if (!dynamic && installments.length) {
+    amt = round2(scheduledInterestThrough(l, installments, date, dc)
+      - scheduledInterestThrough(l, installments, fromIso, dc));
   } else {
-    amt = interestFor(base, rate, fromIso, date, l.day_count || 'THIRTY_360');
-    through = date;
+    amt = interestFor(base, rate, fromIso, date, dc);
   }
 
   await c.query(
@@ -651,7 +872,10 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   return savings.record(c, {
     reference: savings.ref('LI'), kind: 'LOAN_INTEREST_ACCRUAL', memberId: l.member_id,
     loanAccountId: l.id, amount: amt, valueDate: date, entryId,
-    allocation: { from: fromIso, through, base, dayCount: l.day_count, method: l.interest_accrual },
+    allocation: {
+      from: fromIso, through, base, dayCount: l.day_count, method: l.interest_accrual,
+      productType: l.product_type, basis: dynamic ? 'ACTUAL_BALANCE' : 'SCHEDULE',
+    },
     createdBy,
   });
 }
@@ -722,7 +946,13 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
         [a.surplus, tx.member_id]
       );
     }
-    // Rebuild installment allocation from what survives.
+    // Rebuild installment allocation from what survives. A dynamic loan's
+    // schedule may have been redrawn by the payment being reversed, so it
+    // goes back to the schedule it was disbursed with and is redrawn from
+    // the balance as it now stands.
+    const restored = await lock(c, tx.loan_account_id);
+    const dynamic = restored.product_type === 'DYNAMIC_TERM';
+    if (dynamic) await buildSchedule(c, restored);
     await c.query(
       `UPDATE loan_installments SET principal_paid = 0, interest_paid = 0, fee_paid = 0, status = 'PENDING'
        WHERE loan_id = $1`, [tx.loan_account_id]
@@ -736,9 +966,11 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
          AND reversed_by IS NULL AND id <> $2`,
       [tx.loan_account_id, tx.id]
     );
+    const today = isoDate(new Date());
     await applyToInstallments(c, tx.loan_account_id, {
       principal: Number(remaining[0].p), interest: Number(remaining[0].i), fees: Number(remaining[0].f),
-    });
+    }, dynamic ? { dueBy: today } : {});
+    if (dynamic) await reschedule(c, await lock(c, tx.loan_account_id), today);
   } else if (tx.kind === 'LOAN_DISBURSEMENT') {
     await c.query(
       `UPDATE loan_accounts SET principal_disbursed = principal_disbursed - $1,
@@ -774,9 +1006,10 @@ async function markArrears(c, { asOf = null } = {}) {
 }
 
 module.exports = {
-  TRANSITIONS, lock, balances, buildSchedule, shiftOffClosedDays,
+  TRANSITIONS, lock, balances, buildSchedule, shiftOffClosedDays, reschedule, maturityDate,
   apply, changeState, disburse, repay, accrueInterest, writeOff,
   reverseTransaction, addGuarantor, guarantorCoverage, releaseGuarantors,
   checkEligibility, enforceEligibility, markArrears, applyToInstallments,
   dayCount, interestFor, isMonthEnd, paidCredit, writeOffCredit,
+  addMonths, annuityPayment, planInstallments, scheduledInterestThrough, scheduledOutstanding,
 };

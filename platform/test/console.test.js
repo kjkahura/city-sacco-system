@@ -178,6 +178,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     const productsText = await page.textContent('main');
     check('the seeded product is listed with its accounting settings',
       /NL01/.test(productsText) && /ACCRUAL · DAILY · THIRTY_360/.test(productsText));
+    check('and its type and method, in words', /Fixed/.test(productsText) && /Flat/.test(productsText));
     await page.click('table tbody tr');
     await page.waitForSelector('dialog[open]');
     await page.fill('dialog[open] input[name=monthlyRate]', '1.25');
@@ -185,6 +186,28 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForFunction(() => /NL01 saved/.test(document.getElementById('toast').textContent));
     await page.waitForFunction(() => /1\.25/.test(document.querySelector('main').textContent));
     check('a product can be edited from the console', true);
+    await page.click('#p-new');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=id]', 'UIDYN');
+    await page.fill('dialog[open] input[name=name]', 'Console dynamic');
+    await page.selectOption('dialog[open] select[name=productType]', 'DYNAMIC_TERM');
+    await page.selectOption('dialog[open] select[name=method]', 'FLAT');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /FLAT/.test(document.getElementById('toast').textContent));
+    check('a flat dynamic product is refused with the reason shown',
+      /DYNAMIC_TERM product cannot use the FLAT method/.test(await page.textContent('#toast')),
+      await page.textContent('#toast'));
+    await page.click('#p-new');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=id]', 'UIDYN');
+    await page.fill('dialog[open] input[name=name]', 'Console dynamic');
+    await page.selectOption('dialog[open] select[name=productType]', 'DYNAMIC_TERM');
+    await page.selectOption('dialog[open] select[name=method]', 'REDUCING_EQUAL_INSTALLMENTS');
+    await page.selectOption('dialog[open] select[name=prepaymentRecalculation]', 'REDUCE_NUMBER_OF_INSTALLMENTS');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /UIDYN/.test(document.querySelector('main').textContent));
+    check('a dynamic, equal-installment product is created from the console',
+      /Dynamic/.test(await page.textContent('main')) && /Reducing, equal installments/.test(await page.textContent('main')));
 
     section('no JavaScript errors anywhere in that');
     check('the browser reported no page errors', jsErrors.length === 0, jsErrors.join(' | '));

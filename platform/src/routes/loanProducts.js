@@ -9,10 +9,14 @@ const { apiError, badRequest, notFound } = require('../lib/http');
  * Loan products.
  *
  * A product is the pricing and accounting template every loan under it
- * follows: method, rate, term, fee, penalty pricing, eligibility rules,
- * allocation order, accounting method, accrual method, day count, and the
- * GL accounts each component posts to. Until now the only way to create one
- * was SQL.
+ * follows: product type, interest method, rate, term, fee, penalty pricing,
+ * eligibility rules, allocation order, accounting method, accrual method,
+ * day count, prepayment handling, and the GL accounts each component posts
+ * to. Until now the only way to create one was SQL.
+ *
+ * The product type (FIXED_TERM or DYNAMIC_TERM) decides how interest is
+ * worked out on every loan under it and cannot be changed once the product
+ * exists, as in Mambu: the loans already running were written under it.
  *
  * Changing a product does not touch loans already running: the rate is
  * copied onto the loan at application. The GL mappings and the accounting
@@ -26,7 +30,9 @@ const READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR', 'TELLER'];
 const ADMIN = ['TENANT_ADMIN', 'MANAGER'];
 
 const ENUMS = {
-  method: ['FLAT', 'REDUCING'],
+  product_type: ['FIXED_TERM', 'DYNAMIC_TERM'],
+  method: ['FLAT', 'REDUCING', 'REDUCING_EQUAL_INSTALLMENTS'],
+  prepayment_recalculation: ['NONE', 'REDUCE_INSTALLMENT_AMOUNT', 'REDUCE_NUMBER_OF_INSTALLMENTS'],
   accounting_method: ['ACCRUAL', 'CASH'],
   interest_accrual: ['DAILY', 'MONTHLY', 'NONE'],
   day_count: ['THIRTY_360', 'ACTUAL_365', 'ACTUAL_360', 'ACTUAL_ACTUAL'],
@@ -35,7 +41,8 @@ const ENUMS = {
 
 // camelCase on the wire, snake_case in the table.
 const FIELDS = {
-  name: 'name', description: 'description', method: 'method',
+  name: 'name', description: 'description', productType: 'product_type', method: 'method',
+  prepaymentRecalculation: 'prepayment_recalculation', accrueLateInterest: 'accrue_late_interest',
   monthlyRate: 'monthly_rate', maxTerm: 'max_term', processingFee: 'processing_fee',
   maxMultiplier: 'max_multiplier', minPrincipal: 'min_principal', maxPrincipal: 'max_principal',
   penaltyRate: 'penalty_rate', penaltyBasis: 'penalty_basis', penaltyGraceDays: 'penalty_grace_days',
@@ -58,7 +65,9 @@ const GL_TYPES = {
 };
 
 const publicProduct = (p) => ({
-  id: p.id, name: p.name, description: p.description, method: p.method,
+  id: p.id, name: p.name, description: p.description,
+  productType: p.product_type, method: p.method,
+  prepaymentRecalculation: p.prepayment_recalculation, accrueLateInterest: p.accrue_late_interest,
   monthlyRate: Number(p.monthly_rate), annualRate: Math.round(Number(p.monthly_rate) * 1200) / 100,
   maxTerm: p.max_term, processingFee: Number(p.processing_fee), maxMultiplier: Number(p.max_multiplier),
   minPrincipal: p.min_principal === null ? null : Number(p.min_principal),
@@ -76,12 +85,25 @@ const publicProduct = (p) => ({
   isActive: p.is_active, updatedAt: p.updated_at,
 });
 
-async function validate(c, cols, { creating }) {
+async function validate(c, cols, { creating, before = null }) {
   const problems = [];
   for (const [col, allowed] of Object.entries(ENUMS)) {
     if (cols[col] !== undefined && !allowed.includes(cols[col])) {
       problems.push(`${col} must be one of ${allowed.join(', ')}`);
     }
+  }
+  if (before && cols.product_type !== undefined && cols.product_type !== before.product_type) {
+    problems.push('product_type cannot be changed once a product exists; create a new product');
+  }
+  // Flat interest is charged on the original principal whatever the balance
+  // does, which only makes sense when the schedule is fixed.
+  const type = cols.product_type ?? before?.product_type ?? 'FIXED_TERM';
+  const method = cols.method ?? before?.method ?? 'FLAT';
+  if (type === 'DYNAMIC_TERM' && method === 'FLAT') {
+    problems.push('a DYNAMIC_TERM product cannot use the FLAT method; use REDUCING or REDUCING_EQUAL_INSTALLMENTS');
+  }
+  for (const col of ['accrue_late_interest', 'enforce_deposit_multiplier', 'require_guarantor_cover', 'is_active']) {
+    if (cols[col] !== undefined && typeof cols[col] !== 'boolean') problems.push(`${col} must be true or false`);
   }
   const nonNeg = ['monthly_rate', 'processing_fee', 'penalty_rate', 'penalty_grace_days', 'min_principal', 'max_principal'];
   for (const col of nonNeg) {
@@ -180,7 +202,7 @@ router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
       const { rows: [before] } = await c.query(
         'SELECT * FROM loan_products WHERE id = $1 FOR UPDATE', [req.params.id]);
       if (!before) return { missing: true };
-      const problems = await validate(c, cols, { creating: false });
+      const problems = await validate(c, cols, { creating: false, before });
       if (problems.length) return { problems };
       const keys = Object.keys(cols);
       const { rows } = await c.query(

@@ -882,7 +882,10 @@ async function renderReturn(t) {
 
 const PRODUCT_FIELDS = (p = {}) => [
   { label: 'Name', name: 'name', value: p.name || '' },
-  { label: 'Interest method', name: 'method', options: ['FLAT', 'REDUCING'], value: p.method || 'FLAT' },
+  { label: 'Product type (fixed once created)', name: 'productType', options: ['FIXED_TERM', 'DYNAMIC_TERM'], value: p.productType || 'FIXED_TERM' },
+  { label: 'Interest method', name: 'method', options: ['FLAT', 'REDUCING', 'REDUCING_EQUAL_INSTALLMENTS'], value: p.method || 'FLAT' },
+  { label: 'Prepayment on a dynamic loan', name: 'prepaymentRecalculation', options: ['REDUCE_INSTALLMENT_AMOUNT', 'REDUCE_NUMBER_OF_INSTALLMENTS', 'NONE'], value: p.prepaymentRecalculation || 'REDUCE_INSTALLMENT_AMOUNT' },
+  { label: 'Accrue interest after maturity (dynamic)', name: 'accrueLateInterest', options: ['true', 'false'], value: String(p.accrueLateInterest ?? true) },
   { label: 'Rate, percent per month', name: 'monthlyRate', type: 'number', step: '0.001', value: p.monthlyRate ?? 1 },
   { label: 'Maximum term, months', name: 'maxTerm', type: 'number', value: p.maxTerm ?? 60 },
   { label: 'Processing fee', name: 'processingFee', type: 'number', step: '0.01', value: p.processingFee ?? 0 },
@@ -899,7 +902,9 @@ const PRODUCT_FIELDS = (p = {}) => [
 function productBody(d) {
   const num = (v) => (v === '' || v === undefined ? undefined : Number(v));
   return {
-    name: d.name, method: d.method, monthlyRate: num(d.monthlyRate), maxTerm: num(d.maxTerm),
+    name: d.name, productType: d.productType, method: d.method,
+    prepaymentRecalculation: d.prepaymentRecalculation, accrueLateInterest: d.accrueLateInterest === 'true',
+    monthlyRate: num(d.monthlyRate), maxTerm: num(d.maxTerm),
     processingFee: num(d.processingFee), maxMultiplier: num(d.maxMultiplier),
     enforceDepositMultiplier: d.enforceDepositMultiplier === 'true',
     requireGuarantorCover: d.requireGuarantorCover === 'true',
@@ -914,11 +919,14 @@ async function productsView() {
   view().innerHTML = `
     <div class="toolbar"><h1>Loan products</h1><span class="spacer"></span><button id="p-new">New product</button></div>
     <p class="hint">Rates are copied onto a loan when it is applied for, so changing a product does not
-      reprice loans already running. The accounting method and GL accounts are read live.</p>
+      reprice loans already running. The accounting method and GL accounts are read live.
+      A fixed-term loan owes the interest on its schedule however it is paid; a dynamic-term loan
+      pays interest on the actual balance for the actual days and its schedule is redrawn when it prepays.</p>
     ${table([
     { label: 'Id', key: 'id' },
     { label: 'Name', key: 'name' },
-    { label: 'Method', key: 'method' },
+    { label: 'Type', value: (p) => (p.productType === 'DYNAMIC_TERM' ? 'Dynamic' : 'Fixed') },
+    { label: 'Method', value: (p) => ({ FLAT: 'Flat', REDUCING: 'Reducing', REDUCING_EQUAL_INSTALLMENTS: 'Reducing, equal installments' }[p.method] || p.method) },
     { label: '% / month', num: true, key: 'monthlyRate' },
     { label: 'Max term', num: true, key: 'maxTerm' },
     { label: 'Fee', num: true, value: (p) => money(p.processingFee) },
