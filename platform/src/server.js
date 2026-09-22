@@ -58,6 +58,20 @@ app.use('/console', (req, res, next) => {
   next();
 }, express.static(CONSOLE_DIR, { index: 'index.html', maxAge: '5m' }));
 
+// The member portal, same rules as the console: static, self-only CSP, an
+// ordinary API client on the same origin. Members never see /console and
+// staff never sign in here; the API enforces that, the paths just make it
+// obvious.
+const PORTAL_DIR = path.join(__dirname, '..', 'portal');
+app.use('/portal', (req, res, next) => {
+  res.set('Content-Security-Policy',
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    + "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Referrer-Policy', 'same-origin');
+  next();
+}, express.static(PORTAL_DIR, { index: 'index.html', maxAge: '5m' }));
+
 app.get('/', (_req, res) => res.redirect(302, '/console/'));
 
 // ---------------------------------------------------------------------------
@@ -113,6 +127,7 @@ const shares = require('./routes/shares');
 tenantApi.use('/shares', shares);
 tenantApi.use('/dividends', shares.dividends);
 tenantApi.use('/reports', require('./routes/reports'));
+tenantApi.use('/portal', require('./routes/portal'));
 
 const finance = require('./routes/finance');
 tenantApi.use('/provisioning', finance.provisioning);

@@ -4,8 +4,9 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 
 ## Where the code is
 
-Everything live is under `platform/`. The repository root holds only specification
-markdown and `Qona-MBS/client/`, a front end candidate that is not wired up.
+Everything live is under `platform/`: the API in `src/`, the back office in
+`public/`, the member portal in `portal/`. The repository root holds only
+specification markdown.
 
 Read `platform/README.md` before changing anything. It explains the design decisions
 and the reasons behind them; several of them look like over-engineering until you know
@@ -36,9 +37,18 @@ npm start
 - **Invariants belong in the database**: deferred constraint triggers for journal
   balance, BEFORE UPDATE/DELETE triggers for immutability. Application checks are a
   convenience on top, never the guarantee.
+- **Reports read `gl_daily_balances`, never `journal_lines`.** The rollup is kept
+  exact by a trigger because the journal is append-only; `cli ledger:verify` proves
+  it. A report that scans lines is a regression.
+- **A refusal that follows a write must be returned, not thrown.** See
+  `memberAuth.refuse`: throwing rolls back the failed-attempt record and the
+  lockout with it.
+- **Member tokens and staff tokens never cross.** `requireAuth` refuses role
+  MEMBER; `requireMember` refuses everything else. Do not add a role list that
+  includes both.
 
 ## History
 
 The pre-`platform/` tree — a legacy dashboard API, an in-memory Mambu-shaped `/api/v2`,
-and a Sequelize server under `Qona-MBS/server/` — lives on the `archive/pre-platform`
+and the original Qona-MBS server and client — lives on the `archive/pre-platform`
 branch. Do not resurrect code from it without a reason; it is kept for reference.

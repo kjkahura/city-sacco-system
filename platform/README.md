@@ -82,6 +82,7 @@ src/
     tokens.js          refresh rotation with reuse detection
     totp.js            RFC 6238, implemented on node:crypto
     mfa.js             enrolment, challenge tickets, recovery codes
+    memberAuth.js      member activation, PIN sign-in, lockout, sessions
   domain/
     accounting.js      double-entry posting, reversal, trial balance
     close.js           financial years, year-end close, statutory reserve
@@ -99,23 +100,27 @@ src/
     offsite.js         dir and command drivers for shipping backups
     scheduler.js       in-process timer behind a Postgres advisory lock
   routes/              auth, members, loans, savings, shares, accounting,
-                       reports, finance (provisioning, periods, returns)
+                       reports, finance (provisioning, periods, returns),
+                       portal (the member-facing API)
   lib/
     http.js            error envelope, filter operators, legacy slicing
     page.js            SQL-side paging: offset, limit, count(*) OVER ()
     limits.js          rate limiting and per-tenant concurrency gates
     ratestore.js       Redis-backed counters, memory fallback
 public/                the back office console: index.html, app.js, styles.css
+portal/                the member portal: index.html, app.js, api.js, styles.css
 bin/cli.js             migrate, provision, drift, eod, backup, close, returns
 test/isolation.test.js     36 assertions
 test/lending.test.js       48 assertions
 test/ops.test.js           51 assertions
 test/security.test.js      52 assertions
 test/finance.test.js       54 assertions
-test/provisioning.test.js  33 assertions
-test/close.test.js         36 assertions
-test/reporting.test.js     41 assertions
-test/console.test.js       18 assertions, real browser, not in npm test
+test/provisioning.test.js  36 assertions
+test/close.test.js         40 assertions
+test/reporting.test.js     45 assertions
+test/portal.test.js        49 assertions
+test/console.test.js       18 assertions, real browser, npm run test:browser
+test/portal-ui.test.js     20 assertions, real browser, npm run test:browser
 ```
 
 ## What the database enforces, not the app
@@ -183,6 +188,9 @@ npm run cli year:reopen  --slug citysacco --year 2026 --reason "audit adjustment
 # regulatory returns
 npm run cli returns:load   --slug citysacco --file ./sasra-return.json
 npm run cli returns:render --slug citysacco --code SAMPLE_FINPOS
+
+# the daily rollup, checked against the journal
+npm run cli ledger:verify --slug citysacco [--from ... --to ...]
 ```
 
 ## Backups are encrypted and shipped offsite
@@ -373,6 +381,39 @@ The test suite runs a full backup, restore and integrity round trip.
 **Scheduling** is a plain timer behind `pg_try_advisory_lock`, so two
 instances cannot both fire a sweep. Set `SCHEDULER=on`. On Kubernetes, leave
 it off and use a CronJob calling the CLI instead.
+
+## The daily sequence
+
+`eod.DEFAULT_JOBS`, run by the scheduler or by `cli eod:run`, in this order:
+
+1. `ensureFinancialYear`: opens the calendar year covering the business date
+   if no financial year does. On 1 January the new year opens itself; a SACCO
+   on a July to June year opens its years by hand and this leaves them alone.
+2. `accrueInterest`
+3. `markArrears`
+4. `accruePenalties`, which reads the arrears state the previous job produced
+5. `provision`, which reads the same arrears and posts only the movement
+   since the last run. While the bands have no rates it records a skip, not a
+   failure, so a tenant that has not configured provisioning does not fill
+   the job log with red.
+
+Each job is idempotent per business date through `platform.job_runs`, so a
+rerun is a no-op rather than a double posting.
+
+## Reports read a rollup, not the journal
+
+`gl_daily_balances` holds one row per account per day per closing flag,
+maintained by an AFTER INSERT trigger on `journal_lines` (migration 007).
+Every report reads it. A six-year trial balance touches days rather than
+lines, which for a busy SACCO is two orders of magnitude fewer rows.
+
+The rollup is exact rather than merely fresh because the journal is
+append-only: lines cannot be updated or deleted, and the two entry columns
+the rollup keys on (`booking_date`, `source_type`) are now immutable too. So
+an insert trigger is the whole maintenance story. `cli ledger:verify`, and
+`GET /api/accounting/verify` for an auditor, recompute from the lines and
+report any account that disagrees; an empty list is the claim made good.
+Run it after a restore or after any manual SQL against the ledger.
 
 ## Migrations at fleet scale
 
@@ -592,6 +633,56 @@ so a reload does not sign a teller out mid-transaction and nothing survives
 the tab. `test/console.test.js` drives it in a real Chromium and fails on
 any page error, which is the one class of bug server-side tests cannot see.
 
+## The member portal
+
+Served at `/portal` from `portal/`. The screens are the Qona-MBS client's;
+everything behind them is new.
+
+**Activation, not registration.** A member exists because the SACCO admitted
+them. The portal lets an existing member claim their record by presenting
+the member number, the national ID on file and their phone number, then
+choosing a PIN. Every mismatch returns the same error, so the form does not
+say which of the three was wrong. A record with no phone on file takes the
+presented one, which is how members admitted before phones were captured
+get on without a branch visit.
+
+**PIN sign-in with a lockout that survives.** Five wrong PINs lock the
+credential for fifteen minutes. The lockout and every attempt are written
+before the refusal, and the refusal is returned rather than thrown, because
+throwing inside the transaction would roll the lockout back with it
+(`memberAuth.refuse`). Refresh tokens rotate; a replayed one revokes the
+whole family, same as staff sessions. A PIN change signs out every other
+device.
+
+**Two populations that cannot cross.** A member token carries role MEMBER
+and the member's id. `requireAuth` refuses it on every staff route, including
+the ones that take no role list; `requireMember` refuses everything else.
+Every portal query is filtered by the id in the token, and no portal
+endpoint accepts a member id from the client.
+
+```
+POST /api/portal/auth/activate       { memberNo, nationalId, phone, pin }
+POST /api/portal/auth/login          { phone, pin }
+POST /api/portal/auth/refresh        { refreshToken }
+POST /api/portal/auth/logout         { refreshToken, allDevices }
+POST /api/portal/auth/pin            { currentPin, newPin }
+GET  /api/portal/me
+GET  /api/portal/accounts            savings, shares and loans in one list
+GET  /api/portal/accounts/:no/transactions?offset=&limit=
+GET  /api/portal/loans/:no/schedule
+GET  /api/portal/stats
+GET  /api/portal/transfers/lookup?phone=
+POST /api/portal/transfers/own       { fromAccountId, toAccountId, amount }
+POST /api/portal/transfers/internal  { recipientPhone, amount, description }
+GET/POST/DELETE /api/portal/beneficiaries
+```
+
+A recipient lookup returns a first name, an initial and a masked account
+number: enough to confirm the right person, not enough to enumerate the
+membership. Transfers use the same `savings.transfer` as the teller, so the
+pledged-balance and minimum-balance rules apply to members exactly as they
+do at the counter.
+
 ## Prudential ratios, and what they are not
 
 The ratios are computed from GL accounts tagged with a `regulatory_class`,
@@ -651,18 +742,15 @@ official forms are not.
 
 1. **Return templates are yours to load.** The engine, the storage and the
    renderer are done and tested; no official SASRA form ships with it.
-2. **Provisioning is not scheduled by default.** The EOD job exists but is
-   not in the daily sequence, because most SACCOs provision at month end.
-   Add `provision` to `--jobs` on the last day of the month, or call the
-   CLI from cron.
-3. **No caching.** Paging means a report no longer reads the whole ledger
-   into memory, but a large book will still want materialised balances per
-   period rather than a scan.
-4. **The console covers the back office, not the member.** No member-facing
-   portal, no mobile money integration, no SMS.
-5. **Dividends and provisioning do not talk to each other.** A surplus
+2. **No mobile money and no SMS.** The portal moves money between members'
+   savings accounts; it cannot yet take a deposit from M-Pesa or send one
+   out, and nobody is notified of anything.
+3. **Dividends and provisioning do not talk to each other.** A surplus
    distributed before provisioning is recognised is a real risk and nothing
-   here enforces the order.
+   here enforces the order. Accepted for now.
+4. **Non-calendar financial years open by hand.** `ensureFinancialYear`
+   opens calendar years only; a July to June SACCO uses `cli year:open`
+   with explicit dates.
 
 ## Before real member data
 

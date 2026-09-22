@@ -108,6 +108,13 @@ function requireAuth(...roles) {
     if (req.tenant && req.auth.tid && req.auth.tid !== req.tenant.slug) {
       return next(new TenantError('token tenant mismatch', 403));
     }
+    // A member token never satisfies a staff route. Many staff routes call
+    // requireAuth() with no role list, meaning "any signed-in staff"; if
+    // MEMBER slipped through that, a member could list every other member.
+    // Members reach the portal through requireMember and nothing else.
+    if (req.auth.role === 'MEMBER' && !roles.includes('MEMBER')) {
+      return next(new TenantError('member tokens cannot use staff endpoints', 403));
+    }
     if (roles.length && !roles.includes(req.auth.role)) {
       return next(new TenantError(`role ${req.auth.role} is not permitted here`, 403));
     }
@@ -115,7 +122,23 @@ function requireAuth(...roles) {
   };
 }
 
+/** Require a signed-in member. Populates req.member = { id, memberNo }. */
+function requireMember() {
+  return (req, res, next) => {
+    if (!req.auth) return next(new TenantError('authentication required', 401));
+    if (req.auth.scope) return next(new TenantError('scoped token cannot be used here', 403));
+    if (req.auth.role !== 'MEMBER' || !req.auth.mid) {
+      return next(new TenantError('member sign-in required', 403));
+    }
+    if (req.tenant && req.auth.tid !== req.tenant.slug) {
+      return next(new TenantError('token tenant mismatch', 403));
+    }
+    req.member = { id: req.auth.mid, memberNo: req.auth.memberNo, name: req.auth.name };
+    next();
+  };
+}
+
 const signToken = (payload, expiresIn = '12h') =>
   jwt.sign(payload, signingKey, { algorithm: 'HS256', expiresIn });
 
-module.exports = { resolveTenant, requireAuth, signToken, tenantFromRequest, lookupTenant, invalidate, signingKey };
+module.exports = { resolveTenant, requireAuth, requireMember, signToken, tenantFromRequest, lookupTenant, invalidate, signingKey };

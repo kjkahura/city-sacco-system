@@ -15,6 +15,7 @@ const provision = require('../src/tenancy/provision');
 const acct = require('../src/domain/accounting');
 const CL = require('../src/domain/close');
 const R = require('../src/domain/reports');
+const eod = require('../src/ops/eod');
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -210,6 +211,21 @@ async function assertBalanced(label) {
     check('both closes stay on the record, the first marked reversed',
       closes.length === 2 && closes[0].status === 'REVERSED' && closes[1].status === 'POSTED',
       JSON.stringify(closes));
+    section('the new year opens itself');
+    const tenantRow = (await pool.query(
+      'SELECT id, slug, schema_name FROM platform.tenants WHERE slug=$1', [SLUG])).rows[0];
+    const nextYear = YEAR + 2;
+    const opened = await eod.runJob(tenantRow, 'ensureFinancialYear', { businessDate: `${nextYear}-01-01` });
+    check('EOD on 1 January opens the calendar year', opened.opened === true && opened.year === nextYear,
+      JSON.stringify(opened));
+    const again = await T((c) => CL.ensureYearFor(c, `${nextYear}-07-15`));
+    check('a later day in the same year changes nothing', again.opened === false && again.year === nextYear,
+      JSON.stringify(again));
+    const closedYear = await T((c) => CL.ensureYearFor(c, IN_YEAR));
+    check('a date inside a closed year reports it closed and leaves it alone',
+      closedYear.opened === false && closedYear.status === 'CLOSED', JSON.stringify(closedYear));
+    check('the job is first in the daily sequence', eod.DEFAULT_JOBS[0] === 'ensureFinancialYear',
+      eod.DEFAULT_JOBS.join(','));
   } catch (e) {
     fail++; failures.push(`threw: ${e.stack}`);
     console.error(`\nFAILED: ${e.stack}`);

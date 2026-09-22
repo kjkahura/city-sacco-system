@@ -18,9 +18,9 @@ const p = 1;       // parallelisation
 const KEYLEN = 64;
 const MAXMEM = 64 * 1024 * 1024;
 
-async function hashPassword(plain) {
-  if (typeof plain !== 'string' || plain.length < 8) {
-    throw new Error('password must be at least 8 characters');
+async function hashPassword(plain, { minLength = 8 } = {}) {
+  if (typeof plain !== 'string' || plain.length < minLength) {
+    throw new Error(`password must be at least ${minLength} characters`);
   }
   const salt = crypto.randomBytes(16);
   const key = await scrypt(plain, salt, KEYLEN, { N, r, p, maxmem: MAXMEM });
@@ -45,4 +45,12 @@ async function verifyPassword(plain, stored) {
   }
 }
 
-module.exports = { hashPassword, verifyPassword };
+/**
+ * A member PIN is four to six digits, which no hash can make strong. The
+ * same scrypt is used so a dump of member_credentials costs as much to
+ * attack per guess as a dump of staff passwords, but the real control is the
+ * lockout in memberAuth, and the digit rule is enforced there.
+ */
+const hashPin = (pin) => hashPassword(String(pin), { minLength: 4 });
+
+module.exports = { hashPassword, verifyPassword, hashPin };

@@ -3,18 +3,23 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Qona MBS - Mobile Banking System</title>
-  <link rel="stylesheet" href="/styles.css">
+  <title>Member portal</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <!-- Login Screen -->
   <div id="login-screen" class="screen active">
     <div class="login-container">
       <div class="login-card">
-        <h1>Qona MBS</h1>
-        <p class="login-subtitle">Mobile Banking System</p>
+        <h1>Member portal</h1>
+        <p class="login-subtitle" id="login-sacco-name">Sign in to your SACCO</p>
 
         <form id="login-form">
+          <div class="form-group" id="tenant-group">
+            <label for="login-tenant">SACCO code</label>
+            <input type="text" id="login-tenant" placeholder="citysacco" autocomplete="organization" required>
+          </div>
+
           <div class="form-group">
             <label for="login-phone">Phone Number</label>
             <input type="text" id="login-phone" placeholder="0712345678" required>
@@ -27,74 +32,61 @@
 
           <button type="submit" class="btn btn-primary">Login</button>
 
-          <p class="form-divider">Don't have an account?</p>
-          <button type="button" class="btn btn-secondary" id="show-register">Create Account</button>
+          <p class="form-divider">First time here?</p>
+          <button type="button" class="btn btn-secondary" id="show-register">Activate my membership</button>
         </form>
 
-        <div id="login-error" class="error-message" style="display: none;"></div>
+        <div id="login-error" class="error-message" hidden></div>
       </div>
     </div>
   </div>
 
-  <!-- Register Screen -->
+  <!-- Activation Screen -->
   <div id="register-screen" class="screen">
     <div class="login-container">
       <div class="login-card">
-        <h1>Create Account</h1>
-        <p class="login-subtitle">Join Qona DT SACCO</p>
+        <h1>Activate your membership</h1>
+        <p class="login-subtitle">You are already a member. This links your record to a phone and a PIN.</p>
 
         <form id="register-form">
-          <div class="form-row">
-            <div class="form-group">
-              <label for="reg-first-name">First Name</label>
-              <input type="text" id="reg-first-name" placeholder="John" required>
-            </div>
-            <div class="form-group">
-              <label for="reg-last-name">Last Name</label>
-              <input type="text" id="reg-last-name" placeholder="Doe" required>
-            </div>
+          <div class="form-group">
+            <label for="reg-member-no">Member number</label>
+            <input type="text" id="reg-member-no" placeholder="M000123" required>
           </div>
 
           <div class="form-group">
-            <label for="reg-dob">Date of Birth</label>
-            <input type="date" id="reg-dob" required>
-          </div>
-
-          <div class="form-group">
-            <label for="reg-id">ID Number</label>
+            <label for="reg-id">National ID number</label>
             <input type="text" id="reg-id" placeholder="12345678" required>
           </div>
 
           <div class="form-group">
-            <label for="reg-phone">Phone Number</label>
+            <label for="reg-phone">Phone number</label>
             <input type="text" id="reg-phone" placeholder="0712345678" required>
+            <small class="form-hint">Must be the number your SACCO has on file, if it has one.</small>
           </div>
 
           <div class="form-group">
-            <label for="reg-email">Email</label>
-            <input type="email" id="reg-email" placeholder="john@example.com" required>
+            <label for="reg-pin">Choose a PIN (4 to 6 digits)</label>
+            <input type="password" id="reg-pin" inputmode="numeric" placeholder="Enter PIN" maxlength="6" required>
           </div>
 
-          <div class="form-group">
-            <label for="reg-pin">PIN (4-6 digits)</label>
-            <input type="password" id="reg-pin" placeholder="Enter PIN" maxlength="6" required>
-          </div>
+          <button type="submit" class="btn btn-primary">Activate</button>
 
-          <button type="submit" class="btn btn-primary">Create Account</button>
-          <button type="button" class="btn btn-secondary" id="show-login">Back to Login</button>
+          <p class="form-divider">Already activated?</p>
+          <button type="button" class="btn btn-secondary" id="show-login">Sign in</button>
         </form>
 
-        <div id="register-error" class="error-message" style="display: none;"></div>
+        <div id="register-error" class="error-message" hidden></div>
       </div>
     </div>
   </div>
 
   <!-- Main App -->
-  <div id="app-container" class="app-container" style="display: none;">
+  <div id="app-container" class="app-container" hidden>
     <!-- Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <h2>Qona MBS</h2>
+        <h2 id="sidebar-sacco-name">Member portal</h2>
         <button class="sidebar-toggle" id="sidebar-toggle">☰</button>
       </div>
 
@@ -143,7 +135,7 @@
           <div class="stat-card">
             <div class="stat-icon">💵</div>
             <div class="stat-content">
-              <p class="stat-label">Total Balance</p>
+              <p class="stat-label">Savings balance</p>
               <p class="stat-value" id="total-balance">KES 0.00</p>
             </div>
           </div>
@@ -151,7 +143,7 @@
           <div class="stat-card">
             <div class="stat-icon">📈</div>
             <div class="stat-content">
-              <p class="stat-label">This Month Deposits</p>
+              <p class="stat-label">Total deposits</p>
               <p class="stat-value" id="total-deposits">KES 0.00</p>
             </div>
           </div>
@@ -159,7 +151,7 @@
           <div class="stat-card">
             <div class="stat-icon">📉</div>
             <div class="stat-content">
-              <p class="stat-label">This Month Withdrawals</p>
+              <p class="stat-label">Total withdrawals</p>
               <p class="stat-value" id="total-withdrawals">KES 0.00</p>
             </div>
           </div>
@@ -167,7 +159,7 @@
           <div class="stat-card">
             <div class="stat-icon">🔄</div>
             <div class="stat-content">
-              <p class="stat-label">This Month Transfers</p>
+              <p class="stat-label">Total transfers</p>
               <p class="stat-value" id="total-transfers">KES 0.00</p>
             </div>
           </div>
@@ -223,18 +215,19 @@
         </div>
 
         <div class="filter-bar">
+          <select id="transaction-account" class="filter-select"></select>
           <input type="text" id="transaction-search" class="search-input" placeholder="Search by reference or description...">
           <select id="transaction-type-filter" class="filter-select">
             <option value="">All Types</option>
-            <option value="DEPOSIT">Deposits</option>
-            <option value="WITHDRAWAL">Withdrawals</option>
-            <option value="TRANSFER">Transfers</option>
+            <option value="SAVINGS_DEPOSIT">Deposits</option>
+            <option value="SAVINGS_WITHDRAWAL">Withdrawals</option>
+            <option value="SAVINGS_TRANSFER">Transfers</option>
+            <option value="LOAN_REPAYMENT">Loan repayments</option>
           </select>
           <select id="transaction-status-filter" class="filter-select">
             <option value="">All Status</option>
-            <option value="SUCCESS">Successful</option>
-            <option value="PENDING">Pending</option>
-            <option value="FAILED">Failed</option>
+            <option value="POSTED">Posted</option>
+            <option value="REVERSED">Reversed</option>
           </select>
         </div>
 
@@ -277,7 +270,7 @@
           </div>
 
           <!-- Own Account Transfer Form -->
-          <div id="own-transfer-form" class="transfer-form" style="display: none;">
+          <div id="own-transfer-form" class="transfer-form" hidden>
             <h2>Transfer Between Your Accounts</h2>
             <form id="own-transfer-submit">
               <div class="form-group">
@@ -305,12 +298,12 @@
               </div>
 
               <button type="submit" class="btn btn-primary">Continue</button>
-              <button type="button" class="btn btn-secondary" onclick="resetTransferForm()">Cancel</button>
+              <button type="button" class="btn btn-secondary cancel-transfer">Cancel</button>
             </form>
           </div>
 
           <!-- Internal Transfer Form -->
-          <div id="internal-transfer-form" class="transfer-form" style="display: none;">
+          <div id="internal-transfer-form" class="transfer-form" hidden>
             <h2>Transfer to Another Member</h2>
             <form id="internal-transfer-submit">
               <div class="form-group">
@@ -319,7 +312,7 @@
                 <button type="button" class="btn btn-small" id="lookup-recipient">Look Up</button>
               </div>
 
-              <div id="recipient-info" class="recipient-info" style="display: none;">
+              <div id="recipient-info" class="recipient-info" hidden>
                 <p>Recipient: <strong id="recipient-name"></strong></p>
                 <p>Account: <strong id="recipient-account"></strong></p>
               </div>
@@ -335,7 +328,7 @@
               </div>
 
               <button type="submit" class="btn btn-primary">Continue</button>
-              <button type="button" class="btn btn-secondary" onclick="resetTransferForm()">Cancel</button>
+              <button type="button" class="btn btn-secondary cancel-transfer">Cancel</button>
             </form>
           </div>
         </div>
@@ -353,7 +346,7 @@
         </div>
 
         <!-- Add Beneficiary Modal -->
-        <div id="add-beneficiary-modal" class="modal" style="display: none;">
+        <div id="add-beneficiary-modal" class="modal" hidden>
           <div class="modal-content">
             <button class="modal-close" id="close-modal">&times;</button>
             <h2>Add Beneficiary</h2>
@@ -420,14 +413,14 @@
   </div>
 
   <!-- Loading Spinner -->
-  <div id="loading-spinner" class="loading-spinner" style="display: none;">
+  <div id="loading-spinner" class="loading-spinner" hidden>
     <div class="spinner"></div>
   </div>
 
   <!-- Toast Notification -->
   <div id="toast" class="toast"></div>
 
-  <script src="/utils/api.js"></script>
-  <script src="/app.js"></script>
+  <script src="api.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

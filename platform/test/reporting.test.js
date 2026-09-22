@@ -184,6 +184,23 @@ const LAST_YEAR = new Date().getFullYear() - 1;
     check('the trial balance honours its dates too',
       oneDay.totals.debit === 777, String(oneDay.totals.debit));
 
+    section('the daily rollup is exact');
+    const v = await Rd((c) => acct.verifyRollup(c, {}));
+    check('every account agrees between the rollup and the lines', v.exact,
+      JSON.stringify(v.mismatches).slice(0, 200));
+    check('and the rollup is smaller than what it summarises', v.rollupRows < v.lineRows,
+      `${v.rollupRows} vs ${v.lineRows}`);
+    const viaApi = await call('GET', '/api/accounting/verify');
+    check('an auditor can ask over HTTP', viaApi.status === 200 && viaApi.body.exact === true,
+      String(viaApi.status));
+
+    await throws('an entry\'s booking date cannot be changed under the rollup',
+      () => T(async (c) => {
+        const { rows: [e] } = await c.query('SELECT id FROM journal_entries LIMIT 1');
+        await c.query("UPDATE journal_entries SET booking_date = booking_date + 1 WHERE id = $1", [e.id]);
+      }),
+      (e) => /immutable/.test(e.message));
+
     section('PAR detail pages');
     const par = await call('GET', '/api/reports/portfolio-at-risk/loans?limit=5');
     check('the loan-level PAR report answers', par.status === 200, String(par.status));

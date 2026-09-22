@@ -1,7 +1,7 @@
 # City SACCO System
 
-Multi-tenant core banking for SACCOs. The live system is **[`platform/`](platform/)** —
-everything else in this repository is specification or a front end candidate.
+Multi-tenant core banking for SACCOs. The live system is **[`platform/`](platform/)**.
+Everything else in this repository is specification.
 
 ```bash
 cd platform
@@ -22,8 +22,7 @@ backups and key rotation, reporting, and what is deliberately not done yet.
 
 | Path | What it is |
 |---|---|
-| `platform/` | The system. Node + Postgres, schema per tenant, 240 passing assertions. |
-| `Qona-MBS/client/` | A vanilla JS single-page app, kept as a candidate member-facing front end. It is not wired to `platform/` yet. |
+| `platform/` | The system. Node + Postgres, schema per tenant. Serves the API, the back office at `/console` and the member portal at `/portal`. |
 | `*.md` at the root | Requirements and specifications: AML, guarantees, the Qona MBS requirement and technical specs, the Wakandi signup spec, the implementation overview and roadmap. |
 
 ## What moved, and where to find it
@@ -48,8 +47,10 @@ Removed from `main`, still on that branch:
 - `src/`, `scripts/`, `API_V2.md` — a 400-route Mambu-shaped API surface at `/api/v2`,
   also in-memory. The API *conventions* survived into `platform/`; the code did not.
 - `Qona-MBS/server/` — a separate Sequelize/SQLite server with its own models
+- `Qona-MBS/client/` — the vanilla JS member app. Its screens live on as
+  `platform/portal/`, rewired to the platform API; the original is on the branch.
 
-If a local `Qona-MBS/server/` directory still exists on your machine, it holds only
+If a local `Qona-MBS/` directory still exists on your machine, it holds only
 untracked files (`node_modules`, `.env`, a dev SQLite database) and can be deleted
 by hand.
 
