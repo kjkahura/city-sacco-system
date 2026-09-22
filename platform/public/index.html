@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SACCO back office</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="login" class="login">
+  <form id="login-form" class="card">
+    <h1>SACCO back office</h1>
+    <label>SACCO<input name="tenant" autocomplete="organization" required placeholder="citysacco"></label>
+    <label>Email<input name="email" type="email" autocomplete="username" required></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+    <div id="mfa-code" hidden>
+      <label>Authenticator code<input name="code" inputmode="numeric" autocomplete="one-time-code"
+        placeholder="123456"></label>
+      <p class="hint">Six digits from your authenticator, or one of your recovery codes.</p>
+    </div>
+    <div id="enrol" hidden>
+      <p class="hint">This account needs an authenticator before it can sign in.</p>
+      <p class="mono" id="enrol-secret"></p>
+      <p class="hint">Add that secret to your authenticator app, then enter the code it shows.</p>
+      <label>Code<input name="enrolCode" inputmode="numeric" placeholder="123456"></label>
+    </div>
+    <button type="submit">Sign in</button>
+    <p id="login-error" class="error" role="alert"></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <strong id="sacco-name">&nbsp;</strong>
+    <nav id="nav">
+      <button data-view="members" class="active">Members</button>
+      <button data-view="loans">Loans</button>
+      <button data-view="teller">Teller</button>
+      <button data-view="reports">Reports</button>
+      <button data-view="finance">Period &amp; provisions</button>
+      <button data-view="returns">Returns</button>
+    </nav>
+    <span class="spacer"></span>
+    <span id="whoami" class="hint"></span>
+    <button id="logout" class="link">Sign out</button>
+  </header>
+
+  <main id="view"></main>
+  <div id="toast" class="toast" hidden></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -4,6 +4,7 @@ const { pool } = require('../db/pool');
 const { withTenant } = require('../db/tenantContext');
 const L = require('../domain/loans');
 const P = require('../domain/penalties');
+const P2 = require('../domain/provisioning');
 
 /**
  * End-of-day processing.
@@ -69,6 +70,17 @@ const JOBS = {
       const flagged = await L.markArrears(c, { asOf: businessDate });
       return { flagged: flagged.length, loans: flagged.map((r) => r.account_no) };
     });
+  },
+
+  /**
+   * Loan loss provisioning. Not in the default daily sequence: most SACCOs
+   * provision at month end, and running it daily would post a movement every
+   * night. Call it explicitly, or add it to --jobs on the last day of the
+   * month. It refuses to run while the bands have no rates, and the job
+   * record captures that refusal rather than silently provisioning nothing.
+   */
+  async provision(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => P2.run(c, { asOf: businessDate, asAt: businessDate, createdBy: 'EOD' }));
   },
 
   /** Dormancy: no activity in the configured window. */

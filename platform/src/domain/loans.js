@@ -26,7 +26,7 @@ async function lock(c, loanId) {
             p.processing_fee, p.max_multiplier, p.monthly_rate AS product_rate
      FROM loan_accounts l
      JOIN loan_products p ON p.id = l.product_id
-     WHERE l.id = $1 OR l.account_no = $1::text
+     WHERE l.id::text = $1 OR l.account_no = $1
      FOR UPDATE OF l`,
     [loanId]
   );

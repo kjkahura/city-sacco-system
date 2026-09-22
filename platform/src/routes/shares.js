@@ -3,7 +3,8 @@
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
-const { notFound, paginate, withPaginationHeaders } = require('../lib/http');
+const { notFound } = require('../lib/http');
+const { pageQuery, sendPage, pageParams } = require('../lib/page');
 const SH = require('../domain/shares');
 
 const router = express.Router();
@@ -25,19 +26,22 @@ const tx = (handler, roles = []) => [
 
 router.get('/', requireAuth(), async (req, res, next) => {
   try {
-    const rows = await withTenantRead(req.tenant.schema_name, async (c) => (await c.query(
+    const page = await withTenantRead(req.tenant.schema_name, (c) => pageQuery(
+      c,
       `SELECT a.*, m.member_no, m.first_name, m.last_name
        FROM share_accounts a JOIN members m ON m.id = a.member_id
-       ORDER BY a.account_no`)).rows);
-    const p = paginate(req, rows);
-    withPaginationHeaders(res, p).json(p.page);
+       ORDER BY a.account_no`,
+      [],
+      req.query
+    ));
+    sendPage(res, page);
   } catch (e) { next(e); }
 });
 
 router.get('/register', requireAuth(), async (req, res, next) => {
   try {
     res.json(await withTenantRead(req.tenant.schema_name, (c) =>
-      SH.register(c, { asAt: req.query.asAt || null })));
+      SH.register(c, { asAt: req.query.asAt || null, ...pageParams(req.query) })));
   } catch (e) { next(e); }
 });
 
@@ -59,12 +63,16 @@ router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { act
 
 router.get('/:id/movements', requireAuth(), async (req, res, next) => {
   try {
-    const rows = await withTenantRead(req.tenant.schema_name, async (c) => (await c.query(
+    const page = await withTenantRead(req.tenant.schema_name, (c) => pageQuery(
+      c,
       `SELECT mv.* FROM share_movements mv
        JOIN share_accounts a ON a.id = mv.account_id
-       WHERE a.id = $1 OR a.account_no = $1::text
-       ORDER BY mv.value_date DESC, mv.created_at DESC`, [req.params.id])).rows);
-    res.json(rows);
+       WHERE a.id::text = $1 OR a.account_no = $1
+       ORDER BY mv.value_date DESC, mv.created_at DESC, mv.id`,
+      [req.params.id],
+      req.query
+    ));
+    sendPage(res, page);
   } catch (e) { next(e); }
 });
 
@@ -81,14 +89,17 @@ dividends.get('/', requireAuth(), async (req, res, next) => {
 
 dividends.get('/:year/allocations', requireAuth(), async (req, res, next) => {
   try {
-    const rows = await withTenantRead(req.tenant.schema_name, async (c) => (await c.query(
+    const page = await withTenantRead(req.tenant.schema_name, (c) => pageQuery(
+      c,
       `SELECT a.*, m.member_no, m.first_name, m.last_name
        FROM dividend_allocations a
        JOIN dividends d ON d.id = a.dividend_id
        JOIN members m ON m.id = a.member_id
-       WHERE d.financial_year = $1 ORDER BY a.amount DESC`, [req.params.year])).rows);
-    const p = paginate(req, rows);
-    withPaginationHeaders(res, p).json(p.page);
+       WHERE d.financial_year = $1 ORDER BY a.amount DESC, a.id`,
+      [req.params.year],
+      req.query
+    ));
+    sendPage(res, page);
   } catch (e) { next(e); }
 });
 

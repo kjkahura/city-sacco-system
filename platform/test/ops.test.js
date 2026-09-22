@@ -110,8 +110,11 @@ async function call(method, p, { token, tenant = SLUG, body } = {}) {
     await assertBalanced('share purchase');
 
     const reg = await R((c) => SH.register(c, {}));
-    check('share register shows both holders', reg.length === 2 && reg[0].units === 300,
-      JSON.stringify(reg.map((r) => [r.member_no, r.units])));
+    check('share register shows both holders',
+      reg.holders.length === 2 && reg.holders[0].units === 300 && reg.totalHolders === 2,
+      JSON.stringify(reg.holders.map((r) => [r.member_no, r.units])));
+    check('share register totals units over the whole register', reg.totalUnits === 400,
+      String(reg.totalUnits));
 
     await throws('cannot transfer more units than held', () =>
       T((c) => SH.transfer(c, sh2.id, { toAccountId: sh1.id, units: 5000, createdBy: 'test' })),
@@ -119,7 +122,7 @@ async function call(method, p, { token, tenant = SLUG, body } = {}) {
 
     await T((c) => SH.transfer(c, sh1.id, { toAccountId: sh2.id, units: 50, createdBy: 'test' }));
     const after = await R((c) => SH.register(c, {}));
-    const byNo = Object.fromEntries(after.map((r) => [r.member_no, Number(r.units)]));
+    const byNo = Object.fromEntries(after.holders.map((r) => [r.member_no, Number(r.units)]));
     check('transfer moved units without touching equity', byNo.M1 === 250 && byNo.M2 === 150,
       JSON.stringify(byNo));
     const equity2 = await R((c) => acct.balance(c, '300-100'));
