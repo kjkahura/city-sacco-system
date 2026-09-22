@@ -34,3 +34,6 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+
+# Qona-MBS server (local dev only: env, dev db, lockfile)
+Qona-MBS/server/
