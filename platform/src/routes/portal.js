@@ -118,7 +118,7 @@ router.get('/accounts', ...read(async (c, req) => {
      WHERE a.member_id = $1 ORDER BY a.account_no`, [mid]);
   const { rows: loans } = await c.query(
     `SELECT l.*, p.name AS product FROM loan_accounts l JOIN loan_products p ON p.id = l.product_id
-     WHERE l.member_id = $1 AND l.status NOT IN ('DRAFT','CLOSED_REJECTED','CLOSED_WITHDRAWN')
+     WHERE l.member_id = $1 AND l.status NOT IN ('PARTIAL_APPLICATION','CLOSED_REJECTED','CLOSED_WITHDRAWN')
      ORDER BY l.created_at DESC`, [mid]);
 
   const accounts = [
