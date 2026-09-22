@@ -369,7 +369,7 @@ async function memberDetail(m) {
     { label: 'Account', key: 'account_no' },
     { label: 'Status', key: 'status' },
     { label: 'Principal', num: true, value: (l) => money(l.principal) },
-    { label: 'Outstanding', num: true, value: (l) => money(l.principal_disbursed - l.principal_paid) },
+    { label: 'Outstanding', num: true, value: (l) => money(Number(l.principal_disbursed) + Number(l.principal_capitalized || 0) - l.principal_paid) },
   ], loans.body || [], { onRow: true, empty: 'No loans' }))}`;
 
   $('#back').addEventListener('click', membersView);
@@ -391,7 +391,8 @@ async function loansView() {
   view().innerHTML = `
     <div class="toolbar">
       <label>Status<select id="l-status">
-        ${['', 'PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'IN_ARREARS', 'CLOSED_REPAID'].map((s) =>
+        ${['', 'PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'IN_ARREARS', 'LOCKED', 'CLOSED_REPAID',
+    'CLOSED_WRITTEN_OFF', 'CLOSED_RESCHEDULED', 'CLOSED_REFINANCED', 'CLOSED_REJECTED', 'CLOSED_WITHDRAWN'].map((s) =>
     `<option ${s === loanState.status ? 'selected' : ''} value="${s}">${s || 'Any'}</option>`).join('')}
       </select></label>
     </div>
@@ -400,7 +401,7 @@ async function loansView() {
     { label: 'Member', value: (l) => `${l.first_name} ${l.last_name}` },
     { label: 'Status', value: (l) => l.status },
     { label: 'Principal', num: true, value: (l) => money(l.principal) },
-    { label: 'Outstanding', num: true, value: (l) => money(l.principal_disbursed - l.principal_paid) },
+    { label: 'Outstanding', num: true, value: (l) => money(Number(l.principal_disbursed) + Number(l.principal_capitalized || 0) - l.principal_paid) },
     { label: 'Penalty', num: true, value: (l) => money(l.penalty_accrued - l.penalty_paid) },
   ], r.body, { onRow: true, empty: 'No loans match' })}
     ${pager(loanState, r.total)}`;
@@ -412,37 +413,56 @@ async function loansView() {
   });
 }
 
+const LOAN_ACTIONS = {
+  PARTIAL_APPLICATION: [['request-approval', 'Request approval'], ['amend', 'Amend terms'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
+  PENDING_APPROVAL: [['approve', 'Approve'], ['set-incomplete', 'Send back'], ['amend', 'Amend terms'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
+  APPROVED: [['disburse', 'Disburse'], ['undo-approve', 'Undo approval'], ['withdraw', 'Withdraw'], ['notes', 'Notes']],
+  ACTIVE: [['repay', 'Post repayment'], ['fee', 'Apply fee'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Refinance'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  IN_ARREARS: [['repay', 'Post repayment'], ['fee', 'Apply fee'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Refinance'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  LOCKED: [['unlock', 'Unlock'], ['reschedule', 'Reschedule'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  CLOSED_REJECTED: [['undo-reject', 'Undo rejection']],
+  CLOSED_WITHDRAWN: [['undo-withdraw', 'Undo withdrawal']],
+};
+const BAD_STATES = ['IN_ARREARS', 'LOCKED', 'CLOSED_WRITTEN_OFF'];
+
 async function loanDetail(row) {
   const id = row.account_no;
-  const [loan, schedule, txs, pens] = await Promise.all([
+  const [loan, schedule, txs, pens, fees, hist] = await Promise.all([
     api('GET', `/api/loans/${id}`),
     api('GET', `/api/loans/${id}/schedule`),
     api('GET', `/api/loans/${id}/transactions?limit=25`),
     api('GET', `/api/loans/${id}/penalties?limit=25`),
+    api('GET', `/api/loans/${id}/fees`),
+    api('GET', `/api/loans/${id}/history`),
   ]);
   if (!loan.ok) throw new Error(loan.error);
   const l = loan.body;
   const b = l.balances || {};
-
-  const actions = [];
-  if (l.status === 'PENDING_APPROVAL') actions.push(['approve', 'Approve'], ['reject', 'Reject']);
-  if (l.status === 'APPROVED') actions.push(['disburse', 'Disburse']);
-  if (['ACTIVE', 'IN_ARREARS'].includes(l.status)) actions.push(['repay', 'Post repayment']);
+  const actions = LOAN_ACTIONS[l.status] || [];
+  const outstanding = Number(l.principal_disbursed) + Number(l.principal_capitalized || 0) - Number(l.principal_paid);
 
   view().innerHTML = `
     <button class="secondary" id="back">← Loans</button>
-    <h1>${esc(l.account_no)} <span class="badge ${l.status === 'IN_ARREARS' ? 'bad' : ''}">${esc(l.status)}</span></h1>
-    <p class="hint">${esc(l.first_name)} ${esc(l.last_name)} · ${esc(l.member_no)} · product ${esc(l.product_id)}</p>
+    <h1>${esc(l.account_no)} <span class="badge ${BAD_STATES.includes(l.status) ? 'bad' : ''}">${esc(l.status)}</span>
+      ${l.locked_reason ? `<span class="badge warn">locked: ${esc(l.locked_reason)}</span>` : ''}</h1>
+    <p class="hint">${esc(l.first_name)} ${esc(l.last_name)} · ${esc(l.member_no)} · product ${esc(l.product_id)} · ${esc(l.product_type || '')}
+      ${l.purpose ? ` · ${esc(l.purpose)}` : ''}${l.parent_loan_id ? ' · restructured from an earlier loan' : ''}</p>
+    ${l.notes ? `<p class="hint">${esc(l.notes)}</p>` : ''}
     <div class="toolbar">${actions.map(([a, label]) =>
-    `<button data-action="${a}">${label}</button>`).join('')}</div>
+    `<button data-action="${a}" class="${['approve', 'disburse', 'repay', 'request-approval'].includes(a) ? '' : 'secondary'}">${label}</button>`).join('')}</div>
     <div class="grid">
       ${card('Balances', `<dl class="kv">
         <dt>Principal</dt><dd>${money(l.principal)}</dd>
         <dt>Disbursed</dt><dd>${money(l.principal_disbursed)}</dd>
-        <dt>Principal outstanding</dt><dd>${money(b.principalOutstanding ?? (l.principal_disbursed - l.principal_paid))}</dd>
-        <dt>Interest outstanding</dt><dd>${money(b.interestOutstanding ?? (l.interest_accrued - l.interest_paid))}</dd>
-        <dt>Penalty outstanding</dt><dd>${money(b.penaltyOutstanding ?? (l.penalty_accrued - l.penalty_paid))}</dd>
-        <dt>Total outstanding</dt><dd>${money(b.totalOutstanding)}</dd>
+        ${Number(l.principal_capitalized) > 0 ? `<dt>Capitalised</dt><dd>${money(l.principal_capitalized)}</dd>` : ''}
+        <dt>Principal outstanding</dt><dd>${money(b.principal ?? outstanding)}</dd>
+        <dt>Interest outstanding</dt><dd>${money(b.interest ?? (l.interest_accrued - l.interest_paid))}</dd>
+        <dt>Fees outstanding</dt><dd>${money(b.fees ?? (l.fees_due - l.fees_paid))}</dd>
+        <dt>Penalty outstanding</dt><dd>${money(b.penalty ?? (l.penalty_accrued - l.penalty_paid))}</dd>
+        <dt>Total outstanding</dt><dd>${money(b.total)}</dd>
+        ${l.arrears_since ? `<dt>In arrears since</dt><dd>${day(l.arrears_since)}</dd>` : ''}
+        ${l.approved_by ? `<dt>Approved by</dt><dd>${esc(l.approved_by)}</dd>` : ''}
+        ${l.disbursed_by ? `<dt>Disbursed by</dt><dd>${esc(l.disbursed_by)}</dd>` : ''}
       </dl>`)}
       ${card('Recent transactions', table([
     { label: 'Date', value: (t) => day(t.value_date) },
@@ -455,29 +475,80 @@ async function loanDetail(row) {
     { label: 'Due', value: (i) => day(i.due_date) },
     { label: 'Principal', num: true, value: (i) => money(i.principal_due) },
     { label: 'Interest', num: true, value: (i) => money(i.interest_due) },
-    { label: 'Paid', num: true, value: (i) => money(Number(i.principal_paid) + Number(i.interest_paid)) },
+    { label: 'Fees', num: true, value: (i) => money(i.fee_due) },
+    { label: 'Paid', num: true, value: (i) => money(Number(i.principal_paid) + Number(i.interest_paid) + Number(i.fee_paid)) },
     { label: 'Status', key: 'status' },
   ], schedule.body || [], { empty: 'Not disbursed yet' }))}
+    <div class="grid">
+    ${card('Fees', table([
+    { label: 'Applied', value: (f) => day(f.applied_on) },
+    { label: 'Fee', key: 'name' },
+    { label: 'Type', key: 'fee_type' },
+    { label: 'Amount', num: true, value: (f) => money(f.amount) },
+    { label: 'Paid', num: true, value: (f) => money(f.paid) },
+    { label: 'Status', key: 'status' },
+    { label: '', value: (f) => (f.status === 'DUE' ? `<button class="link" data-waive-fee="${f.id}">waive</button>` : '') },
+  ], fees.body || [], { empty: 'None' }))}
     ${card('Penalties', table([
     { label: 'Charged', value: (p) => day(p.charged_on) },
     { label: 'Days late', num: true, key: 'days_late' },
     { label: 'Amount', num: true, value: (p) => money(p.amount) },
     { label: 'Waived', value: (p) => (p.waived_at ? 'yes' : '') },
-  ], pens.body || [], { empty: 'None' }))}`;
+  ], pens.body || [], { empty: 'None' }))}
+    </div>
+    ${card('History', table([
+    { label: 'When', value: (h) => day(h.at) },
+    { label: 'Action', key: 'action' },
+    { label: 'From', value: (h) => h.from_status || '' },
+    { label: 'To', key: 'to_status' },
+    { label: 'By', key: 'actor' },
+    { label: 'Note', value: (h) => h.note || '' },
+  ], hist.body || [], { empty: 'None' }))}`;
 
   $('#back').addEventListener('click', loansView);
+  view().querySelectorAll('[data-waive-fee]').forEach((btn) => btn.addEventListener('click', async () => {
+    const d = await ask([{ label: 'Reason', name: 'reason' }], 'Waive fee');
+    if (!d) return;
+    const res = await api('POST', `/api/loans/fees/${btn.dataset.waiveFee}/waive`, { reason: d.reason });
+    toast(res.ok ? 'Fee waived' : res.error, !res.ok);
+    if (res.ok) loanDetail(row);
+  }));
   view().querySelectorAll('[data-action]').forEach((btn) => btn.addEventListener('click', async () => {
     const a = btn.dataset.action;
     let res;
-    if (a === 'approve') res = await api('POST', `/api/loans/${id}/approve`, {});
-    if (a === 'reject') res = await api('POST', `/api/loans/${id}/reject`, {});
+    const simple = ['approve', 'undo-approve', 'request-approval', 'unlock', 'undo-reject', 'undo-withdraw'];
+    if (simple.includes(a)) res = await api('POST', `/api/loans/${id}/${a}`, {});
+    if (['reject', 'withdraw', 'set-incomplete', 'lock'].includes(a)) {
+      const d = await ask([{ label: 'Note', name: 'note', required: false }], `${btn.textContent} ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/${a}`, { note: d.note });
+    }
+    if (a === 'amend') {
+      const d = await ask([
+        { label: 'Principal', name: 'principal', type: 'number', step: '0.01', value: l.principal },
+        { label: 'Installments', name: 'termMonths', type: 'number', value: l.term_months },
+        { label: 'Rate (product unit)', name: 'monthlyRate', type: 'number', step: '0.001', value: l.monthly_rate },
+        { label: 'Purpose', name: 'purpose', value: l.purpose || '', required: false },
+        { label: 'Notes', name: 'notes', value: l.notes || '', required: false },
+      ], 'Amend application');
+      if (!d) return;
+      res = await api('PATCH', `/api/loans/${id}`, {
+        principal: Number(d.principal), termMonths: Number(d.termMonths), monthlyRate: Number(d.monthlyRate), purpose: d.purpose, notes: d.notes });
+    }
+    if (a === 'notes') {
+      const d = await ask([{ label: 'Notes', name: 'notes', value: l.notes || '' }], 'Notes');
+      if (!d) return;
+      res = await api('PATCH', `/api/loans/${id}`, { notes: d.notes });
+    }
     if (a === 'disburse') {
       const d = await ask([
         { label: 'Amount', name: 'amount', type: 'number', step: '0.01', value: l.principal },
         { label: 'Channel', name: 'channelId', value: 'bank' },
+        { label: 'Optional fee codes, comma separated', name: 'fees', value: '', required: false },
       ], 'Disburse loan');
       if (!d) return;
-      res = await api('POST', `/api/loans/${id}/disbursements`, { amount: Number(d.amount), channelId: d.channelId });
+      res = await api('POST', `/api/loans/${id}/disbursements`, {
+        amount: Number(d.amount), channelId: d.channelId, fees: d.fees ? d.fees.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean) : [] });
     }
     if (a === 'repay') {
       const d = await ask([
@@ -487,7 +558,40 @@ async function loanDetail(row) {
       if (!d) return;
       res = await api('POST', `/api/loans/${id}/repayments`, { amount: Number(d.amount), channelId: d.channelId });
     }
-    toast(res.ok ? 'Posted' : res.error, !res.ok);
+    if (a === 'fee') {
+      const d = await ask([
+        { label: 'Fee code (leave blank for an arbitrary fee)', name: 'fee', value: '', required: false },
+        { label: 'Name (arbitrary fee)', name: 'name', value: '', required: false },
+        { label: 'Amount (if the fee leaves it open)', name: 'amount', type: 'number', step: '0.01', required: false },
+        { label: 'Note', name: 'note', required: false },
+      ], 'Apply fee');
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/fees`, {
+        fee: d.fee ? d.fee.toUpperCase() : undefined, name: d.name || undefined,
+        amount: d.amount ? Number(d.amount) : undefined, note: d.note });
+    }
+    if (a === 'reschedule' || a === 'refinance') {
+      const d = await ask([
+        { label: 'New number of installments', name: 'termMonths', type: 'number', value: l.term_months },
+        { label: 'Product (blank keeps the same)', name: 'productId', value: '', required: false },
+        ...(a === 'refinance' ? [{ label: 'Top-up paid to the member', name: 'topUp', type: 'number', step: '0.01' },
+          { label: 'Channel', name: 'channelId', value: 'bank' }] : []),
+        { label: 'Interest, fees and penalties owed', name: 'arrears', options: ['CAPITALIZE', 'WRITE_OFF'], value: 'CAPITALIZE' },
+        { label: 'Note', name: 'note', required: false },
+      ], a === 'refinance' ? 'Refinance loan' : 'Reschedule loan');
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/${a}`, {
+        termMonths: Number(d.termMonths), productId: d.productId || undefined, arrears: d.arrears, note: d.note,
+        ...(a === 'refinance' ? { topUp: Number(d.topUp), channelId: d.channelId } : {}) });
+      if (res.ok) { toast(`New loan ${res.body.newLoan.account_no} opened`); return loanDetail({ account_no: res.body.newLoan.account_no }); }
+    }
+    if (a === 'write-off') {
+      const d = await ask([{ label: 'Reason', name: 'narration' }], `Write off ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/write-off`, { narration: d.narration });
+    }
+    if (!res) return;
+    toast(res.ok ? 'Done' : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) loanDetail(row);
   }));
 }
@@ -880,37 +984,190 @@ async function renderReturn(t) {
 // Loan products
 // --------------------------------------------------------------------------
 
+// The product form, in the order Mambu's form runs: identity, type and
+// interest, amount and term, schedule, repayment, arrears and penalties,
+// controls, accounting. Blank optional fields are left unset.
+const opt = (f) => ({ ...f, required: false });
 const PRODUCT_FIELDS = (p = {}) => [
   { label: 'Name', name: 'name', value: p.name || '' },
-  { label: 'Product type (fixed once created)', name: 'productType', options: ['FIXED_TERM', 'DYNAMIC_TERM'], value: p.productType || 'FIXED_TERM' },
+  { label: 'Category', name: 'category', options: ['PERSONAL', 'PURCHASE_FINANCING', 'MORTGAGE', 'SME', 'COMMERCIAL', 'UNCATEGORIZED'], value: p.category || 'UNCATEGORIZED' },
+  { label: 'Account number pattern (# digit, @ letter, $ either)', name: 'idPattern', value: p.idPattern || 'LN######' },
+  { label: 'Numbering', name: 'idMode', options: ['INCREMENTAL', 'RANDOM'], value: p.idMode || 'INCREMENTAL' },
+  { label: 'New applications start as', name: 'initialState', options: ['PENDING_APPROVAL', 'PARTIAL_APPLICATION'], value: p.initialState || 'PENDING_APPROVAL' },
+  { label: 'Product type (fixed once created)', name: 'productType', options: ['FIXED_TERM', 'DYNAMIC_TERM', 'INTEREST_FREE'], value: p.productType || 'FIXED_TERM' },
   { label: 'Interest method', name: 'method', options: ['FLAT', 'REDUCING', 'REDUCING_EQUAL_INSTALLMENTS'], value: p.method || 'FLAT' },
+  { label: 'Interest type', name: 'interestType', options: ['SIMPLE', 'CAPITALIZED', 'COMPOUND'], value: p.interestType || 'SIMPLE' },
+  { label: 'Simple interest base', name: 'simpleBase', options: ['PRINCIPAL_ONLY', 'PRINCIPAL_AND_INTEREST'], value: p.simpleBase || 'PRINCIPAL_ONLY' },
+  { label: 'Interest applied', name: 'interestPosting', options: ['ON_REPAYMENT', 'ON_DISBURSEMENT'], value: p.interestPosting || 'ON_REPAYMENT' },
+  { label: 'Rate quoted', name: 'rateFrequency', options: ['PER_MONTH', 'PER_YEAR', 'PER_WEEK', 'PER_DAY'], value: p.rateFrequency || 'PER_MONTH' },
+  { label: 'Default rate, percent', name: 'monthlyRate', type: 'number', step: '0.0001', value: p.monthlyRate ?? 1 },
+  opt({ label: 'Minimum rate', name: 'rateMin', type: 'number', step: '0.0001', value: p.rateMin ?? '' }),
+  opt({ label: 'Maximum rate', name: 'rateMax', type: 'number', step: '0.0001', value: p.rateMax ?? '' }),
   { label: 'Prepayment on a dynamic loan', name: 'prepaymentRecalculation', options: ['REDUCE_INSTALLMENT_AMOUNT', 'REDUCE_NUMBER_OF_INSTALLMENTS', 'NONE'], value: p.prepaymentRecalculation || 'REDUCE_INSTALLMENT_AMOUNT' },
   { label: 'Accrue interest after maturity (dynamic)', name: 'accrueLateInterest', options: ['true', 'false'], value: String(p.accrueLateInterest ?? true) },
-  { label: 'Rate, percent per month', name: 'monthlyRate', type: 'number', step: '0.001', value: p.monthlyRate ?? 1 },
-  { label: 'Maximum term, months', name: 'maxTerm', type: 'number', value: p.maxTerm ?? 60 },
-  { label: 'Processing fee', name: 'processingFee', type: 'number', step: '0.01', value: p.processingFee ?? 0 },
+  opt({ label: 'Minimum amount', name: 'minPrincipal', type: 'number', step: '0.01', value: p.minPrincipal ?? '' }),
+  opt({ label: 'Default amount', name: 'defaultPrincipal', type: 'number', step: '0.01', value: p.defaultPrincipal ?? '' }),
+  opt({ label: 'Maximum amount', name: 'maxPrincipal', type: 'number', step: '0.01', value: p.maxPrincipal ?? '' }),
+  opt({ label: 'Minimum installments', name: 'minTerm', type: 'number', value: p.minTerm ?? '' }),
+  opt({ label: 'Default installments', name: 'defaultTerm', type: 'number', value: p.defaultTerm ?? '' }),
+  { label: 'Maximum installments', name: 'maxTerm', type: 'number', value: p.maxTerm ?? 60 },
+  { label: 'Repayment every', name: 'repaymentIntervalCount', type: 'number', value: p.repaymentIntervalCount ?? 1 },
+  { label: 'Repayment interval unit', name: 'repaymentIntervalUnit', options: ['MONTHS', 'WEEKS', 'DAYS'], value: p.repaymentIntervalUnit || 'MONTHS' },
+  opt({ label: 'Or fixed days of month, comma separated (e.g. 1,15)', name: 'fixedDaysOfMonth', value: (p.fixedDaysOfMonth || []).join(',') }),
+  { label: 'Short month handling', name: 'shortMonthHandling', options: ['LAST_DAY', 'FIRST_OF_NEXT'], value: p.shortMonthHandling || 'LAST_DAY' },
+  { label: 'First due date offset, days', name: 'firstDueOffsetDays', type: 'number', value: p.firstDueOffsetDays ?? 0 },
+  { label: 'Grace', name: 'graceType', options: ['NONE', 'PRINCIPAL', 'PURE'], value: p.graceType || 'NONE' },
+  { label: 'Grace periods', name: 'gracePeriods', type: 'number', value: p.gracePeriods ?? 0 },
+  opt({ label: 'Amortise over (periods, for a balloon)', name: 'amortizationPeriods', type: 'number', value: p.amortizationPeriods ?? '' }),
+  { label: 'Rounding of payments', name: 'rounding', options: ['NONE', 'WHOLE', 'WHOLE_UP'], value: p.rounding || 'NONE' },
+  { label: 'Processing fee (legacy upfront flat fee)', name: 'processingFee', type: 'number', step: '0.01', value: p.processingFee ?? 0 },
+  { label: 'Allow arbitrary fees', name: 'allowArbitraryFees', options: ['false', 'true'], value: String(p.allowArbitraryFees ?? false) },
   { label: 'Times own deposits a member may borrow', name: 'maxMultiplier', type: 'number', step: '0.1', value: p.maxMultiplier ?? 3 },
   { label: 'Enforce that multiplier at approval', name: 'enforceDepositMultiplier', options: ['true', 'false'], value: String(p.enforceDepositMultiplier ?? true) },
   { label: 'Require guarantor cover at approval', name: 'requireGuarantorCover', options: ['true', 'false'], value: String(p.requireGuarantorCover ?? false) },
+  { label: 'Arrears tolerance, days', name: 'arrearsToleranceDays', type: 'number', value: p.arrearsToleranceDays ?? 0 },
+  opt({ label: 'Arrears tolerance, % of outstanding', name: 'arrearsTolerancePercent', type: 'number', step: '0.001', value: p.arrearsTolerancePercent ?? '' }),
+  opt({ label: 'with a floor of', name: 'arrearsToleranceFloor', type: 'number', step: '0.01', value: p.arrearsToleranceFloor ?? '' }),
+  { label: 'Count days in arrears from', name: 'arrearsCountFrom', options: ['OLDEST_LATE', 'FIRST_ARREARS'], value: p.arrearsCountFrom || 'OLDEST_LATE' },
+  { label: 'Non-working days in tolerance', name: 'arrearsNonWorkingDays', options: ['INCLUDE', 'EXCLUDE'], value: p.arrearsNonWorkingDays || 'INCLUDE' },
   { label: 'Penalty, percent per day', name: 'penaltyRate', type: 'number', step: '0.001', value: p.penaltyRate ?? 0 },
-  { label: 'Penalty basis', name: 'penaltyBasis', options: ['OVERDUE', 'OUTSTANDING'], value: p.penaltyBasis || 'OVERDUE' },
-  { label: 'Accounting', name: 'accountingMethod', options: ['ACCRUAL', 'CASH'], value: p.accountingMethod || 'ACCRUAL' },
+  { label: 'Penalty basis', name: 'penaltyBasis', options: ['OVERDUE_ALL', 'OVERDUE_PRINCIPAL', 'OVERDUE_PRINCIPAL_INTEREST', 'OUTSTANDING_PRINCIPAL', 'NONE'], value: p.penaltyBasis || 'OVERDUE_ALL' },
+  { label: 'Penalty tolerance, days', name: 'penaltyToleranceDays', type: 'number', value: p.penaltyToleranceDays ?? 0 },
+  opt({ label: 'Cap on charges, % of principal (blank: none)', name: 'chargeCapPercent', type: 'number', step: '0.001', value: p.chargeCapPercent ?? '' }),
+  { label: 'Cap base', name: 'chargeCapBase', options: ['OUTSTANDING_PRINCIPAL', 'ORIGINAL_PRINCIPAL'], value: p.chargeCapBase || 'OUTSTANDING_PRINCIPAL' },
+  { label: 'Cap mode', name: 'chargeCapMode', options: ['HARD', 'SOFT'], value: p.chargeCapMode || 'HARD' },
+  opt({ label: 'Lock after days in arrears (blank: never)', name: 'autoLockArrearsDays', type: 'number', value: p.autoLockArrearsDays ?? '' }),
+  { label: 'Accounting', name: 'accountingMethod', options: ['ACCRUAL', 'CASH', 'NONE'], value: p.accountingMethod || 'ACCRUAL' },
   { label: 'Interest accrual', name: 'interestAccrual', options: ['DAILY', 'MONTHLY', 'NONE'], value: p.interestAccrual || 'DAILY' },
   { label: 'Day count', name: 'dayCount', options: ['THIRTY_360', 'ACTUAL_365', 'ACTUAL_360', 'ACTUAL_ACTUAL'], value: p.dayCount || 'THIRTY_360' },
 ];
 
+const PRODUCT_ENUM_FIELDS = ['category', 'idMode', 'initialState', 'productType', 'method', 'interestType', 'simpleBase', 'interestPosting',
+  'rateFrequency', 'prepaymentRecalculation', 'repaymentIntervalUnit', 'shortMonthHandling', 'graceType', 'rounding',
+  'arrearsCountFrom', 'arrearsNonWorkingDays', 'penaltyBasis', 'chargeCapBase', 'chargeCapMode', 'accountingMethod', 'interestAccrual', 'dayCount'];
+const PRODUCT_NUM_FIELDS = ['monthlyRate', 'rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm', 'maxTerm',
+  'repaymentIntervalCount', 'firstDueOffsetDays', 'gracePeriods', 'amortizationPeriods', 'processingFee', 'maxMultiplier',
+  'arrearsToleranceDays', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'penaltyRate', 'penaltyToleranceDays',
+  'chargeCapPercent', 'autoLockArrearsDays'];
+const PRODUCT_BOOL_FIELDS = ['accrueLateInterest', 'allowArbitraryFees', 'enforceDepositMultiplier', 'requireGuarantorCover'];
+// Optional numbers that a blank field sets back to "unset".
+const PRODUCT_NULLABLE = ['rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm',
+  'amortizationPeriods', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'chargeCapPercent', 'autoLockArrearsDays'];
+
 function productBody(d) {
-  const num = (v) => (v === '' || v === undefined ? undefined : Number(v));
+  const out = { name: d.name, idPattern: d.idPattern };
+  for (const k of PRODUCT_ENUM_FIELDS) if (d[k] !== undefined) out[k] = d[k];
+  for (const k of PRODUCT_BOOL_FIELDS) if (d[k] !== undefined) out[k] = d[k] === 'true';
+  for (const k of PRODUCT_NUM_FIELDS) {
+    if (d[k] === undefined) continue;
+    if (d[k] === '') { if (PRODUCT_NULLABLE.includes(k)) out[k] = null; continue; }
+    out[k] = Number(d[k]);
+  }
+  if (d.fixedDaysOfMonth !== undefined) {
+    out.fixedDaysOfMonth = d.fixedDaysOfMonth.trim() ? d.fixedDaysOfMonth.split(',').map((x) => Number(x.trim())).filter(Boolean) : null;
+  }
+  if (out.productType === 'INTEREST_FREE') out.monthlyRate = 0;
+  return out;
+}
+
+const FEE_FIELDS = (f = {}) => [
+  { label: 'Code', name: 'code', value: f.code || '' },
+  { label: 'Name', name: 'name', value: f.name || '' },
+  { label: 'When', name: 'feeType', options: ['MANUAL', 'DISBURSEMENT_DEDUCTED', 'DISBURSEMENT_CAPITALIZED', 'DISBURSEMENT_UPFRONT', 'PAYMENT_DUE', 'LATE_REPAYMENT'], value: f.feeType || 'MANUAL' },
+  { label: 'How much', name: 'calculation', options: ['FLAT', 'PERCENT_OF_AMOUNT', 'FLAT_PER_INSTALLMENT', 'PERCENT_PER_INSTALLMENT', 'PERCENT_OF_INSTALLMENT_PRINCIPAL'], value: f.calculation || 'FLAT' },
+  opt({ label: 'Amount (flat)', name: 'amount', type: 'number', step: '0.01', value: f.amount ?? '' }),
+  opt({ label: 'Percent', name: 'percent', type: 'number', step: '0.0001', value: f.percent ?? '' }),
+  opt({ label: 'Minimum', name: 'minAmount', type: 'number', step: '0.01', value: f.minAmount ?? '' }),
+  opt({ label: 'Maximum', name: 'maxAmount', type: 'number', step: '0.01', value: f.maxAmount ?? '' }),
+  { label: 'Required', name: 'required', options: ['true', 'false'], value: String(f.required ?? true) },
+  opt({ label: 'Fee income GL (blank: product default)', name: 'glIncome', value: f.glIncome || '' }),
+  opt({ label: 'Fee receivable GL (blank: product default)', name: 'glReceivable', value: f.glReceivable || '' }),
+  { label: 'Active', name: 'isActive', options: ['true', 'false'], value: String(f.isActive ?? true) },
+];
+function feeBody(d) {
+  const num = (v) => (v === '' || v === undefined ? null : Number(v));
   return {
-    name: d.name, productType: d.productType, method: d.method,
-    prepaymentRecalculation: d.prepaymentRecalculation, accrueLateInterest: d.accrueLateInterest === 'true',
-    monthlyRate: num(d.monthlyRate), maxTerm: num(d.maxTerm),
-    processingFee: num(d.processingFee), maxMultiplier: num(d.maxMultiplier),
-    enforceDepositMultiplier: d.enforceDepositMultiplier === 'true',
-    requireGuarantorCover: d.requireGuarantorCover === 'true',
-    penaltyRate: num(d.penaltyRate), penaltyBasis: d.penaltyBasis,
-    accountingMethod: d.accountingMethod, interestAccrual: d.interestAccrual, dayCount: d.dayCount,
+    code: d.code ? d.code.toUpperCase() : undefined, name: d.name, feeType: d.feeType, calculation: d.calculation,
+    amount: num(d.amount), percent: num(d.percent), minAmount: num(d.minAmount), maxAmount: num(d.maxAmount),
+    required: d.required === 'true', isActive: d.isActive === 'true',
+    glIncome: d.glIncome || null, glReceivable: d.glReceivable || null,
   };
+}
+
+async function productDetail(p0) {
+  const r = await api('GET', `/api/loan-products/${p0.id}`);
+  if (!r.ok) throw new Error(r.error);
+  const p = r.body;
+  const words = {
+    FLAT: 'Flat', REDUCING: 'Reducing', REDUCING_EQUAL_INSTALLMENTS: 'Reducing, equal installments',
+    FIXED_TERM: 'Fixed term', DYNAMIC_TERM: 'Dynamic term', INTEREST_FREE: 'Interest free',
+  };
+  view().innerHTML = `
+    <button class="secondary" id="back">← Products</button>
+    <div class="toolbar"><h1>${esc(p.id)} · ${esc(p.name)}</h1><span class="spacer"></span>
+      <button id="p-edit" class="secondary">Edit settings</button><button id="p-fee">Add fee</button></div>
+    <div class="grid">
+      ${card('Interest', `<dl class="kv">
+        <dt>Type</dt><dd>${esc(words[p.productType] || p.productType)}</dd>
+        <dt>Method</dt><dd>${esc(words[p.method] || p.method)}</dd>
+        <dt>Interest type</dt><dd>${esc(p.interestType)}${p.simpleBase === 'PRINCIPAL_AND_INTEREST' ? ' on principal and interest' : ''}</dd>
+        <dt>Rate</dt><dd>${p.monthlyRate}% ${esc(p.rateFrequency.replace('PER_', 'per ').toLowerCase())}${p.rateMin !== null || p.rateMax !== null ? ` (${p.rateMin ?? '…'} to ${p.rateMax ?? '…'})` : ''} · ${p.annualRate}% a year</dd>
+        <dt>Applied</dt><dd>${esc(p.interestPosting)} · accrual ${esc(p.interestAccrual)} · ${esc(p.dayCount)}</dd>
+        <dt>Prepayment</dt><dd>${esc(p.prepaymentRecalculation)}${p.accrueLateInterest ? '' : ' · stops at maturity'}</dd>
+      </dl>`)}
+      ${card('Schedule', `<dl class="kv">
+        <dt>Amount</dt><dd>${p.minPrincipal ?? '…'} to ${p.maxPrincipal ?? '…'}${p.defaultPrincipal !== null ? `, default ${p.defaultPrincipal}` : ''}</dd>
+        <dt>Installments</dt><dd>${p.minTerm ?? '…'} to ${p.maxTerm}${p.defaultTerm !== null ? `, default ${p.defaultTerm}` : ''}</dd>
+        <dt>Falls</dt><dd>${p.fixedDaysOfMonth ? `on the ${p.fixedDaysOfMonth.join(' and ')} of the month` : `every ${p.repaymentIntervalCount} ${p.repaymentIntervalUnit.toLowerCase()}`}${p.firstDueOffsetDays ? `, first ${p.firstDueOffsetDays} days later` : ''}</dd>
+        <dt>Grace</dt><dd>${p.graceType === 'NONE' ? 'none' : `${p.gracePeriods} ${p.graceType.toLowerCase()} period(s)`}</dd>
+        <dt>Balloon</dt><dd>${p.amortizationPeriods ? `amortised over ${p.amortizationPeriods}` : 'none'}</dd>
+        <dt>Rounding</dt><dd>${esc(p.rounding)}</dd>
+        <dt>Numbering</dt><dd>${esc(p.idPattern)} ${esc(p.idMode.toLowerCase())}, next ${p.idNext} · starts ${esc(p.initialState)}</dd>
+      </dl>`)}
+      ${card('Arrears, penalties, controls', `<dl class="kv">
+        <dt>Arrears tolerance</dt><dd>${p.arrearsToleranceDays} days${p.arrearsTolerancePercent !== null ? `, ${p.arrearsTolerancePercent}% of outstanding` : ''}${p.arrearsToleranceFloor !== null ? ` (floor ${p.arrearsToleranceFloor})` : ''} · ${esc(p.arrearsNonWorkingDays.toLowerCase())} non-working days · from ${esc(p.arrearsCountFrom)}</dd>
+        <dt>Penalty</dt><dd>${p.penaltyBasis === 'NONE' ? 'none' : `${p.penaltyRate}% a day on ${esc(p.penaltyBasis)}, after ${p.penaltyToleranceDays} days`}</dd>
+        <dt>Cap on charges</dt><dd>${p.chargeCapPercent === null ? 'none set' : `${p.chargeCapPercent}% of ${esc(p.chargeCapBase)}, ${esc(p.chargeCapMode)}`}</dd>
+        <dt>Auto lock</dt><dd>${p.autoLockArrearsDays === null ? 'never' : `after ${p.autoLockArrearsDays} days in arrears`}</dd>
+        <dt>Eligibility</dt><dd>${p.maxMultiplier}× deposits${p.enforceDepositMultiplier ? '' : ' (not enforced)'}${p.requireGuarantorCover ? `, ${p.minCoverPercent}% cover` : ''}</dd>
+        <dt>Accounting</dt><dd>${esc(p.accountingMethod)}${p.accountingMethod !== 'NONE' ? ` · portfolio ${esc(p.gl.portfolio)} · interest ${esc(p.gl.interestIncome)}` : ''}</dd>
+        <dt>Allocation</dt><dd>${p.allocationOrder.join(' → ')}</dd>
+      </dl>`)}
+    </div>
+    ${card('Fees', table([
+    { label: 'Code', key: 'code' },
+    { label: 'Fee', key: 'name' },
+    { label: 'When', key: 'feeType' },
+    { label: 'How much', value: (f) => (f.amount !== null ? money(f.amount) : `${f.percent}%`) + (f.calculation.includes('INSTALLMENT') ? ` ${f.calculation.toLowerCase().replace(/_/g, ' ')}` : '') },
+    { label: 'Required', value: (f) => (f.required ? 'yes' : 'optional') },
+    { label: 'Active', value: (f) => (f.isActive ? 'yes' : 'no') },
+  ], p.fees || [], { onRow: true, empty: 'No fees defined. The legacy processing fee, if any, still applies.' }))}
+    <p class="hint">Click a fee to change it.</p>`;
+
+  $('#back').addEventListener('click', productsView);
+  $('#p-edit').addEventListener('click', async () => {
+    const d = await ask(PRODUCT_FIELDS(p), `Edit ${p.id}`);
+    if (!d) return;
+    const res = await api('PATCH', `/api/loan-products/${p.id}`, productBody(d));
+    toast(res.ok ? `${p.id} saved` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
+    if (res.ok) productDetail(p);
+  });
+  $('#p-fee').addEventListener('click', async () => {
+    const d = await ask(FEE_FIELDS(), `New fee on ${p.id}`);
+    if (!d) return;
+    const res = await api('POST', `/api/loan-products/${p.id}/fees`, feeBody(d));
+    toast(res.ok ? `Fee ${res.body.code} added` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
+    if (res.ok) productDetail(p);
+  });
+  wireRows(p.fees || [], async (f) => {
+    const d = await ask(FEE_FIELDS(f).filter((x) => x.name !== 'code'), `Edit fee ${f.code}`);
+    if (!d) return;
+    const body = feeBody(d);
+    delete body.code;
+    const res = await api('PATCH', `/api/loan-products/${p.id}/fees/${f.id}`, body);
+    toast(res.ok ? `Fee ${f.code} saved` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
+    if (res.ok) productDetail(p);
+  });
 }
 
 async function productsView() {
@@ -925,25 +1182,19 @@ async function productsView() {
     ${table([
     { label: 'Id', key: 'id' },
     { label: 'Name', key: 'name' },
-    { label: 'Type', value: (p) => (p.productType === 'DYNAMIC_TERM' ? 'Dynamic' : 'Fixed') },
+    { label: 'Type', value: (p) => ({ DYNAMIC_TERM: 'Dynamic', FIXED_TERM: 'Fixed', INTEREST_FREE: 'Interest free' }[p.productType] || p.productType) },
     { label: 'Method', value: (p) => ({ FLAT: 'Flat', REDUCING: 'Reducing', REDUCING_EQUAL_INSTALLMENTS: 'Reducing, equal installments' }[p.method] || p.method) },
-    { label: '% / month', num: true, key: 'monthlyRate' },
+    { label: 'Rate', num: true, value: (p) => `${p.monthlyRate}% ${p.rateFrequency.replace('PER_', '/').toLowerCase()}` },
     { label: 'Max term', num: true, key: 'maxTerm' },
-    { label: 'Fee', num: true, value: (p) => money(p.processingFee) },
+    { label: 'Fees', num: true, value: (p) => `${p.feeCount}${p.processingFee > 0 ? ` + ${money(p.processingFee)}` : ''}` },
     { label: 'x deposits', num: true, value: (p) => `${p.maxMultiplier}${p.enforceDepositMultiplier ? '' : ' (not enforced)'}` },
     { label: 'Accounting', value: (p) => `${p.accountingMethod} · ${p.interestAccrual} · ${p.dayCount}` },
     { label: 'Loans', num: true, key: 'loans' },
     { label: 'Active', value: (p) => (p.isActive ? 'yes' : 'no') },
   ], r.body, { onRow: true, empty: 'No products' })}
-    <p class="hint">Click a product to change it.</p>`;
+    <p class="hint">Click a product to see and change its settings and fees.</p>`;
 
-  wireRows(r.body, async (p) => {
-    const d = await ask(PRODUCT_FIELDS(p), `Edit ${p.id}`);
-    if (!d) return;
-    const res = await api('PATCH', `/api/loan-products/${p.id}`, productBody(d));
-    toast(res.ok ? `${p.id} saved` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
-    if (res.ok) productsView();
-  });
+  wireRows(r.body, productDetail);
 
   $('#p-new').addEventListener('click', async () => {
     const d = await ask([

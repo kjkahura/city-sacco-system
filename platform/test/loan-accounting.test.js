@@ -138,7 +138,7 @@ async function disbursedLoan(c, memberId, productId, principal, term, on = today
 
     section('finding 1, continued: penalties go through a receivable too');
     await T((c) => c.query(
-      `UPDATE loan_products SET penalty_rate = 0.5, penalty_basis = 'OVERDUE', gl_penalty_inc = '400-200' WHERE id = 'NL01'`));
+      `UPDATE loan_products SET penalty_rate = 0.5, penalty_basis = 'OVERDUE_ALL', gl_penalty_inc = '400-200' WHERE id = 'NL01'`));
     await T((c) => c.query(
       'UPDATE loan_installments SET due_date = $1::date WHERE loan_id = $2 AND number = 1', [plus(-10), loanA.id]));
     const pen = await T((c) => P.accrueForLoan(c, loanA.id, { asOf: today }));

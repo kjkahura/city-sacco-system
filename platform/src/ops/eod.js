@@ -4,6 +4,8 @@ const { pool } = require('../db/pool');
 const { withTenant } = require('../db/tenantContext');
 const L = require('../domain/loans');
 const P = require('../domain/penalties');
+const F = require('../domain/fees');
+const W = require('../domain/workflow');
 const P2 = require('../domain/provisioning');
 const CL = require('../domain/close');
 
@@ -63,6 +65,34 @@ const JOBS = {
    */
   async accruePenalties(tenant, businessDate) {
     return withTenant(tenant.schema_name, (c) => P.accrueAll(c, { asOf: businessDate }));
+  },
+
+  /**
+   * Fees that fall due by the calendar: a dynamic loan's payment-due fees
+   * on their installment dates, and late repayment fees on installments
+   * that have gone overdue (so after markArrears). Both are once-only per
+   * installment by construction.
+   */
+  async applyFees(tenant, businessDate) {
+    return withTenant(tenant.schema_name, async (c) => {
+      const { rows } = await c.query("SELECT id FROM loan_accounts WHERE status IN ('ACTIVE','IN_ARREARS')");
+      let due = 0; let late = 0;
+      for (const r of rows) {
+        const l = await L.lock(c, r.id);
+        if (L.isDynamic(l)) due += await F.applyPaymentDueFees(c, l, businessDate);
+        late += await F.applyLateFees(c, l, businessDate);
+      }
+      return { loans: rows.length, paymentDueApplied: due, lateFeesApplied: late };
+    });
+  },
+
+  /**
+   * The lending controls: lock loans that have hit their product's charge
+   * cap or sat in arrears past its limit. After penalties and fees, so the
+   * night's charges count.
+   */
+  async enforceControls(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => W.enforceControls(c, { asOf: businessDate }));
   },
 
   /** Flag overdue installments and move loans into arrears. */
@@ -161,7 +191,7 @@ async function runJob(tenant, job, { businessDate = null, force = false } = {}) 
  * posts, arrears before penalties (penalties read arrears state), and
  * provisioning last because it reads the arrears the others just produced.
  */
-const DEFAULT_JOBS = ['ensureFinancialYear', 'accrueInterest', 'markArrears', 'accruePenalties', 'provision'];
+const DEFAULT_JOBS = ['ensureFinancialYear', 'accrueInterest', 'markArrears', 'accruePenalties', 'applyFees', 'enforceControls', 'provision'];
 
 async function runAll({ businessDate = null, jobs = DEFAULT_JOBS, force = false } = {}) {
   const { rows: tenants } = await pool.query(

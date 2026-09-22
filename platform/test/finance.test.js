@@ -91,9 +91,9 @@ const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0
     section('penalties');
     await T((c) => c.query(
       `INSERT INTO loan_products (id, name, method, monthly_rate, max_term, processing_fee,
-         penalty_rate, penalty_basis, penalty_grace_days,
+         penalty_rate, penalty_basis, penalty_tolerance_days,
          gl_portfolio, gl_interest_inc, gl_fee_inc, gl_penalty_inc)
-       VALUES ('PL01','Penalty Loan','FLAT',1.000,12,0, 0.500,'OVERDUE',3,
+       VALUES ('PL01','Penalty Loan','FLAT',1.000,12,0, 0.500,'OVERDUE_ALL',3,
                '100-100','400-100','400-200','400-200')`));
 
     const loan = await T(async (c) => {

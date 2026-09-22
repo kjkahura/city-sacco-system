@@ -7,6 +7,9 @@ const { notFound } = require('../lib/http');
 const { pageQuery, sendPage, pageParams } = require('../lib/page');
 const L = require('../domain/loans');
 const P = require('../domain/penalties');
+const F = require('../domain/fees');
+const W = require('../domain/workflow');
+const R = require('../domain/restructure');
 
 const router = express.Router();
 
@@ -16,7 +19,7 @@ const tx = (handler, roles = []) => [
   async (req, res, next) => {
     try {
       const out = await withTenant(req.tenant.schema_name, (c) =>
-        handler(c, req, res, { actor: req.auth.email }));
+        handler(c, req, res, { actor: req.auth.email, user: req.auth }));
       if (out === undefined) return;
       if (out === null) return notFound(res, 'loan');
       res.json(out);
@@ -36,6 +39,14 @@ const read = (handler) => [
 
 const APPROVER = ['TENANT_ADMIN', 'MANAGER'];
 const TELLER = ['TENANT_ADMIN', 'MANAGER', 'TELLER'];
+
+// --- tenant-wide lending controls ------------------------------------------
+
+router.get('/controls', requireAuth(), async (req, res, next) => {
+  try { res.json(await withTenantRead(req.tenant.schema_name, (c) => W.controls(c))); } catch (e) { next(e); }
+});
+router.patch('/controls', ...tx((c, req, _res, { actor }) => W.updateControls(c, req.body, { actor }), ['TENANT_ADMIN']));
+router.post('/controls/run', ...tx((c, req) => W.enforceControls(c, req.body), APPROVER));
 
 // --- list and read --------------------------------------------------------
 
@@ -135,20 +146,46 @@ router.post('/:id/guarantors', ...tx(async (c, req, res) => {
 }, TELLER));
 
 // --- state ----------------------------------------------------------------
+//
+// One endpoint per action in the life cycle (workflow.ACTIONS), plus the
+// names the first API used. Approving, undoing, rejecting and locking are
+// management decisions; requesting approval, withdrawing and setting an
+// application incomplete are a teller's.
 
-for (const [path, action] of Object.entries({
-  submit: 'SUBMIT', approve: 'APPROVE', 'undo-approve': 'UNAPPROVE',
-  reject: 'REJECT', withdraw: 'WITHDRAW',
-})) {
-  const roles = ['approve', 'undo-approve', 'reject'].includes(path) ? APPROVER : TELLER;
-  router.post(`/:id/${path}`, ...tx((c, req, _res, { actor }) =>
-    L.changeState(c, req.params.id, action, { createdBy: actor }), roles));
+const STATE_ROUTES = {
+  'request-approval': 'REQUEST_APPROVAL', submit: 'REQUEST_APPROVAL', 'set-incomplete': 'SET_INCOMPLETE',
+  approve: 'APPROVE', 'undo-approve': 'UNDO_APPROVE',
+  reject: 'REJECT', 'undo-reject': 'UNDO_REJECT', withdraw: 'WITHDRAW', 'undo-withdraw': 'UNDO_WITHDRAW',
+  lock: 'LOCK', unlock: 'UNLOCK',
+};
+const TELLER_ACTIONS = ['REQUEST_APPROVAL', 'SET_INCOMPLETE', 'WITHDRAW'];
+for (const [path, action] of Object.entries(STATE_ROUTES)) {
+  const roles = TELLER_ACTIONS.includes(action) ? TELLER : APPROVER;
+  router.post(`/:id/${path}`, ...tx((c, req, _res, { actor, user }) =>
+    W.transition(c, req.params.id, action, { createdBy: actor, user, note: req.body?.note, reason: req.body?.reason }), roles));
 }
+
+router.get('/:id/history', ...read((c, req) => W.historyOf(c, req.params.id)));
+
+// Amendments: the terms while the application is open, the narrative
+// afterwards. The domain layer decides which is which.
+router.patch('/:id', ...tx((c, req, _res, { actor }) => W.amend(c, req.params.id, req.body, { actor }), TELLER));
+
+// --- fees -----------------------------------------------------------------
+
+router.get('/:id/fees', ...read((c, req) => F.forLoan(c, req.params.id)));
+router.post('/:id/fees', ...tx(async (c, req, res, { actor }) => {
+  const body = { ...req.body, createdBy: actor };
+  const out = body.fee ? await F.applyManualFee(c, req.params.id, body) : await F.applyArbitraryFee(c, req.params.id, body);
+  res.status(201).json(out);
+}, TELLER));
+router.post('/fees/:feeId/waive', ...tx((c, req, _res, { actor }) =>
+  F.waive(c, req.params.feeId, { ...req.body, createdBy: actor }), APPROVER));
 
 // --- money ----------------------------------------------------------------
 
-router.post('/:id/disbursements', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await L.disburse(c, req.params.id, { ...req.body, createdBy: actor }));
+router.post('/:id/disbursements', ...tx(async (c, req, res, { actor, user }) => {
+  res.status(201).json(await L.disburse(c, req.params.id, { ...req.body, createdBy: actor, user }));
 }, APPROVER));
 
 router.post('/:id/repayments', ...tx(async (c, req, res, { actor }) => {
@@ -159,6 +196,13 @@ router.post('/:id/accrue-interest', ...tx(async (c, req, res, { actor }) => {
   const out = await L.accrueInterest(c, req.params.id, { ...req.body, createdBy: actor });
   res.status(out ? 201 : 200).json(out || { accrued: 0 });
 }, APPROVER));
+
+// Restructuring closes the loan and opens a linked one; a management decision.
+for (const [path, kind] of [['reschedule', 'RESCHEDULE'], ['refinance', 'REFINANCE']]) {
+  router.post(`/:id/${path}`, ...tx(async (c, req, res, { actor }) => {
+    res.status(201).json(await R.restructure(c, req.params.id, { ...req.body, kind, createdBy: actor }));
+  }, APPROVER));
+}
 
 router.post('/:id/write-off', ...tx(async (c, req, res, { actor }) => {
   res.status(201).json(await L.writeOff(c, req.params.id, { ...req.body, createdBy: actor }));
@@ -188,5 +232,16 @@ router.post('/penalties/:chargeId/waive', ...tx((c, req, _res, { actor }) =>
 router.post('/penalties/run', ...tx((c, req) => P.accrueAll(c, req.body), APPROVER));
 
 router.post('/arrears/run', ...tx((c, req) => L.markArrears(c, req.body), APPROVER));
+router.post('/fees/run', ...tx(async (c, req) => {
+  const asOf = req.body?.asOf || new Date().toISOString().slice(0, 10);
+  const { rows } = await c.query("SELECT id FROM loan_accounts WHERE status IN ('ACTIVE','IN_ARREARS')");
+  let due = 0, late = 0;
+  for (const r of rows) {
+    const l = await L.lock(c, r.id);
+    if (L.isDynamic(l)) due += await F.applyPaymentDueFees(c, l, asOf);
+    late += await F.applyLateFees(c, l, asOf);
+  }
+  return { loans: rows.length, paymentDueApplied: due, lateFeesApplied: late };
+}, APPROVER));
 
 module.exports = router;

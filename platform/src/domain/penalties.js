@@ -13,9 +13,17 @@ const { err, round2 } = acct;
  * member twice for the same day. The database refuses it, so idempotence
  * does not depend on the job remembering what it did.
  *
- * Two bases, because SACCOs price this both ways:
- *   OVERDUE      rate on the amount actually in arrears (the fair one)
- *   OUTSTANDING  rate on the whole outstanding principal (the punitive one)
+ * Mambu's four bases ("Loan Penalties Setup"), each a daily rate:
+ *   OVERDUE_PRINCIPAL           principal in arrears
+ *   OVERDUE_PRINCIPAL_INTEREST  principal and interest in arrears
+ *   OVERDUE_ALL                 principal, interest and fees in arrears
+ *   OUTSTANDING_PRINCIPAL       the whole outstanding principal, which is a
+ *                               penalty interest rate on top of the rate
+ * and NONE. The penalty tolerance period is the number of days late before
+ * a penalty is applied; it is counted from the due date, so once it lapses
+ * the penalty covers every late day. The rate is the product's unless the
+ * loan carries its own. A loan in arrears under a charge cap has its
+ * penalties capped like every other charge (workflow.capAllows).
  */
 
 function daysLate(dueDate, asOf) {
@@ -30,23 +38,20 @@ function daysLate(dueDate, asOf) {
 async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {}) {
   const date = asOf || new Date().toISOString().slice(0, 10);
 
-  const { rows: [l] } = await c.query(
-    `SELECT l.*, p.penalty_rate, p.penalty_basis, p.penalty_grace_days,
-            p.gl_penalty_inc, p.gl_penalty_rec, p.gl_portfolio, p.gl_interest_inc,
-            p.accounting_method
-     FROM loan_accounts l JOIN loan_products p ON p.id = l.product_id
-     WHERE l.id = $1 FOR UPDATE OF l`,
-    [loanId]
-  );
-  if (!l) throw err('LOAN_NOT_FOUND', 404);
+  const L = require('./loans');
+  const W = require('./workflow');
+  const l = await L.lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) return [];
-  const rate = Number(l.penalty_rate) / 100;
+  if (!l.penalty_basis || l.penalty_basis === 'NONE') return [];
+  const effRate = Number(L.effective(l).penaltyRate);
+  const rate = effRate / 100;
   if (!(rate > 0)) return [];
+  const tolerance = Number(l.penalty_tolerance_days || 0);
 
   const { rows: overdue } = await c.query(
     `SELECT * FROM loan_installments
      WHERE loan_id = $1
-       AND status <> 'PAID'
+       AND status NOT IN ('PAID', 'GRACE')
        AND due_date < $2::date
      ORDER BY number`,
     [l.id, date]
@@ -57,20 +62,24 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
 
   for (const inst of overdue) {
     const late = daysLate(inst.due_date, date);
-    if (late <= Number(l.penalty_grace_days)) continue;
+    if (late <= tolerance) continue;
 
-    const arrears = round2(
-      (inst.principal_due - inst.principal_paid)
-      + (inst.interest_due - inst.interest_paid)
-      + (inst.fee_due - inst.fee_paid)
-    );
-    if (arrears <= 0) continue;
+    const overduePrincipal = round2(inst.principal_due - inst.principal_paid);
+    const overdueInterest = round2(inst.interest_due - inst.interest_paid);
+    const overdueFees = round2(inst.fee_due - inst.fee_paid);
+    if (round2(overduePrincipal + overdueInterest + overdueFees) <= 0) continue;
 
-    const basisAmount = l.penalty_basis === 'OUTSTANDING'
-      ? round2(l.principal_disbursed - l.principal_paid)
-      : arrears;
-    const amount = round2(basisAmount * rate);
+    let basisAmount;
+    switch (l.penalty_basis) {
+      case 'OVERDUE_PRINCIPAL': basisAmount = overduePrincipal; break;
+      case 'OVERDUE_PRINCIPAL_INTEREST': basisAmount = round2(overduePrincipal + overdueInterest); break;
+      case 'OUTSTANDING_PRINCIPAL': basisAmount = L.principalOutstanding(l); break;
+      default: basisAmount = round2(overduePrincipal + overdueInterest + overdueFees);
+    }
+    let amount = round2(Math.max(0, basisAmount) * rate);
     if (!(amount > 0)) continue;
+    amount = await W.capAllows(c, l, amount);
+    if (!(amount > 0)) break;
 
     // ON CONFLICT DO NOTHING rather than catching a unique violation:
     // inside a transaction, any statement error aborts the whole
@@ -83,7 +92,7 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
        VALUES ($1,$2,$3::date,$4,$5,$6,$7)
        ON CONFLICT (installment_id, charged_on) WHERE waived_at IS NULL DO NOTHING
        RETURNING *`,
-      [l.id, inst.id, date, late, basisAmount, l.penalty_rate, amount]
+      [l.id, inst.id, date, late, basisAmount, effRate, amount]
     );
     if (!ins.length) continue;            // already charged for this day
     const inserted = ins[0];
@@ -93,20 +102,22 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
     // debit the portfolio, which inflated the loan book with income that
     // had not been collected and then recognised it again on payment.
     let entryId = null;
-    if (l.accounting_method !== 'CASH') {
-      const entry = await acct.post(c, {
+    if (L.isAccrual(l)) {
+      entryId = await L.post(c, l, {
         debits: [{ glCode: l.gl_penalty_rec, amount, memberId: l.member_id }],
         credits: [{ glCode: glIncome, amount, memberId: l.member_id }],
         narration: `Penalty ${l.account_no} installment ${inst.number}, ${late} days late`,
         sourceType: 'LOAN_PENALTY', sourceId: l.id, bookingDate: date, createdBy,
       });
-      entryId = entry.entryId;
-      await c.query('UPDATE penalty_charges SET entry_id = $1 WHERE id = $2', [entryId, inserted.id]);
+      if (entryId) await c.query('UPDATE penalty_charges SET entry_id = $1 WHERE id = $2', [entryId, inserted.id]);
     }
     await c.query(
-      'UPDATE loan_accounts SET penalty_accrued = penalty_accrued + $1, updated_at = now() WHERE id = $2',
+      `UPDATE loan_accounts SET penalty_accrued = penalty_accrued + $1,
+         charges_since_arrears = charges_since_arrears + CASE WHEN status = 'IN_ARREARS' THEN $1 ELSE 0 END,
+         updated_at = now() WHERE id = $2`,
       [amount, l.id]
     );
+    l.charges_since_arrears = Number(l.charges_since_arrears || 0) + amount;
 
     charges.push({ ...inserted, entryId });
   }
@@ -121,8 +132,9 @@ async function accrueAll(c, { asOf = null, createdBy = 'EOD' } = {}) {
      JOIN loan_products p ON p.id = l.product_id
      JOIN loan_installments i ON i.loan_id = l.id
      WHERE l.status IN ('ACTIVE','IN_ARREARS')
-       AND p.penalty_rate > 0
-       AND i.status <> 'PAID'
+       AND COALESCE(l.penalty_rate, p.penalty_rate) > 0
+       AND p.penalty_basis <> 'NONE'
+       AND i.status NOT IN ('PAID', 'GRACE')
        AND i.due_date < $1::date`,
     [date]
   );

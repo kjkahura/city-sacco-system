@@ -6,23 +6,20 @@ const { requireAuth } = require('../tenancy/resolve');
 const { apiError, badRequest, notFound } = require('../lib/http');
 
 /**
- * Loan products.
+ * Loan products, the whole configuration surface, after Mambu's loan
+ * product form: identity and numbering, type and interest method, rate and
+ * bands, amount and term, repayment interval and grace, balloon and
+ * rounding, arrears and penalties, the charge cap, internal controls, fees,
+ * eligibility, allocation order, and accounting.
  *
- * A product is the pricing and accounting template every loan under it
- * follows: product type, interest method, rate, term, fee, penalty pricing,
- * eligibility rules, allocation order, accounting method, accrual method,
- * day count, prepayment handling, and the GL accounts each component posts
- * to. Until now the only way to create one was SQL.
- *
- * The product type (FIXED_TERM or DYNAMIC_TERM) decides how interest is
- * worked out on every loan under it and cannot be changed once the product
- * exists, as in Mambu: the loans already running were written under it.
- *
- * Changing a product does not touch loans already running: the rate is
- * copied onto the loan at application. The GL mappings and the accounting
- * method are read live, so changing those changes how existing loans post
- * from that moment on, which is also what Mambu does and is the right call:
- * the alternative is a product whose accounting can never be corrected.
+ * Changing a product does not touch loans already running: the rate and
+ * type are copied onto the loan at application, the schedule is drawn at
+ * disbursement. GL mappings and the accounting method are read live, so a
+ * wrong mapping can be corrected. The settings that decide how interest is
+ * computed (type, method, interest type, posting, rate frequency, day count,
+ * interval) may not change once a loan exists under the product: a SACCO
+ * that needs different arithmetic creates a new product. Mambu behaves the
+ * same way for the product type and warns about the rest.
  */
 
 const router = express.Router();
@@ -30,22 +27,53 @@ const READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR', 'TELLER'];
 const ADMIN = ['TENANT_ADMIN', 'MANAGER'];
 
 const ENUMS = {
-  product_type: ['FIXED_TERM', 'DYNAMIC_TERM'],
+  product_type: ['FIXED_TERM', 'DYNAMIC_TERM', 'INTEREST_FREE'],
+  category: ['PERSONAL', 'PURCHASE_FINANCING', 'MORTGAGE', 'SME', 'COMMERCIAL', 'UNCATEGORIZED'],
   method: ['FLAT', 'REDUCING', 'REDUCING_EQUAL_INSTALLMENTS'],
+  interest_type: ['SIMPLE', 'CAPITALIZED', 'COMPOUND'],
+  simple_base: ['PRINCIPAL_ONLY', 'PRINCIPAL_AND_INTEREST'],
+  interest_posting: ['ON_REPAYMENT', 'ON_DISBURSEMENT'],
+  rate_frequency: ['PER_YEAR', 'PER_MONTH', 'PER_WEEK', 'PER_DAY'],
   prepayment_recalculation: ['NONE', 'REDUCE_INSTALLMENT_AMOUNT', 'REDUCE_NUMBER_OF_INSTALLMENTS'],
-  accounting_method: ['ACCRUAL', 'CASH'],
+  accounting_method: ['ACCRUAL', 'CASH', 'NONE'],
   interest_accrual: ['DAILY', 'MONTHLY', 'NONE'],
   day_count: ['THIRTY_360', 'ACTUAL_365', 'ACTUAL_360', 'ACTUAL_ACTUAL'],
-  penalty_basis: ['OVERDUE', 'OUTSTANDING'],
+  penalty_basis: ['NONE', 'OVERDUE_PRINCIPAL', 'OVERDUE_PRINCIPAL_INTEREST', 'OVERDUE_ALL', 'OUTSTANDING_PRINCIPAL'],
+  id_mode: ['RANDOM', 'INCREMENTAL'],
+  initial_state: ['PARTIAL_APPLICATION', 'PENDING_APPROVAL'],
+  repayment_interval_unit: ['MONTHS', 'WEEKS', 'DAYS'],
+  short_month_handling: ['LAST_DAY', 'FIRST_OF_NEXT'],
+  grace_type: ['NONE', 'PRINCIPAL', 'PURE'],
+  rounding: ['NONE', 'WHOLE', 'WHOLE_UP'],
+  arrears_count_from: ['FIRST_ARREARS', 'OLDEST_LATE'],
+  arrears_non_working_days: ['INCLUDE', 'EXCLUDE'],
+  charge_cap_base: ['ORIGINAL_PRINCIPAL', 'OUTSTANDING_PRINCIPAL'],
+  charge_cap_mode: ['SOFT', 'HARD'],
 };
 
 // camelCase on the wire, snake_case in the table.
 const FIELDS = {
-  name: 'name', description: 'description', productType: 'product_type', method: 'method',
+  name: 'name', description: 'description', category: 'category',
+  productType: 'product_type', method: 'method',
+  interestType: 'interest_type', simpleBase: 'simple_base', interestPosting: 'interest_posting',
+  rateFrequency: 'rate_frequency', monthlyRate: 'monthly_rate', rateMin: 'rate_min', rateMax: 'rate_max',
   prepaymentRecalculation: 'prepayment_recalculation', accrueLateInterest: 'accrue_late_interest',
-  monthlyRate: 'monthly_rate', maxTerm: 'max_term', processingFee: 'processing_fee',
-  maxMultiplier: 'max_multiplier', minPrincipal: 'min_principal', maxPrincipal: 'max_principal',
-  penaltyRate: 'penalty_rate', penaltyBasis: 'penalty_basis', penaltyGraceDays: 'penalty_grace_days',
+  idPattern: 'id_pattern', idMode: 'id_mode', idNext: 'id_next', initialState: 'initial_state',
+  minPrincipal: 'min_principal', maxPrincipal: 'max_principal', defaultPrincipal: 'default_principal',
+  minTerm: 'min_term', maxTerm: 'max_term', defaultTerm: 'default_term',
+  repaymentIntervalUnit: 'repayment_interval_unit', repaymentIntervalCount: 'repayment_interval_count',
+  fixedDaysOfMonth: 'fixed_days_of_month', shortMonthHandling: 'short_month_handling',
+  firstDueOffsetDays: 'first_due_offset_days', firstDueOffsetMin: 'first_due_offset_min', firstDueOffsetMax: 'first_due_offset_max',
+  graceType: 'grace_type', gracePeriods: 'grace_periods', amortizationPeriods: 'amortization_periods', rounding: 'rounding',
+  processingFee: 'processing_fee', allowArbitraryFees: 'allow_arbitrary_fees',
+  maxMultiplier: 'max_multiplier',
+  penaltyRate: 'penalty_rate', penaltyRateMin: 'penalty_rate_min', penaltyRateMax: 'penalty_rate_max',
+  penaltyBasis: 'penalty_basis', penaltyToleranceDays: 'penalty_tolerance_days',
+  arrearsToleranceDays: 'arrears_tolerance_days', arrearsTolerancePercent: 'arrears_tolerance_percent',
+  arrearsToleranceFloor: 'arrears_tolerance_floor', arrearsCountFrom: 'arrears_count_from',
+  arrearsNonWorkingDays: 'arrears_non_working_days',
+  chargeCapPercent: 'charge_cap_percent', chargeCapBase: 'charge_cap_base', chargeCapMode: 'charge_cap_mode',
+  autoClosePaidOffDays: 'auto_close_paid_off_days', autoLockArrearsDays: 'auto_lock_arrears_days',
   accountingMethod: 'accounting_method', interestAccrual: 'interest_accrual', dayCount: 'day_count',
   allocationOrder: 'allocation_order',
   enforceDepositMultiplier: 'enforce_deposit_multiplier',
@@ -55,6 +83,13 @@ const FIELDS = {
   glPenaltyRec: 'gl_penalty_rec', glWriteoffExp: 'gl_writeoff_exp',
   isActive: 'is_active',
 };
+// The old name for the penalty tolerance still works on the wire.
+FIELDS.penaltyGraceDays = 'penalty_tolerance_days';
+
+// Settings that change how a loan's interest is worked out. Frozen once a
+// loan exists under the product.
+const FROZEN_WITH_LOANS = ['product_type', 'method', 'interest_type', 'simple_base', 'interest_posting',
+  'rate_frequency', 'day_count', 'repayment_interval_unit', 'repayment_interval_count', 'fixed_days_of_month'];
 
 // Which GL type each mapping must point at. A portfolio account that is an
 // income account would balance every entry and be wrong on every report.
@@ -64,15 +99,32 @@ const GL_TYPES = {
   gl_writeoff_exp: ['EXPENSE'],
 };
 
+const num = (v) => (v === null || v === undefined ? null : Number(v));
+
 const publicProduct = (p) => ({
-  id: p.id, name: p.name, description: p.description,
+  id: p.id, name: p.name, description: p.description, category: p.category,
   productType: p.product_type, method: p.method,
+  interestType: p.interest_type, simpleBase: p.simple_base, interestPosting: p.interest_posting,
+  rateFrequency: p.rate_frequency, monthlyRate: Number(p.monthly_rate), rate: Number(p.monthly_rate),
+  rateMin: num(p.rate_min), rateMax: num(p.rate_max),
+  annualRate: Math.round(require('../domain/schedule').annualRate(p.monthly_rate, p.rate_frequency, p.day_count) * 10000) / 100,
   prepaymentRecalculation: p.prepayment_recalculation, accrueLateInterest: p.accrue_late_interest,
-  monthlyRate: Number(p.monthly_rate), annualRate: Math.round(Number(p.monthly_rate) * 1200) / 100,
-  maxTerm: p.max_term, processingFee: Number(p.processing_fee), maxMultiplier: Number(p.max_multiplier),
-  minPrincipal: p.min_principal === null ? null : Number(p.min_principal),
-  maxPrincipal: p.max_principal === null ? null : Number(p.max_principal),
-  penaltyRate: Number(p.penalty_rate), penaltyBasis: p.penalty_basis, penaltyGraceDays: p.penalty_grace_days,
+  idPattern: p.id_pattern, idMode: p.id_mode, idNext: Number(p.id_next), initialState: p.initial_state,
+  minPrincipal: num(p.min_principal), maxPrincipal: num(p.max_principal), defaultPrincipal: num(p.default_principal),
+  minTerm: p.min_term, maxTerm: p.max_term, defaultTerm: p.default_term,
+  repaymentIntervalUnit: p.repayment_interval_unit, repaymentIntervalCount: p.repayment_interval_count,
+  fixedDaysOfMonth: p.fixed_days_of_month, shortMonthHandling: p.short_month_handling,
+  firstDueOffsetDays: p.first_due_offset_days, firstDueOffsetMin: p.first_due_offset_min, firstDueOffsetMax: p.first_due_offset_max,
+  graceType: p.grace_type, gracePeriods: p.grace_periods, amortizationPeriods: p.amortization_periods, rounding: p.rounding,
+  processingFee: Number(p.processing_fee), allowArbitraryFees: p.allow_arbitrary_fees,
+  maxMultiplier: Number(p.max_multiplier),
+  penaltyRate: Number(p.penalty_rate), penaltyRateMin: num(p.penalty_rate_min), penaltyRateMax: num(p.penalty_rate_max),
+  penaltyBasis: p.penalty_basis, penaltyToleranceDays: p.penalty_tolerance_days, penaltyGraceDays: p.penalty_tolerance_days,
+  arrearsToleranceDays: p.arrears_tolerance_days, arrearsTolerancePercent: num(p.arrears_tolerance_percent),
+  arrearsToleranceFloor: num(p.arrears_tolerance_floor), arrearsCountFrom: p.arrears_count_from,
+  arrearsNonWorkingDays: p.arrears_non_working_days,
+  chargeCapPercent: num(p.charge_cap_percent), chargeCapBase: p.charge_cap_base, chargeCapMode: p.charge_cap_mode,
+  autoClosePaidOffDays: p.auto_close_paid_off_days, autoLockArrearsDays: p.auto_lock_arrears_days,
   accountingMethod: p.accounting_method, interestAccrual: p.interest_accrual, dayCount: p.day_count,
   allocationOrder: p.allocation_order,
   enforceDepositMultiplier: p.enforce_deposit_multiplier,
@@ -83,36 +135,76 @@ const publicProduct = (p) => ({
     feeReceivable: p.gl_fee_rec, penaltyReceivable: p.gl_penalty_rec, writeOffExpense: p.gl_writeoff_exp,
   },
   isActive: p.is_active, updatedAt: p.updated_at,
+  ...(p.fees ? { fees: p.fees.map(publicFee) } : {}),
 });
 
-async function validate(c, cols, { creating, before = null }) {
+const publicFee = (f) => ({
+  id: f.id, code: f.code, name: f.name, feeType: f.fee_type, calculation: f.calculation,
+  amount: num(f.amount), percent: num(f.percent), minAmount: num(f.min_amount), maxAmount: num(f.max_amount),
+  required: f.required, glIncome: f.gl_income, glReceivable: f.gl_receivable, isActive: f.is_active,
+});
+
+const isBool = (v) => typeof v === 'boolean';
+const isInt = (v) => Number.isInteger(Number(v));
+
+async function validate(c, cols, { creating, before = null, loans = 0 }) {
   const problems = [];
   for (const [col, allowed] of Object.entries(ENUMS)) {
     if (cols[col] !== undefined && !allowed.includes(cols[col])) {
       problems.push(`${col} must be one of ${allowed.join(', ')}`);
     }
   }
+  const merged = { ...(before || {}), ...cols };
+  const type = merged.product_type || 'FIXED_TERM';
+  const method = merged.method || 'FLAT';
+
   if (before && cols.product_type !== undefined && cols.product_type !== before.product_type) {
     problems.push('product_type cannot be changed once a product exists; create a new product');
   }
-  // Flat interest is charged on the original principal whatever the balance
-  // does, which only makes sense when the schedule is fixed.
-  const type = cols.product_type ?? before?.product_type ?? 'FIXED_TERM';
-  const method = cols.method ?? before?.method ?? 'FLAT';
+  if (before && loans > 0) {
+    const changed = FROZEN_WITH_LOANS.filter((k) => k !== 'product_type' && cols[k] !== undefined && JSON.stringify(cols[k]) !== JSON.stringify(before[k]));
+    if (changed.length) problems.push(`${changed.join(', ')} cannot change while ${loans} loan(s) exist under the product; create a new product`);
+  }
   if (type === 'DYNAMIC_TERM' && method === 'FLAT') {
     problems.push('a DYNAMIC_TERM product cannot use the FLAT method; use REDUCING or REDUCING_EQUAL_INSTALLMENTS');
   }
-  for (const col of ['accrue_late_interest', 'enforce_deposit_multiplier', 'require_guarantor_cover', 'is_active']) {
-    if (cols[col] !== undefined && typeof cols[col] !== 'boolean') problems.push(`${col} must be true or false`);
+  if (type === 'INTEREST_FREE' && Number(merged.monthly_rate || 0) > 0) problems.push('an INTEREST_FREE product has no rate');
+  if (merged.interest_type === 'CAPITALIZED' && type !== 'DYNAMIC_TERM') problems.push('CAPITALIZED interest needs a DYNAMIC_TERM product');
+  if (merged.interest_type === 'COMPOUND' && method === 'FLAT') problems.push('COMPOUND interest cannot be FLAT');
+  if (merged.simple_base === 'PRINCIPAL_AND_INTEREST' && !(type === 'DYNAMIC_TERM' && method === 'REDUCING_EQUAL_INSTALLMENTS')) {
+    problems.push('PRINCIPAL_AND_INTEREST base needs a DYNAMIC_TERM, REDUCING_EQUAL_INSTALLMENTS product');
   }
-  const nonNeg = ['monthly_rate', 'processing_fee', 'penalty_rate', 'penalty_grace_days', 'min_principal', 'max_principal'];
+  if (merged.interest_posting === 'ON_DISBURSEMENT' && type === 'DYNAMIC_TERM') problems.push('ON_DISBURSEMENT posting needs a FIXED_TERM product');
+
+  for (const col of ['accrue_late_interest', 'enforce_deposit_multiplier', 'require_guarantor_cover', 'is_active', 'allow_arbitrary_fees']) {
+    if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
+  }
+  const nonNeg = ['monthly_rate', 'rate_min', 'rate_max', 'processing_fee', 'penalty_rate', 'penalty_rate_min', 'penalty_rate_max',
+    'penalty_tolerance_days', 'arrears_tolerance_days', 'arrears_tolerance_percent', 'arrears_tolerance_floor',
+    'min_principal', 'max_principal', 'default_principal', 'charge_cap_percent', 'first_due_offset_days', 'grace_periods'];
   for (const col of nonNeg) {
     if (cols[col] !== undefined && cols[col] !== null && !(Number(cols[col]) >= 0)) problems.push(`${col} must be zero or more`);
   }
-  if (cols.max_term !== undefined && !(Number.isInteger(Number(cols.max_term)) && Number(cols.max_term) > 0)) {
-    problems.push('max_term must be a positive whole number of months');
+  for (const col of ['max_term', 'min_term', 'default_term', 'repayment_interval_count', 'amortization_periods', 'auto_close_paid_off_days', 'auto_lock_arrears_days', 'id_next']) {
+    if (cols[col] !== undefined && cols[col] !== null && !(isInt(cols[col]) && Number(cols[col]) > 0)) problems.push(`${col} must be a positive whole number`);
+  }
+  if (merged.min_term && merged.max_term && Number(merged.min_term) > Number(merged.max_term)) problems.push('min_term exceeds max_term');
+  if (merged.min_principal && merged.max_principal && Number(merged.min_principal) > Number(merged.max_principal)) problems.push('min_principal exceeds max_principal');
+  if (merged.rate_min !== null && merged.rate_max !== null && merged.rate_min !== undefined && merged.rate_max !== undefined
+    && Number(merged.rate_min) > Number(merged.rate_max)) problems.push('rate_min exceeds rate_max');
+  if (merged.amortization_periods && merged.max_term && Number(merged.amortization_periods) < Number(merged.max_term)) {
+    problems.push('amortization_periods must be at least max_term (a balloon amortises over longer than the term)');
   }
   if (cols.max_multiplier !== undefined && !(Number(cols.max_multiplier) > 0)) problems.push('max_multiplier must be positive');
+  if (cols.id_pattern !== undefined) {
+    if (!/^[A-Za-z0-9#@$_-]{2,24}$/.test(cols.id_pattern) || !/[#@$]/.test(cols.id_pattern)) {
+      problems.push('id_pattern must be 2 to 24 characters with at least one placeholder (# digit, @ letter, $ either)');
+    }
+  }
+  if (cols.fixed_days_of_month !== undefined && cols.fixed_days_of_month !== null) {
+    const d = cols.fixed_days_of_month;
+    if (!Array.isArray(d) || !d.length || d.some((x) => !isInt(x) || x < 1 || x > 31)) problems.push('fixed_days_of_month must list days 1 to 31');
+  }
   if (cols.allocation_order !== undefined) {
     const o = cols.allocation_order;
     const want = ['PENALTY', 'FEE', 'INTEREST', 'PRINCIPAL'];
@@ -145,19 +237,32 @@ function toColumns(body) {
   return cols;
 }
 
+async function loansUnder(c, productId) {
+  const { rows: [r] } = await c.query('SELECT count(*)::int AS n FROM loan_accounts WHERE product_id = $1', [productId]);
+  return r.n;
+}
+
+async function withFees(c, p) {
+  const { rows } = await c.query('SELECT * FROM loan_product_fees WHERE product_id = $1 ORDER BY fee_type, code', [p.id]);
+  return { ...p, fees: rows };
+}
+
 router.get('/', requireAuth(...READER), async (req, res, next) => {
   try {
     const rows = await withTenantRead(req.tenant.schema_name, async (c) => (await c.query(
-      `SELECT p.*, (SELECT count(*)::int FROM loan_accounts l WHERE l.product_id = p.id) AS loans
+      `SELECT p.*, (SELECT count(*)::int FROM loan_accounts l WHERE l.product_id = p.id) AS loans,
+              (SELECT count(*)::int FROM loan_product_fees f WHERE f.product_id = p.id AND f.is_active) AS fee_count
        FROM loan_products p ORDER BY p.id`)).rows);
-    res.json(rows.map((p) => ({ ...publicProduct(p), loans: p.loans })));
+    res.json(rows.map((p) => ({ ...publicProduct(p), loans: p.loans, feeCount: p.fee_count })));
   } catch (e) { next(e); }
 });
 
 router.get('/:id', requireAuth(...READER), async (req, res, next) => {
   try {
-    const row = await withTenantRead(req.tenant.schema_name, async (c) => (await c.query(
-      'SELECT * FROM loan_products WHERE id = $1', [req.params.id])).rows[0]);
+    const row = await withTenantRead(req.tenant.schema_name, async (c) => {
+      const p = (await c.query('SELECT * FROM loan_products WHERE id = $1', [req.params.id])).rows[0];
+      return p ? withFees(c, p) : null;
+    });
     return row ? res.json(publicProduct(row)) : notFound(res, 'loan product');
   } catch (e) { next(e); }
 });
@@ -167,9 +272,13 @@ router.post('/', requireAuth(...ADMIN), async (req, res, next) => {
     const id = String(req.body?.id || '').trim().toUpperCase();
     if (!/^[A-Z0-9_]{2,16}$/.test(id)) return badRequest(res, 'PRODUCT_ID_MUST_BE_2_TO_16_UPPERCASE_ALPHANUMERIC');
     const cols = toColumns(req.body);
-    // Required GL mappings for a new product; the rest have defaults.
-    for (const k of ['gl_portfolio', 'gl_interest_inc']) {
-      if (!cols[k]) return badRequest(res, `${k.toUpperCase()}_REQUIRED`);
+    if (cols.product_type === 'INTEREST_FREE' && cols.monthly_rate === undefined) cols.monthly_rate = 0;
+    // Required GL mappings for a new product linked to accounting; an
+    // unlinked product needs none.
+    if (cols.accounting_method !== 'NONE') {
+      for (const k of ['gl_portfolio', 'gl_interest_inc']) {
+        if (!cols[k]) return badRequest(res, `${k.toUpperCase()}_REQUIRED`);
+      }
     }
     const out = await withTenant(req.tenant.schema_name, async (c) => {
       const problems = await validate(c, cols, { creating: true });
@@ -186,7 +295,7 @@ router.post('/', requireAuth(...ADMIN), async (req, res, next) => {
         `INSERT INTO audit_log (actor, action, entity, entity_id, after)
          VALUES ($1,'LOAN_PRODUCT_CREATED','loan_product',$2,$3)`,
         [req.auth.email, id, JSON.stringify(rows[0])]);
-      return { row: rows[0] };
+      return { row: await withFees(c, rows[0]) };
     });
     if (out.problems) return apiError(res, 400, 400, 'INVALID_LOAN_PRODUCT', out.problems.join('; '));
     if (out.duplicate) return apiError(res, 409, 409, 'LOAN_PRODUCT_EXISTS');
@@ -202,7 +311,8 @@ router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
       const { rows: [before] } = await c.query(
         'SELECT * FROM loan_products WHERE id = $1 FOR UPDATE', [req.params.id]);
       if (!before) return { missing: true };
-      const problems = await validate(c, cols, { creating: false, before });
+      const loans = await loansUnder(c, before.id);
+      const problems = await validate(c, cols, { creating: false, before, loans });
       if (problems.length) return { problems };
       const keys = Object.keys(cols);
       const { rows } = await c.query(
@@ -214,7 +324,7 @@ router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
         `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
          VALUES ($1,'LOAN_PRODUCT_CHANGED','loan_product',$2,$3,$4)`,
         [req.auth.email, req.params.id, JSON.stringify(before), JSON.stringify(rows[0])]);
-      return { row: rows[0] };
+      return { row: await withFees(c, rows[0]) };
     });
     if (out.missing) return notFound(res, 'loan product');
     if (out.problems) return apiError(res, 400, 400, 'INVALID_LOAN_PRODUCT', out.problems.join('; '));
@@ -222,4 +332,158 @@ router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// --- fees -----------------------------------------------------------------
+
+const FEE_FIELDS = {
+  code: 'code', name: 'name', feeType: 'fee_type', calculation: 'calculation', amount: 'amount', percent: 'percent',
+  minAmount: 'min_amount', maxAmount: 'max_amount', required: 'required', glIncome: 'gl_income',
+  glReceivable: 'gl_receivable', isActive: 'is_active',
+};
+const FEE_ENUMS = {
+  fee_type: ['MANUAL', 'DISBURSEMENT_DEDUCTED', 'DISBURSEMENT_CAPITALIZED', 'DISBURSEMENT_UPFRONT', 'PAYMENT_DUE', 'LATE_REPAYMENT'],
+  calculation: ['FLAT', 'FLAT_PER_INSTALLMENT', 'PERCENT_OF_AMOUNT', 'PERCENT_PER_INSTALLMENT', 'PERCENT_OF_INSTALLMENT_PRINCIPAL'],
+};
+const FITS = {
+  MANUAL: ['FLAT', 'PERCENT_OF_AMOUNT'], DISBURSEMENT_DEDUCTED: ['FLAT', 'PERCENT_OF_AMOUNT'],
+  DISBURSEMENT_CAPITALIZED: ['FLAT', 'PERCENT_OF_AMOUNT'], DISBURSEMENT_UPFRONT: ['FLAT', 'PERCENT_OF_AMOUNT'],
+  PAYMENT_DUE: ['FLAT', 'FLAT_PER_INSTALLMENT', 'PERCENT_OF_AMOUNT', 'PERCENT_PER_INSTALLMENT'],
+  LATE_REPAYMENT: ['FLAT', 'PERCENT_OF_AMOUNT', 'PERCENT_OF_INSTALLMENT_PRINCIPAL'],
+};
+
+async function validateFee(c, cols, before) {
+  const problems = [];
+  const m = { ...(before || {}), ...cols };
+  for (const [col, allowed] of Object.entries(FEE_ENUMS)) {
+    if (cols[col] !== undefined && !allowed.includes(cols[col])) problems.push(`${col} must be one of ${allowed.join(', ')}`);
+  }
+  if (!before && (!cols.code || !/^[A-Z0-9_]{2,16}$/.test(cols.code))) problems.push('code must be 2 to 16 uppercase letters, digits or underscore');
+  if (!before && !cols.name) problems.push('name is required');
+  if (m.fee_type && m.calculation && FITS[m.fee_type] && !FITS[m.fee_type].includes(m.calculation)) {
+    problems.push(`${m.fee_type} fees may be ${FITS[m.fee_type].join(', ')}`);
+  }
+  const flat = ['FLAT', 'FLAT_PER_INSTALLMENT'].includes(m.calculation);
+  if (flat && (m.amount === null || m.amount === undefined) && m.fee_type !== 'MANUAL') problems.push('a flat fee needs an amount (only a MANUAL fee may leave it to the teller)');
+  if (!flat && m.calculation && (m.percent === null || m.percent === undefined)) problems.push('a percentage fee needs a percent');
+  for (const col of ['amount', 'percent', 'min_amount', 'max_amount']) {
+    if (cols[col] !== undefined && cols[col] !== null && !(Number(cols[col]) >= 0)) problems.push(`${col} must be zero or more`);
+  }
+  if (m.min_amount !== null && m.max_amount !== null && m.min_amount !== undefined && m.max_amount !== undefined
+    && Number(m.min_amount) > Number(m.max_amount)) problems.push('min_amount exceeds max_amount');
+  for (const col of ['required', 'is_active']) {
+    if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
+  }
+  for (const [col, types] of [['gl_income', ['INCOME']], ['gl_receivable', ['ASSET']]]) {
+    if (cols[col]) {
+      const { rows: [g] } = await c.query('SELECT type, is_active FROM gl_accounts WHERE code = $1', [cols[col]]);
+      if (!g) problems.push(`${col}: no GL account ${cols[col]}`);
+      else if (!types.includes(g.type)) problems.push(`${col}: ${cols[col]} is ${g.type}, needs ${types.join(' or ')}`);
+    }
+  }
+  return problems;
+}
+
+const feeCols = (body) => Object.fromEntries(Object.entries(body || {}).filter(([k]) => FEE_FIELDS[k]).map(([k, v]) => [FEE_FIELDS[k], v]));
+
+router.get('/:id/fees', requireAuth(...READER), async (req, res, next) => {
+  try {
+    const rows = await withTenantRead(req.tenant.schema_name, async (c) => (await c.query(
+      'SELECT * FROM loan_product_fees WHERE product_id = $1 ORDER BY fee_type, code', [req.params.id])).rows);
+    res.json(rows.map(publicFee));
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/fees', requireAuth(...ADMIN), async (req, res, next) => {
+  try {
+    const cols = feeCols(req.body);
+    if (cols.code) cols.code = String(cols.code).toUpperCase();
+    const out = await withTenant(req.tenant.schema_name, async (c) => {
+      const { rows: [p] } = await c.query('SELECT id FROM loan_products WHERE id = $1', [req.params.id]);
+      if (!p) return { missing: true };
+      const problems = await validateFee(c, cols, null);
+      if (problems.length) return { problems };
+      const keys = Object.keys(cols);
+      const { rows } = await c.query(
+        `INSERT INTO loan_product_fees (product_id, ${keys.join(', ')})
+         VALUES ($1, ${keys.map((_, i) => `$${i + 2}`).join(', ')})
+         ON CONFLICT (product_id, code) DO NOTHING RETURNING *`,
+        [p.id, ...keys.map((k) => cols[k])]);
+      if (!rows.length) return { duplicate: true };
+      await c.query(
+        `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'LOAN_PRODUCT_FEE_CREATED','loan_product_fee',$2,$3)`,
+        [req.auth.email, rows[0].id, JSON.stringify(rows[0])]);
+      return { row: rows[0] };
+    });
+    if (out.missing) return notFound(res, 'loan product');
+    if (out.problems) return apiError(res, 400, 400, 'INVALID_FEE', out.problems.join('; '));
+    if (out.duplicate) return apiError(res, 409, 409, 'FEE_CODE_EXISTS');
+    res.status(201).json(publicFee(out.row));
+  } catch (e) { next(e); }
+});
+
+router.patch('/:id/fees/:feeId', requireAuth(...ADMIN), async (req, res, next) => {
+  try {
+    const cols = feeCols(req.body);
+    delete cols.code;
+    if (!Object.keys(cols).length) return badRequest(res, 'NO_UPDATABLE_FIELDS');
+    const out = await withTenant(req.tenant.schema_name, async (c) => {
+      const { rows: [before] } = await c.query(
+        'SELECT * FROM loan_product_fees WHERE product_id = $1 AND (id::text = $2 OR code = $2) FOR UPDATE',
+        [req.params.id, req.params.feeId]);
+      if (!before) return { missing: true };
+      // A fee that has been applied keeps its type and calculation; the
+      // figures and GL accounts may still move. Mambu allows deactivating,
+      // never deleting, a used fee.
+      const { rows: [used] } = await c.query('SELECT count(*)::int AS n FROM loan_fees WHERE product_fee_id = $1', [before.id]);
+      if (used.n > 0) {
+        const frozen = ['fee_type', 'calculation'].filter((k) => cols[k] !== undefined && cols[k] !== before[k]);
+        if (frozen.length) return { problems: [`${frozen.join(', ')} cannot change on a fee that has been applied ${used.n} time(s); deactivate it and add another`] };
+      }
+      const problems = await validateFee(c, cols, before);
+      if (problems.length) return { problems };
+      const keys = Object.keys(cols);
+      const { rows } = await c.query(
+        `UPDATE loan_product_fees SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')} WHERE id = $1 RETURNING *`,
+        [before.id, ...keys.map((k) => cols[k])]);
+      await c.query(
+        `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_PRODUCT_FEE_CHANGED','loan_product_fee',$2,$3,$4)`,
+        [req.auth.email, before.id, JSON.stringify(before), JSON.stringify(rows[0])]);
+      return { row: rows[0] };
+    });
+    if (out.missing) return notFound(res, 'fee');
+    if (out.problems) return apiError(res, 400, 400, 'INVALID_FEE', out.problems.join('; '));
+    res.json(publicFee(out.row));
+  } catch (e) { next(e); }
+});
+
+router.delete('/:id/fees/:feeId', requireAuth(...ADMIN), async (req, res, next) => {
+  try {
+    const out = await withTenant(req.tenant.schema_name, async (c) => {
+      const { rows: [f] } = await c.query(
+        'SELECT * FROM loan_product_fees WHERE product_id = $1 AND (id::text = $2 OR code = $2) FOR UPDATE', [req.params.id, req.params.feeId]);
+      if (!f) return { missing: true };
+      const { rows: [used] } = await c.query('SELECT count(*)::int AS n FROM loan_fees WHERE product_fee_id = $1', [f.id]);
+      if (used.n > 0) return { used: used.n };
+      await c.query('DELETE FROM loan_product_fees WHERE id = $1', [f.id]);
+      await c.query(
+        `INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'LOAN_PRODUCT_FEE_DELETED','loan_product_fee',$2,$3)`,
+        [req.auth.email, f.id, JSON.stringify(f)]);
+      return { ok: true };
+    });
+    if (out.missing) return notFound(res, 'fee');
+    if (out.used) return apiError(res, 409, 409, 'FEE_HAS_BEEN_APPLIED', `applied ${out.used} time(s); deactivate it instead`);
+    res.status(204).end();
+  } catch (e) { next(e); }
+});
+
+// --- schedule preview -----------------------------------------------------
+
+router.post('/:id/schedule-preview', requireAuth(...READER), async (req, res, next) => {
+  try {
+    const out = await withTenantRead(req.tenant.schema_name, (c) =>
+      require('../domain/loans').previewSchedule(c, { ...req.body, productId: req.params.id }));
+    res.json(out);
+  } catch (e) { next(e); }
+});
+
 module.exports = router;
+module.exports.publicProduct = publicProduct;

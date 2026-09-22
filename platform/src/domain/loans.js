@@ -2,7 +2,9 @@
 
 const acct = require('./accounting');
 const savings = require('./savings');
+const S = require('./schedule');
 const { err, round2 } = acct;
+const { ymd, isoDate, toUTC, dayCount, addMonths, annuityPayment, interestBetween } = S;
 
 /**
  * Loan lifecycle, SQL-backed. Every function takes an open tenant client.
@@ -10,24 +12,36 @@ const { err, round2 } = acct;
  * Balance columns are only ever changed by SQL expressions on the numeric
  * type. Nothing is read into JS, adjusted and written back, so two tellers
  * posting repayments to the same loan cannot lose one of them.
+ *
+ * The schedule arithmetic lives in ./schedule (pure), fees in ./fees,
+ * states and approvals in ./workflow. This module is where they meet the
+ * ledger.
  */
 
-const TRANSITIONS = {
-  SUBMIT:   { from: ['DRAFT'], to: 'PENDING_APPROVAL' },
-  APPROVE:  { from: ['PENDING_APPROVAL'], to: 'APPROVED' },
-  UNAPPROVE:{ from: ['APPROVED'], to: 'PENDING_APPROVAL' },
-  REJECT:   { from: ['DRAFT', 'PENDING_APPROVAL'], to: 'CLOSED_REJECTED' },
-  WITHDRAW: { from: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'], to: 'CLOSED_WITHDRAWN' },
-};
+// Product columns the loan carries around with it. The loan's own columns
+// win where both exist (product_type is copied at application).
+const PRODUCT_COLUMNS = `
+  p.method, p.gl_portfolio, p.gl_interest_inc, p.gl_fee_inc, p.gl_penalty_inc,
+  p.gl_interest_rec, p.gl_fee_rec, p.gl_penalty_rec, p.gl_writeoff_exp,
+  p.accounting_method, p.interest_accrual, p.day_count, p.allocation_order,
+  p.enforce_deposit_multiplier, p.require_guarantor_cover, p.min_cover_percent,
+  p.prepayment_recalculation, p.accrue_late_interest,
+  p.processing_fee, p.max_multiplier, p.monthly_rate AS product_rate,
+  p.interest_type, p.simple_base, p.interest_posting, p.rate_frequency,
+  p.repayment_interval_unit, p.repayment_interval_count, p.fixed_days_of_month, p.short_month_handling,
+  p.grace_type, p.grace_periods AS product_grace_periods,
+  p.amortization_periods AS product_amortization_periods, p.rounding,
+  p.arrears_tolerance_days AS product_arrears_tolerance_days,
+  p.arrears_tolerance_percent AS product_arrears_tolerance_percent,
+  p.arrears_tolerance_floor, p.arrears_count_from, p.arrears_non_working_days,
+  p.penalty_rate AS product_penalty_rate, p.penalty_basis, p.penalty_tolerance_days,
+  p.charge_cap_percent, p.charge_cap_base, p.charge_cap_mode,
+  p.auto_close_paid_off_days, p.auto_lock_arrears_days, p.allow_arbitrary_fees,
+  p.min_principal, p.max_principal, p.name AS product_name`;
 
 async function lock(c, loanId) {
   const { rows } = await c.query(
-    `SELECT l.*, p.method, p.gl_portfolio, p.gl_interest_inc, p.gl_fee_inc, p.gl_penalty_inc,
-            p.gl_interest_rec, p.gl_fee_rec, p.gl_penalty_rec, p.gl_writeoff_exp,
-            p.accounting_method, p.interest_accrual, p.day_count, p.allocation_order,
-            p.enforce_deposit_multiplier, p.require_guarantor_cover, p.min_cover_percent,
-            p.prepayment_recalculation, p.accrue_late_interest,
-            p.processing_fee, p.max_multiplier, p.monthly_rate AS product_rate
+    `SELECT l.*, ${PRODUCT_COLUMNS}
      FROM loan_accounts l
      JOIN loan_products p ON p.id = l.product_id
      WHERE l.id::text = $1 OR l.account_no = $1
@@ -38,8 +52,11 @@ async function lock(c, loanId) {
   return rows[0];
 }
 
+/** Outstanding principal: disbursed plus anything capitalised, less paid. */
+const principalOutstanding = (l) => round2(Number(l.principal_disbursed) + Number(l.principal_capitalized || 0) - Number(l.principal_paid));
+
 function balances(l) {
-  const principal = round2(l.principal_disbursed - l.principal_paid);
+  const principal = principalOutstanding(l);
   const interest = round2(l.interest_accrued - l.interest_paid);
   const fees = round2(l.fees_due - l.fees_paid);
   const penalty = round2(l.penalty_accrued - l.penalty_paid);
@@ -49,6 +66,32 @@ function balances(l) {
   };
 }
 
+/** The loan's effective settings: its own override, else the product's. */
+function effective(l) {
+  return {
+    penaltyRate: l.penalty_rate ?? l.product_penalty_rate ?? 0,
+    gracePeriods: l.grace_periods ?? l.product_grace_periods ?? 0,
+    amortization: l.amortization_periods ?? l.product_amortization_periods ?? null,
+    arrearsToleranceDays: l.arrears_tolerance_days ?? l.product_arrears_tolerance_days ?? 0,
+    arrearsTolerancePercent: l.arrears_tolerance_percent ?? l.product_arrears_tolerance_percent ?? null,
+    firstDueOffsetDays: Number(l.first_due_offset_days || 0),
+  };
+}
+
+/** The pricing terms the schedule engine works from. */
+function terms(l) {
+  const free = l.product_type === 'INTEREST_FREE';
+  return {
+    rate: free ? 0 : Number(l.monthly_rate),
+    frequency: l.rate_frequency || 'PER_MONTH',
+    convention: l.day_count || 'THIRTY_360',
+    interestType: l.interest_type || 'SIMPLE',
+  };
+}
+
+const isDynamic = (l) => l.product_type === 'DYNAMIC_TERM';
+const isInterestFree = (l) => l.product_type === 'INTEREST_FREE' || !(Number(l.monthly_rate) > 0);
+
 // --------------------------------------------------------------------------
 // Accounting rules
 //
@@ -57,12 +100,12 @@ function balances(l) {
 // debits that component's receivable and credits its income; paying it
 // credits the receivable; writing it off clears the receivable against the
 // write-off expense. Under CASH nothing is recognised until paid, and the
-// payment credits income directly. Income is recognised exactly once either
-// way, which the code before this did not manage: it credited interest
-// income at accrual and again at repayment.
+// payment credits income directly. Under NONE the product is not linked to
+// the ledger at all: balances are kept, no journal entries are written.
 // --------------------------------------------------------------------------
 
-const isAccrual = (l) => l.accounting_method !== 'CASH';
+const isAccrual = (l) => l.accounting_method !== 'CASH' && l.accounting_method !== 'NONE';
+const booksEntries = (l) => l.accounting_method !== 'NONE';
 
 /** GL account credited when a component is paid. */
 function paidCredit(l, component) {
@@ -86,73 +129,29 @@ function writeOffCredit(l, component) {
   }
 }
 
-// --------------------------------------------------------------------------
-// Day count conventions
-//
-// Interest accrues per day, as it does in Mambu, so a member who repays early
-// owes interest for the days they had the money and a late payer keeps
-// accruing. A rate quoted per month is annualised as twelve times the
-// monthly rate and spread over the year by the product's convention.
-//
-// THIRTY_360 is the default because SACCO products are quoted per month:
-// under 30E/360 every calendar month is deemed thirty days, so "1% a month"
-// accrues to exactly 1% over any month, and the accrued interest on an
-// installment date equals the schedule's figure. The ACTUAL_* conventions
-// are what banks use and what Mambu defaults to.
-// --------------------------------------------------------------------------
-
-const DAY_MS = 86400000;
-const pad2 = (n) => String(n).padStart(2, '0');
-/** YYYY-MM-DD from a string or a Date. pg hands DATE back as a local-midnight Date. */
-const ymd = (d) => (d instanceof Date
-  ? `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
-  : String(d).slice(0, 10));
-const toUTC = (d) => new Date(`${ymd(d)}T00:00:00Z`);
-const isoDate = (d) => d.toISOString().slice(0, 10);
-const isLeap = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
-const lastDayOfFeb = (d) => d.getUTCMonth() === 1 && d.getUTCDate() === (isLeap(d.getUTCFullYear()) ? 29 : 28);
-
-/** Days from `from` (exclusive) to `to` (inclusive) under a convention. */
-function dayCount(from, to, convention) {
-  const a = toUTC(from);
-  const b = toUTC(to);
-  if (b <= a) return 0;
-  if (convention === 'THIRTY_360') {
-    // 30E/360 (ISDA): 31sts become 30ths, the last day of February becomes
-    // the 30th, so every month counts thirty days.
-    let d1 = a.getUTCDate(); let d2 = b.getUTCDate();
-    if (d1 === 31 || lastDayOfFeb(a)) d1 = 30;
-    if (d2 === 31 || lastDayOfFeb(b)) d2 = 30;
-    return (b.getUTCFullYear() - a.getUTCFullYear()) * 360
-      + (b.getUTCMonth() - a.getUTCMonth()) * 30 + (d2 - d1);
-  }
-  return Math.round((b - a) / DAY_MS);
+/**
+ * Post an entry unless the product is not linked to accounting. Returns the
+ * entry id or null, so callers record what was booked without branching.
+ */
+async function post(c, l, entry) {
+  if (!booksEntries(l)) return null;
+  const e = await acct.post(c, entry);
+  return e.entryId;
 }
 
-/**
- * Interest on `base` at `monthlyRate` percent per month from `from`
- * (exclusive) to `to` (inclusive). ACTUAL_ACTUAL walks the days because a
- * period can straddle a leap year and each day is a fraction of its own year.
- */
+// --------------------------------------------------------------------------
+// Compatibility wrappers over the schedule engine, kept because tests and
+// other modules call them by these names.
+// --------------------------------------------------------------------------
+
+/** Interest at `monthlyRate` percent per month between two dates, simple. */
 function interestFor(base, monthlyRate, from, to, convention) {
-  const annual = Number(monthlyRate) * 12 / 100;
-  if (convention === 'ACTUAL_ACTUAL') {
-    let total = 0;
-    for (let d = toUTC(from); d < toUTC(to);) {
-      d = new Date(d.getTime() + DAY_MS);
-      total += base * annual / (isLeap(d.getUTCFullYear()) ? 366 : 365);
-    }
-    return round2(total);
-  }
-  const days = dayCount(from, to, convention);
-  const yearDays = convention === 'ACTUAL_365' ? 365 : 360;
-  return round2(base * annual * days / yearDays);
+  return interestBetween(base, { rate: monthlyRate, frequency: 'PER_MONTH', convention, interestType: 'SIMPLE' }, from, to);
 }
 
 const isMonthEnd = (d) => {
   const x = toUTC(d);
-  const next = new Date(x.getTime() + DAY_MS);
-  return next.getUTCDate() === 1;
+  return new Date(x.getTime() + 86400000).getUTCDate() === 1;
 };
 
 // --------------------------------------------------------------------------
@@ -178,103 +177,56 @@ async function shiftOffClosedDays(c, iso) {
   return r.day;
 }
 
-/**
- * `months` calendar months after `d`, clamped to the month end: the 31st of
- * January plus one month is the 28th of February, not the 3rd of March,
- * which is what Date.setMonth would have said.
- */
-function addMonths(d, months) {
-  const x = toUTC(d);
-  const day = x.getUTCDate();
-  const target = new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth() + months, 1));
-  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
-  target.setUTCDate(Math.min(day, lastDay));
-  return target;
-}
-
-/** The payment that clears `principal` at `rate` per period in `n` equal payments. */
-function annuityPayment(principal, rate, n) {
-  if (!(rate > 0)) return round2(principal / n);
-  return round2(principal * rate / (1 - (1 + rate) ** -n));
-}
-
-/**
- * The installment lines for `principal` under an interest method.
- *
- *   FLAT                         interest = original principal × rate, principal in equal shares
- *   REDUCING                     interest = outstanding × rate, principal in equal shares
- *   REDUCING_EQUAL_INSTALLMENTS  interest = outstanding × rate, principal = payment − interest,
- *                                with the same payment every period
- *
- * `count` periods are drawn. `firstFraction` scales the first period's
- * interest when the plan starts part-way through a period (a dynamic loan
- * rescheduled mid-month), and `fixedShare` pins each period's principal (or
- * payment, for equal installments) to a given figure so the plan runs for as
- * many periods as that takes: how "reduce the number of installments" works.
- * The last line takes whatever rounding left over, so the lines always sum
- * to the principal exactly.
- */
-function planInstallments({ principal, rate, method, count, flatBase = principal, firstFraction = 1, fixedShare = null }) {
-  const P = round2(principal);
-  const lines = [];
-  if (!(P > 0)) return lines;
-  const equal = method === 'REDUCING_EQUAL_INSTALLMENTS';
-  const payment = equal ? (fixedShare ?? annuityPayment(P, rate, count)) : null;
-  const share = equal ? null : (fixedShare ?? round2(P / count));
-  const limit = fixedShare ? 1000 : count;
-
-  let outstanding = P;
-  for (let n = 1; n <= limit && outstanding > 0; n += 1) {
-    const fraction = n === 1 ? firstFraction : 1;
-    const interest = round2((method === 'FLAT' ? flatBase : outstanding) * rate * fraction);
-    let principalAmt = equal ? round2(payment - interest) : share;
-    const last = fixedShare ? principalAmt >= outstanding : n === count;
-    if (last || principalAmt > outstanding) principalAmt = outstanding;
-    if (!(principalAmt > 0) && !last) principalAmt = 0.01;   // a payment below interest never amortises
-    outstanding = round2(outstanding - principalAmt);
-    lines.push({ principal: principalAmt, interest });
-    if (last) break;
-  }
-  if (outstanding > 0) lines[lines.length - 1].principal = round2(lines[lines.length - 1].principal + outstanding);
-  return lines;
-}
-
 async function persistInstallments(c, loanId, installments) {
   for (const i of installments) {
     await c.query(
-      `INSERT INTO loan_installments (loan_id, number, due_date, principal_due, interest_due, fee_due)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [loanId, i.number, i.dueDate, i.principal, i.interest, i.fee || 0]
+      `INSERT INTO loan_installments (loan_id, number, due_date, nominal_due, principal_due, interest_due, fee_due, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [loanId, i.number, i.dueDate, i.nominalDue, i.principal, i.interest, i.fee || 0,
+        i.grace === 'PURE' && !(i.fee > 0) ? 'GRACE' : 'PENDING']
     );
   }
 }
 
+/** The schedule engine's inputs for this loan. */
+function scheduleInputs(l) {
+  const e = effective(l);
+  return {
+    terms: terms(l),
+    method: l.method,
+    interval: { unit: l.repayment_interval_unit || 'MONTHS', every: Number(l.repayment_interval_count || 1) },
+    fixedDays: l.fixed_days_of_month,
+    shortMonth: l.short_month_handling || 'LAST_DAY',
+    firstOffsetDays: e.firstDueOffsetDays,
+    grace: { type: l.grace_type || 'NONE', periods: e.gracePeriods },
+    amortization: e.amortization,
+    rounding: l.rounding || 'NONE',
+  };
+}
+
 /**
- * The schedule a loan is given at disbursement. Due dates fall one calendar
- * month apart from the disbursement date and are pushed off weekends and
- * holidays. Interest per period is the product's monthly rate on the basis
- * the method names; see planInstallments.
+ * The schedule a loan is given at disbursement, on the product's repayment
+ * interval, grace, amortisation and rounding. For a FIXED_TERM loan this
+ * schedule is the contract; for a DYNAMIC_TERM loan it is the expectation
+ * if every installment is paid on its date, and a prepayment regenerates it
+ * (see reschedule).
  *
- * For a FIXED_TERM loan this schedule is the contract: the interest on it is
- * what the member owes, however they pay. For a DYNAMIC_TERM loan it is the
- * expectation if every installment is paid on its date; a prepayment
- * regenerates it (see reschedule).
+ * Payment-due fees and, on fixed-term loans, the upfront disbursement fees
+ * are placed on the schedule by ./fees, which is called here.
  */
 async function buildSchedule(c, l, { persist = true } = {}) {
-  const principal = Number(l.principal);
-  const months = Number(l.term_months);
-  const rate = Number(l.monthly_rate ?? l.product_rate) / 100;
-  if (!principal || !months) throw err('LOAN_MISSING_PRINCIPAL_OR_TERM');
-
+  const fees = require('./fees');
+  const count = Number(l.term_months);
+  const principal = Number(l.principal_disbursed) > 0 ? principalOutstanding(l) : Number(l.principal);
+  if (!principal || !count) throw err('LOAN_MISSING_PRINCIPAL_OR_TERM');
   const start = l.disbursed_on ? ymd(l.disbursed_on) : isoDate(new Date());
-  const lines = planInstallments({ principal, rate, method: l.method, count: months });
+
+  const lines = S.draftSchedule({ start, count, principal, ...scheduleInputs(l) });
+  const feePlan = await fees.scheduledFees(c, l, lines);
   const installments = [];
-  for (let n = 1; n <= lines.length; n += 1) {
-    const dueDate = await shiftOffClosedDays(c, isoDate(addMonths(start, n)));
-    installments.push({
-      number: n, dueDate, ...lines[n - 1],
-      fee: n === 1 ? round2(l.processing_fee || 0) : 0,
-    });
+  for (const line of lines) {
+    const dueDate = await shiftOffClosedDays(c, line.nominalDue);
+    installments.push({ ...line, dueDate, fee: round2(feePlan[line.number] || 0) });
   }
 
   if (persist) {
@@ -296,24 +248,41 @@ async function buildSchedule(c, l, { persist = true } = {}) {
 }
 
 /**
+ * Preview the schedule a loan would get, from a product and terms, without
+ * a loan. What a teller shows a member before anything is written.
+ */
+async function previewSchedule(c, { productId, principal, termMonths, monthlyRate, disbursedOn, firstDueOffsetDays, gracePeriods, amortizationPeriods }) {
+  const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1', [productId]);
+  if (!p) throw err('UNKNOWN_LOAN_PRODUCT', 404);
+  const l = {
+    ...p, product_id: p.id, product_type: p.product_type, product_rate: p.monthly_rate,
+    product_grace_periods: p.grace_periods, product_amortization_periods: p.amortization_periods,
+    monthly_rate: monthlyRate ?? p.monthly_rate, principal, term_months: termMonths,
+    disbursed_on: disbursedOn || null, first_due_offset_days: firstDueOffsetDays ?? p.first_due_offset_days,
+    grace_periods: gracePeriods ?? null, amortization_periods: amortizationPeriods ?? null,
+    principal_disbursed: 0, principal_capitalized: 0, principal_paid: 0, id: null,
+  };
+  return buildSchedule(c, l, { persist: false });
+}
+
+/**
  * Regenerate a DYNAMIC_TERM loan's future installments from its actual
  * outstanding balance, after a repayment on `asOf`.
  *
- * Installments already due keep their figures: they were owed and, if
- * unpaid, still are. Everything falling due after `asOf` is redrawn over
- * what remains of the principal once those are netted off, the way the
- * product says (Mambu's prepayment recalculation):
+ * Installments already due keep their figures. Everything falling due after
+ * `asOf` is redrawn over what remains of the principal once those are netted
+ * off, the way the product says (Mambu's prepayment recalculation):
  *
  *   REDUCE_INSTALLMENT_AMOUNT       same number of installments, each smaller
  *   REDUCE_NUMBER_OF_INSTALLMENTS   same installment as before, fewer of them
  *   NONE                            the schedule stands as drawn
  *
- * The first redrawn period starts at `asOf`, so its interest is the part of
- * the period still to run on the new balance, plus whatever interest had
- * accrued on the old balance and is still unpaid.
+ * The first redrawn period runs from `asOf` to its due date, so its interest
+ * is the rest of the period on the new balance, plus whatever had accrued on
+ * the old balance and is still unpaid.
  */
 async function reschedule(c, l, asOf) {
-  if (l.product_type !== 'DYNAMIC_TERM') return null;
+  if (!isDynamic(l)) return null;
   if (!l.prepayment_recalculation || l.prepayment_recalculation === 'NONE') return null;
   const date = ymd(asOf);
   const { rows } = await c.query('SELECT * FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]);
@@ -324,25 +293,25 @@ async function reschedule(c, l, asOf) {
   const b = balances(l);
   const pastPrincipalStillDue = round2(past.reduce((s, r) => s + Math.max(0, r.principal_due - r.principal_paid), 0));
   const remaining = round2(b.principal - pastPrincipalStillDue);
-  const rate = Number(l.monthly_rate) / 100;
-  const dc = l.day_count || 'THIRTY_360';
-
-  // The period the first redrawn line covers ran from the previous due date
-  // (or disbursement); only the part after asOf is priced on the new balance.
-  const periodStart = past.length ? ymd(past[past.length - 1].due_date) : ymd(l.disbursed_on);
-  const firstDue = ymd(future[0].due_date);
-  const periodDays = dayCount(periodStart, firstDue, dc) || 1;
-  const firstFraction = Math.min(1, Math.max(0, dayCount(date, firstDue, dc) / periodDays));
+  const inputs = scheduleInputs(l);
+  const t = inputs.terms;
 
   let fixedShare = null;
   if (l.prepayment_recalculation === 'REDUCE_NUMBER_OF_INSTALLMENTS') {
     const P = Number(l.principal);
     const n = Number(l.term_months);
-    fixedShare = l.method === 'REDUCING_EQUAL_INSTALLMENTS' ? annuityPayment(P, rate, n) : round2(P / n);
+    const first = rows[0];
+    const r = S.periodRate(t, ymd(l.disbursed_on), ymd(first.nominal_due));
+    fixedShare = l.method === 'REDUCING_EQUAL_INSTALLMENTS' ? annuityPayment(P, r, inputs.amortization || n) : round2(P / (inputs.amortization || n));
   }
 
-  let lines = planInstallments({
-    principal: remaining, rate, method: l.method, count: future.length, firstFraction, fixedShare,
+  const periods = future.map((r, i) => ({
+    from: i === 0 ? toUTC(date) : toUTC(future[i - 1].nominal_due), to: toUTC(r.nominal_due),
+  }));
+  const amortization = inputs.amortization ? Math.max(future.length, inputs.amortization - past.length) : null;
+  let lines = S.planInstallments({
+    principal: remaining, terms: t, method: l.method, periods, fixedShare, amortization,
+    rounding: inputs.rounding, extraFirstInterest: Math.max(0, b.interest),
   });
   if (lines.length > future.length) {
     // More periods than dates: fold the tail into the last dated line.
@@ -351,11 +320,10 @@ async function reschedule(c, l, asOf) {
     last.principal = round2(last.principal + tail.reduce((s, x) => s + x.principal, 0));
     last.interest = round2(last.interest + tail.reduce((s, x) => s + x.interest, 0));
   }
-  if (lines.length) lines[0].interest = round2(lines[0].interest + Math.max(0, b.interest));
 
   const installments = lines.map((line, i) => ({
-    number: future[i].number, dueDate: ymd(future[i].due_date), ...line,
-    fee: Number(future[i].fee_due) - Number(future[i].fee_paid) > 0 ? round2(future[i].fee_due - future[i].fee_paid) : 0,
+    number: future[i].number, dueDate: ymd(future[i].due_date), nominalDue: ymd(future[i].nominal_due), ...line,
+    fee: Math.max(0, round2(future[i].fee_due - future[i].fee_paid)),
   }));
 
   await c.query('DELETE FROM loan_installments WHERE loan_id = $1 AND id = ANY($2)', [l.id, future.map((r) => r.id)]);
@@ -377,10 +345,9 @@ async function maturityDate(c, loanId) {
 
 /** Principal a FIXED_TERM loan's schedule says is still out at `date` (nominal period ends). */
 function scheduledOutstanding(l, installments, date) {
-  const start = ymd(l.disbursed_on);
-  let out = Number(l.principal);
-  for (let n = 1; n <= installments.length; n += 1) {
-    if (date >= isoDate(addMonths(start, n))) out -= Number(installments[n - 1].principal_due);
+  let out = principalOutstanding(l) + Number(l.principal_paid);
+  for (const i of installments) {
+    if (date >= ymd(i.nominal_due || i.due_date)) out -= Number(i.principal_due);
     else break;
   }
   return round2(Math.max(0, out));
@@ -392,18 +359,17 @@ function scheduledOutstanding(l, installments, date) {
  * progress counts pro rata by the day count, and nothing accrues after the
  * final period. A fixed-term loan's interest is fixed; that is the point.
  *
- * Periods are measured on the nominal month boundaries from disbursement,
- * not the shifted due dates, so a due date pushed off a weekend does not
- * spread a month's interest over thirty-two days.
+ * Periods are measured on the nominal due dates, not the shifted ones, so a
+ * due date pushed off a weekend does not spread a month's interest over
+ * thirty-two days.
  */
 function scheduledInterestThrough(l, installments, date, convention) {
-  const start = ymd(l.disbursed_on);
+  let from = ymd(l.disbursed_on);
   let total = 0;
-  for (let n = 1; n <= installments.length; n += 1) {
-    const from = isoDate(addMonths(start, n - 1));
-    const to = isoDate(addMonths(start, n));
-    const interest = Number(installments[n - 1].interest_due);
-    if (date >= to) { total += interest; continue; }
+  for (const i of installments) {
+    const to = ymd(i.nominal_due || i.due_date);
+    const interest = Number(i.interest_due);
+    if (date >= to) { total += interest; from = to; continue; }
     if (date <= from) break;
     const periodDays = dayCount(from, to, convention) || 1;
     total += interest * dayCount(from, date, convention) / periodDays;
@@ -416,9 +382,11 @@ function scheduledInterestThrough(l, installments, date, convention) {
 // Guarantors. The SACCO-specific piece: members pledge their own deposits.
 // --------------------------------------------------------------------------
 
+const OPEN_APPLICATION = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL'];
+
 async function addGuarantor(c, loanId, { memberId, amount }) {
   const l = await lock(c, loanId);
-  if (!['DRAFT', 'PENDING_APPROVAL'].includes(l.status)) {
+  if (!OPEN_APPLICATION.includes(l.status)) {
     throw err(`CANNOT_ADD_GUARANTOR_IN_STATE: ${l.status}`, 409);
   }
   if (memberId === l.member_id) throw err('MEMBER_CANNOT_GUARANTEE_OWN_LOAN');
@@ -494,6 +462,10 @@ async function checkEligibility(c, { memberId, productId, principal, loanId = nu
   if (p.min_principal && requested < Number(p.min_principal)) reasons.push('BELOW_PRODUCT_MINIMUM');
   if (p.max_principal && requested > Number(p.max_principal)) reasons.push('ABOVE_PRODUCT_MAXIMUM');
 
+  // Tenant-wide exposure controls (Mambu "Internal Controls").
+  const controls = await require('./workflow').exposure(c, { memberId, loanId, requested });
+  reasons.push(...controls.reasons);
+
   return {
     deposits,
     multiplier: Number(p.max_multiplier),
@@ -505,9 +477,11 @@ async function checkEligibility(c, { memberId, productId, principal, loanId = nu
     coverRequired,
     cover,
     coverShortfall: round2(Math.max(0, coverRequired - cover)),
+    exposure: controls.exposure,
     rules: {
       depositMultiplier: p.enforce_deposit_multiplier ? (withinMultiplier ? 'MET' : 'BREACHED') : 'NOT_ENFORCED',
       guarantorCover: p.require_guarantor_cover ? (covered ? 'MET' : 'BREACHED') : 'NOT_ENFORCED',
+      ...controls.rules,
     },
     approvable: reasons.length === 0,
     reasons,
@@ -526,23 +500,127 @@ async function enforceEligibility(c, l) {
 }
 
 // --------------------------------------------------------------------------
+// Account numbers
+// --------------------------------------------------------------------------
+
+const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';   // no I or O, which read as 1 and 0
+const DIGITS = '0123456789';
+const pick = (s) => s[Math.floor(Math.random() * s.length)];
+
+/**
+ * Fill a product's id_pattern. '#' is a digit, '@' a letter, '$' either,
+ * anything else literal. Under INCREMENTAL the run of '#' carries the
+ * sequence number, zero-padded; under RANDOM every placeholder is drawn.
+ */
+function fillPattern(pattern, sequence = null) {
+  const hashes = (pattern.match(/#/g) || []).length;
+  let digits = sequence === null ? null : String(sequence).padStart(hashes, '0');
+  if (digits && digits.length > hashes) {
+    // The sequence outgrew the pattern; the extra digits go on the front of
+    // the run rather than the number being refused.
+    const extra = digits.length - hashes;
+    pattern = pattern.replace('#', '#'.repeat(extra + 1));
+  }
+  let di = 0;
+  let out = '';
+  for (const ch of pattern) {
+    if (ch === '#') out += digits ? digits[di++] : pick(DIGITS);
+    else if (ch === '@') out += pick(LETTERS);
+    else if (ch === '$') out += pick(LETTERS + DIGITS);
+    else out += ch;
+  }
+  return out;
+}
+
+async function nextAccountNo(c, p) {
+  const pattern = p.id_pattern || 'LN######';
+  if ((p.id_mode || 'INCREMENTAL') === 'INCREMENTAL') {
+    // Products that share a pattern share the series: the next number is
+    // the larger of this product's counter and one past the highest number
+    // already issued under the pattern's prefix, so two products numbered
+    // LN###### never both issue LN000001.
+    const prefix = pattern.split(/[#@$]/)[0];
+    const { rows: [m] } = await c.query(
+      `SELECT COALESCE(max(substring(account_no FROM '[0-9]+$')::bigint), 0) AS n
+       FROM loan_accounts WHERE account_no LIKE $1 || '%' AND account_no ~ ('^' || $1 || '[A-Z0-9]*[0-9]+$')`,
+      [prefix]);
+    const { rows: [r] } = await c.query(
+      `UPDATE loan_products SET id_next = GREATEST(id_next, $2::bigint + 1) + 1 WHERE id = $1 RETURNING id_next - 1 AS n`,
+      [p.id, Number(m.n)]);
+    return fillPattern(pattern, Number(r.n));
+  }
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const candidate = fillPattern(pattern);
+    const { rowCount } = await c.query('SELECT 1 FROM loan_accounts WHERE account_no = $1', [candidate]);
+    if (!rowCount) return candidate;
+  }
+  throw err(`ID_PATTERN_EXHAUSTED: ${pattern}`, 409);
+}
+
+// --------------------------------------------------------------------------
 // Lifecycle
 // --------------------------------------------------------------------------
 
-async function apply(c, { memberId, productId = 'NL01', principal, termMonths, accountNo, createdBy }) {
+/** A value must sit inside the product's band, when the product has one. */
+function within(label, value, min, max) {
+  if (min !== null && min !== undefined && Number(value) < Number(min)) throw err(`${label}_BELOW_PRODUCT_MINIMUM: ${min}`, 400);
+  if (max !== null && max !== undefined && Number(value) > Number(max)) throw err(`${label}_ABOVE_PRODUCT_MAXIMUM: ${max}`, 400);
+}
+
+/**
+ * Open a loan application under a product. The terms a member may choose
+ * (amount, installments, rate, penalty rate, first due date offset, grace,
+ * amortisation) each default from the product and must sit inside its
+ * band. The account number follows the product's pattern and the initial
+ * state is the product's: an application that still needs documents
+ * starts PARTIAL_APPLICATION, one that is complete PENDING_APPROVAL.
+ */
+async function apply(c, { memberId, productId = 'NL01', principal, termMonths, monthlyRate, penaltyRate,
+  firstDueOffsetDays, gracePeriods, amortizationPeriods, arrearsToleranceDays, purpose, notes, accountNo, createdBy }) {
   const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1 AND is_active', [productId]);
   if (!p) throw err('UNKNOWN_LOAN_PRODUCT', 404);
-  if (termMonths > p.max_term) throw err(`TERM_EXCEEDS_PRODUCT_MAX: ${p.max_term}`, 400);
 
-  const no = accountNo || (await c.query(
-    `SELECT 'LN' || lpad((count(*)+1)::text, 6, '0') AS n FROM loan_accounts`)).rows[0].n;
+  const amount = round2(principal ?? p.default_principal);
+  if (!(amount > 0)) throw err('INVALID_PRINCIPAL', 400);
+  const term = Number(termMonths ?? p.default_term);
+  if (!(Number.isInteger(term) && term > 0)) throw err('INVALID_TERM', 400);
+  if (term > p.max_term) throw err(`TERM_EXCEEDS_PRODUCT_MAX: ${p.max_term}`, 400);
+  within('TERM', term, p.min_term, null);
+  within('PRINCIPAL', amount, p.min_principal, p.max_principal);
 
+  const free = p.product_type === 'INTEREST_FREE';
+  const rate = free ? 0 : Number(monthlyRate ?? p.monthly_rate);
+  if (!free && monthlyRate !== undefined) within('RATE', rate, p.rate_min, p.rate_max);
+  if (free && Number(monthlyRate) > 0) throw err('INTEREST_FREE_PRODUCT_TAKES_NO_RATE', 400);
+
+  let pen = null;
+  if (penaltyRate !== undefined && penaltyRate !== null) {
+    within('PENALTY_RATE', penaltyRate, p.penalty_rate_min, p.penalty_rate_max);
+    pen = Number(penaltyRate);
+  }
+  const offset = Number(firstDueOffsetDays ?? p.first_due_offset_days ?? 0);
+  if (firstDueOffsetDays !== undefined) within('FIRST_DUE_OFFSET', offset, p.first_due_offset_min, p.first_due_offset_max);
+  if (gracePeriods !== undefined && gracePeriods !== null && Number(gracePeriods) >= term) throw err('GRACE_EXCEEDS_TERM', 400);
+  if (amortizationPeriods !== undefined && amortizationPeriods !== null && Number(amortizationPeriods) < term) {
+    throw err('AMORTIZATION_SHORTER_THAN_TERM', 400);
+  }
+
+  const controls = await require('./workflow').exposure(c, { memberId, requested: amount });
+  if (controls.reasons.includes('ONE_ACTIVE_LOAN_PER_MEMBER')) throw err('MEMBER_ALREADY_HAS_AN_ACTIVE_LOAN', 409);
+
+  const no = accountNo || await nextAccountNo(c, p);
+  const status = p.initial_state || 'PENDING_APPROVAL';
   const { rows } = await c.query(
     `INSERT INTO loan_accounts (account_no, member_id, product_id, principal, term_months, monthly_rate,
-                                product_type, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,'PENDING_APPROVAL') RETURNING *`,
-    [no, memberId, productId, round2(principal), termMonths, p.monthly_rate, p.product_type || 'FIXED_TERM']
+                                product_type, status, penalty_rate, first_due_offset_days, grace_periods,
+                                amortization_periods, arrears_tolerance_days, purpose, notes)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+    [no, memberId, productId, amount, term, rate, p.product_type || 'FIXED_TERM', status, pen, offset,
+      gracePeriods ?? null, amortizationPeriods ?? null, arrearsToleranceDays ?? null, purpose || null, notes || null]
   );
+  await c.query(
+    `INSERT INTO loan_state_history (loan_id, from_status, to_status, action, actor)
+     VALUES ($1, NULL, $2, 'APPLY', $3)`, [rows[0].id, status, createdBy || 'SYSTEM']);
   await c.query(
     `INSERT INTO audit_log (actor, action, entity, entity_id, after)
      VALUES ($1,'LOAN_APPLIED','loan_account',$2,$3)`,
@@ -551,38 +629,26 @@ async function apply(c, { memberId, productId = 'NL01', principal, termMonths, a
   return rows[0];
 }
 
-async function changeState(c, loanId, action, { createdBy } = {}) {
-  const l = await lock(c, loanId);
-  const t = TRANSITIONS[String(action).toUpperCase()];
-  if (!t) throw err(`UNSUPPORTED_ACTION: ${action}`);
-  if (!t.from.includes(l.status)) {
-    throw err(`INVALID_STATE_TRANSITION: ${l.status} -> ${t.to}`, 409);
-  }
-  // Approval is where the rules bite. Applying is a request and a teller may
-  // record one for any amount; approving it is the credit decision.
-  if (t.to === 'APPROVED') await enforceEligibility(c, l);
-  const { rows } = await c.query(
-    `UPDATE loan_accounts SET status = $1, updated_at = now(),
-       approved_on = CASE WHEN $1 = 'APPROVED' THEN current_date ELSE approved_on END
-     WHERE id = $2 RETURNING *`,
-    [t.to, l.id]
-  );
-  if (['CLOSED_REJECTED', 'CLOSED_WITHDRAWN'].includes(t.to)) await releaseGuarantors(c, l.id);
-
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,$2,'loan_account',$3,$4,$5)`,
-    [createdBy || 'SYSTEM', `LOAN_${t.to}`, l.id,
-     JSON.stringify({ status: l.status }), JSON.stringify({ status: t.to })]
-  );
-  return rows[0];
+/** State changes live in ./workflow; this keeps the historical entry point. */
+async function changeState(c, loanId, action, opts = {}) {
+  return require('./workflow').transition(c, loanId, action, opts);
 }
 
-async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narration, createdBy } = {}) {
+/**
+ * Disburse an approved loan. Fees the product defines for disbursement are
+ * settled here: deducted fees come out of what the member receives,
+ * capitalised fees are added to what they repay, upfront fees become due.
+ * The schedule is drawn on the resulting principal. Under ON_DISBURSEMENT
+ * posting the schedule's whole interest is applied at once.
+ */
+async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narration, createdBy, user = null, fees: selectedFees = [] } = {}) {
+  const fees = require('./fees');
+  const workflow = require('./workflow');
   const l = await lock(c, loanId);
   if (l.status !== 'APPROVED') throw err(`LOAN_NOT_APPROVED: ${l.status}`, 409);
   const amt = round2(amount ?? l.principal);
   if (!(amt > 0)) throw err('INVALID_DISBURSEMENT_AMOUNT');
+  await workflow.assertMayDisburse(c, l, { actor: createdBy, amount: amt, user });
 
   const { rows: [ch] } = await c.query(
     'SELECT * FROM transaction_channels WHERE id = $1 AND is_active', [channelId]
@@ -590,45 +656,83 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
   if (!ch) throw err(`UNKNOWN_TRANSACTION_CHANNEL: ${channelId}`);
   if (!ch.gl_account_code) throw err(`CHANNEL_HAS_NO_GL_ACCOUNT: ${channelId}`);
 
-  const entry = await acct.post(c, {
-    debits: [{ glCode: l.gl_portfolio, amount: amt, memberId: l.member_id }],
-    credits: [{ glCode: ch.gl_account_code, amount: amt, memberId: l.member_id }],
+  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const plan = await fees.disbursementFees(c, l, { amount: amt, selected: selectedFees });
+  const paidOut = round2(amt - plan.deducted);
+  if (!(paidOut > 0)) throw err('FEES_EXCEED_DISBURSEMENT', 400);
+
+  // Dr Portfolio for the principal the member owes (amount plus anything
+  // capitalised); Cr the channel for what leaves, Cr fee income (or the
+  // receivable, cleared at once) for what was deducted.
+  const debits = [{ glCode: l.gl_portfolio, amount: round2(amt + plan.capitalized), memberId: l.member_id }];
+  const credits = [{ glCode: ch.gl_account_code, amount: paidOut, memberId: l.member_id }];
+  for (const f of plan.items.filter((x) => x.feeType === 'DISBURSEMENT_DEDUCTED' || x.feeType === 'DISBURSEMENT_CAPITALIZED')) {
+    credits.push({ glCode: f.glIncome, amount: f.amount, memberId: l.member_id });
+  }
+  const entryId = await post(c, l, {
+    debits, credits,
     narration: narration || `Disbursement ${l.account_no}`,
     sourceType: 'LOAN_DISBURSEMENT', sourceId: l.id, channelId,
-    bookingDate: valueDate, createdBy,
+    bookingDate: date, createdBy,
   });
 
   const { rows } = await c.query(
     `UPDATE loan_accounts
      SET principal_disbursed = principal_disbursed + $1,
-         fees_due = fees_due + $2,
+         principal_capitalized = principal_capitalized + $2,
          status = 'ACTIVE',
-         disbursed_on = COALESCE($3::date, current_date),
-         accrued_through = COALESCE($3::date, current_date),
+         disbursed_on = $3::date,
+         accrued_through = $3::date,
+         disbursed_by = $4,
          updated_at = now()
-     WHERE id = $4 RETURNING *`,
-    [amt, round2(l.processing_fee || 0), valueDate || null, l.id]
+     WHERE id = $5 RETURNING *`,
+    [amt, plan.capitalized, date, createdBy || null, l.id]
   );
+  await workflow.history(c, l.id, { from: 'APPROVED', to: 'ACTIVE', action: 'DISBURSE', actor: createdBy });
 
-  // Fee applied: Dr Fee Receivable, Cr Fee Income (accrual). Under cash
-  // accounting nothing is booked until the fee is paid; the loan still
-  // carries it as due.
-  if (Number(l.processing_fee) > 0 && isAccrual(l)) {
-    await acct.post(c, {
-      debits: [{ glCode: l.gl_fee_rec, amount: l.processing_fee, memberId: l.member_id }],
-      credits: [{ glCode: l.gl_fee_inc || l.gl_interest_inc, amount: l.processing_fee, memberId: l.member_id }],
-      narration: `Processing fee ${l.account_no}`,
-      sourceType: 'LOAN_FEE', sourceId: l.id, bookingDate: valueDate, createdBy,
+  // Deducted and capitalised fees are recorded as paid the moment they
+  // exist; upfront fees fall due, on the first installment for a fixed-term
+  // loan and immediately for a dynamic one.
+  for (const f of plan.items) {
+    await fees.recordFee(c, l, {
+      ...f, valueDate: date, createdBy,
+      settled: f.feeType !== 'DISBURSEMENT_UPFRONT',
+    });
+  }
+  const fresh = { ...l, ...rows[0], _selectedFees: selectedFees };
+  const sched = await buildSchedule(c, fresh);
+  await fees.placeUpfrontFees(c, fresh, plan.items.filter((x) => x.feeType === 'DISBURSEMENT_UPFRONT'));
+  // A fixed-term loan's payment-due fees are fixed with its schedule and
+  // applied now; a dynamic loan's fall due installment by installment.
+  await fees.applyPaymentDueFees(c, fresh, isDynamic(l) ? date : '9999-12-31');
+
+  if (l.interest_posting === 'ON_DISBURSEMENT' && !isDynamic(l) && sched.totals.interest > 0) {
+    // The whole term's interest is applied on day one.
+    const maturity = sched.installments[sched.installments.length - 1].nominalDue;
+    await c.query(
+      'UPDATE loan_accounts SET interest_accrued = interest_accrued + $1, accrued_through = $2::date WHERE id = $3',
+      [sched.totals.interest, maturity, l.id]);
+    let ie = null;
+    if (isAccrual(l)) {
+      ie = await post(c, l, {
+        debits: [{ glCode: l.gl_interest_rec, amount: sched.totals.interest, memberId: l.member_id }],
+        credits: [{ glCode: l.gl_interest_inc, amount: sched.totals.interest, memberId: l.member_id }],
+        narration: `Interest applied at disbursement ${l.account_no}`,
+        sourceType: 'LOAN_INTEREST_ACCRUAL', sourceId: l.id, bookingDate: date, createdBy,
+      });
+    }
+    await savings.record(c, {
+      reference: savings.ref('LI'), kind: 'LOAN_INTEREST_ACCRUAL', memberId: l.member_id,
+      loanAccountId: l.id, amount: sched.totals.interest, valueDate: date, entryId: ie,
+      allocation: { from: date, through: maturity, method: 'ON_DISBURSEMENT' }, createdBy,
     });
   }
 
-  const fresh = { ...l, ...rows[0] };
-  await buildSchedule(c, fresh);
-
   return savings.record(c, {
     reference: savings.ref('LD'), kind: 'LOAN_DISBURSEMENT', memberId: l.member_id,
-    loanAccountId: l.id, channelId, amount: amt, valueDate,
-    entryId: entry.entryId, narration, createdBy,
+    loanAccountId: l.id, channelId, amount: amt, valueDate: date,
+    entryId, narration, createdBy,
+    allocation: { paidOut, deducted: plan.deducted, capitalized: plan.capitalized, upfront: plan.upfront },
   });
 }
 
@@ -642,13 +746,25 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
  * cash, income. See paidCredit().
  */
 async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy } = {}) {
-  const l = await lock(c, loanId);
+  const fees = require('./fees');
+  let l = await lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   let left = round2(amount);
   if (!(left > 0)) throw err('INVALID_REPAYMENT_AMOUNT');
 
   const ch = (await c.query('SELECT * FROM transaction_channels WHERE id = $1 AND is_active', [channelId])).rows[0];
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
+
+  const asOf = valueDate ? ymd(valueDate) : isoDate(new Date());
+  // Interest owed is brought up to the payment date first, so a prepayment
+  // on a dynamic loan pays the interest it has actually earned (Mambu's
+  // "apply interest on prepayments"); a capitalising product folds it into
+  // principal at the same moment.
+  if (isDynamic(l)) {
+    await accrueInterest(c, l.id, { valueDate: asOf, createdBy });
+    await fees.applyPaymentDueFees(c, l, asOf);
+    l = await lock(c, l.id);
+  }
 
   const b = balances(l);
   const due = { PENALTY: b.penalty, FEE: b.fees, INTEREST: b.interest, PRINCIPAL: b.principal };
@@ -660,9 +776,9 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     paid[component] = t;
     left = round2(left - t);
   }
-  const { PENALTY: penalty, FEE: fees, INTEREST: interest, PRINCIPAL: principal } = paid;
+  const { PENALTY: penalty, FEE: feesPaid, INTEREST: interest, PRINCIPAL: principal } = paid;
   const surplus = round2(left);
-  const total = round2(penalty + fees + interest + principal + surplus);
+  const total = round2(penalty + feesPaid + interest + principal + surplus);
 
   const credits = [];
   for (const component of order) {
@@ -684,13 +800,22 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     credits.push({ glCode: surplusAccount.gl_liability, amount: surplus, memberId: l.member_id });
   }
 
-  const entry = await acct.post(c, {
-    debits: [{ glCode: ch.gl_account_code, amount: total, memberId: l.member_id }],
-    credits,
-    narration: narration || `Repayment ${l.account_no}`,
-    sourceType: 'LOAN_REPAYMENT', sourceId: l.id, channelId,
-    bookingDate: valueDate, createdBy,
-  });
+  // Under NONE the loan still needs the cash to land somewhere: the channel
+  // and the savings surplus are booked, the loan side is not.
+  const entryId = booksEntries(l)
+    ? await post(c, l, {
+      debits: [{ glCode: ch.gl_account_code, amount: total, memberId: l.member_id }],
+      credits,
+      narration: narration || `Repayment ${l.account_no}`,
+      sourceType: 'LOAN_REPAYMENT', sourceId: l.id, channelId,
+      bookingDate: asOf, createdBy,
+    })
+    : (surplus > 0 ? (await acct.post(c, {
+      debits: [{ glCode: ch.gl_account_code, amount: surplus, memberId: l.member_id }],
+      credits: [{ glCode: surplusAccount.gl_liability, amount: surplus, memberId: l.member_id }],
+      narration: `Repayment surplus ${l.account_no}`, sourceType: 'LOAN_REPAYMENT', sourceId: l.id, channelId,
+      bookingDate: asOf, createdBy,
+    })).entryId : null);
 
   await c.query(
     `UPDATE loan_accounts SET
@@ -698,35 +823,38 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
        interest_paid = interest_paid + $3, principal_paid = principal_paid + $4,
        updated_at = now()
      WHERE id = $5`,
-    [penalty, fees, interest, principal, l.id]
+    [penalty, feesPaid, interest, principal, l.id]
   );
   if (surplusAccount) {
     await c.query('UPDATE savings_accounts SET balance = balance + $1 WHERE id = $2',
       [surplus, surplusAccount.id]);
   }
 
-  const asOf = valueDate ? ymd(valueDate) : isoDate(new Date());
-  const dynamic = l.product_type === 'DYNAMIC_TERM';
+  const dynamic = isDynamic(l);
   // A fixed-term loan's payment settles its installments in order, however
   // early it comes. A dynamic loan's payment settles what has fallen due and
   // anything beyond that is a prepayment: it reduces the balance, and the
   // schedule for what remains is redrawn from that balance.
-  await applyToInstallments(c, l.id, { principal, interest, fees }, dynamic ? { dueBy: asOf } : {});
+  await applyToInstallments(c, l.id, { principal, interest, fees: feesPaid }, dynamic ? { dueBy: asOf } : {});
+  await fees.settle(c, l.id, feesPaid);
 
   const fresh = await lock(c, l.id);
   const after = balances(fresh);
   let rescheduled = null;
   if (after.total <= 0) {
-    await c.query("UPDATE loan_accounts SET status = 'CLOSED_REPAID', updated_at = now() WHERE id = $1", [l.id]);
+    await c.query("UPDATE loan_accounts SET status = 'CLOSED_REPAID', closed_on = $2::date, updated_at = now() WHERE id = $1", [l.id, asOf]);
+    await require('./workflow').history(c, l.id, { from: fresh.status, to: 'CLOSED_REPAID', action: 'PAID_OFF', actor: createdBy });
     await releaseGuarantors(c, l.id);
+  } else if (fresh.status === 'IN_ARREARS') {
+    await require('./workflow').refreshArrears(c, fresh, asOf);
   }
   if (dynamic && (principal > 0 || interest > 0)) rescheduled = await reschedule(c, fresh, asOf);
 
   return savings.record(c, {
     reference: savings.ref('LR'), kind: 'LOAN_REPAYMENT', memberId: l.member_id,
-    loanAccountId: l.id, channelId, amount: total, valueDate, entryId: entry.entryId,
+    loanAccountId: l.id, channelId, amount: total, valueDate: asOf, entryId,
     allocation: {
-      penalty, fees, interest, principal, surplus,
+      penalty, fees: feesPaid, interest, principal, surplus,
       ...(rescheduled ? { rescheduled: { recalculation: rescheduled.recalculation, dropped: rescheduled.dropped } } : {}),
     },
     narration, createdBy,
@@ -740,7 +868,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
  */
 async function applyToInstallments(c, loanId, { principal, interest, fees }, { dueBy = null } = {}) {
   const { rows } = await c.query(
-    `SELECT * FROM loan_installments WHERE loan_id = $1 AND status <> 'PAID'
+    `SELECT * FROM loan_installments WHERE loan_id = $1 AND status NOT IN ('PAID', 'GRACE')
        AND ($2::date IS NULL OR due_date <= $2::date)
      ORDER BY number`,
     [loanId, dueBy]
@@ -777,8 +905,6 @@ async function applyToInstallments(c, loanId, { principal, interest, fees }, { d
  * (`accrued_through`) and each call books the days from there to the value
  * date, then moves the marker. Calling it twice for the same date books
  * nothing the second time; calling it after a missed week books the week.
- * The old implementation booked one whole month per call, so a nightly job
- * booked thirty months of interest in thirty days.
  *
  *   DAILY    interest for the elapsed days, by the product's day count
  *   MONTHLY  one month's interest, on the last day of the month only
@@ -790,21 +916,25 @@ async function applyToInstallments(c, loanId, { principal, interest, fees }, { d
  *   FIXED_TERM    the schedule's interest, pro rata through the period in
  *                 progress (scheduledInterestThrough). Prepaying principal
  *                 does not lower it and paying late does not raise it, and
- *                 nothing accrues after the last period: the interest on a
- *                 fixed-term loan was fixed when the schedule was drawn.
+ *                 nothing accrues after the last period.
  *   DYNAMIC_TERM  the actual outstanding principal × the rate for the days
- *                 elapsed, so early principal saves interest and a balance
- *                 left running keeps costing it. Past the last due date it
- *                 keeps accruing only if the product accrues late interest.
+ *                 elapsed (SIMPLE), on principal plus unpaid interest
+ *                 (SIMPLE with PRINCIPAL_AND_INTEREST, and COMPOUND), or
+ *                 folded into principal on each due date (CAPITALIZED).
+ *                 Past the last due date it keeps accruing only if the
+ *                 product accrues late interest.
+ *   INTEREST_FREE nothing, ever.
  *
  * Under ACCRUAL the entry is Dr Interest Receivable, Cr Interest Income.
  * Under CASH nothing is booked: the loan still tracks what is owed, and the
- * eventual payment credits income.
+ * eventual payment credits income. CAPITALIZED interest books nothing at
+ * accrual and Dr Portfolio, Cr Interest Income when it is capitalised.
  */
 async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   const l = await lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) return null;
-  if (l.interest_accrual === 'NONE') return null;
+  if (l.interest_accrual === 'NONE' || isInterestFree(l)) return null;
+  if (l.interest_posting === 'ON_DISBURSEMENT' && !isDynamic(l)) return null;
 
   let date = valueDate ? ymd(valueDate) : isoDate(new Date());
   const from = l.accrued_through || l.disbursed_on;
@@ -812,77 +942,118 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   const fromIso = ymd(from);
   if (date <= fromIso) return null;
 
-  const rate = Number(l.monthly_rate);
-  const dc = l.day_count || 'THIRTY_360';
-  const dynamic = l.product_type === 'DYNAMIC_TERM';
+  const t = terms(l);
+  const dynamic = isDynamic(l);
+  const capitalizing = l.interest_type === 'CAPITALIZED';
   const { rows: installments } = await c.query(
-    'SELECT number, principal_due, interest_due, due_date FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]
+    'SELECT number, principal_due, interest_due, due_date, nominal_due FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]
   );
 
   if (dynamic && !l.accrue_late_interest && installments.length) {
     // Interest stops at maturity; penalties take over from there.
-    const maturity = ymd(installments[installments.length - 1].due_date);
+    const maturity = ymd(installments[installments.length - 1].nominal_due);
     if (fromIso >= maturity) return null;
     if (date > maturity) date = maturity;
   }
 
-  // Interest on the basis a period is priced on, at `asOf`.
+  // The base a period is priced on, at the start of the run.
+  const unpaidInterest = Math.max(0, round2(l.interest_accrued - l.interest_paid));
+  const onInterestToo = t.interestType === 'COMPOUND' || (t.interestType === 'SIMPLE' && l.simple_base === 'PRINCIPAL_AND_INTEREST');
   const base = dynamic
-    ? round2(l.principal_disbursed - l.principal_paid)
+    ? round2(principalOutstanding(l) + (onInterestToo ? unpaidInterest : 0))
     : l.method === 'FLAT' ? Number(l.principal) : scheduledOutstanding(l, installments, fromIso);
 
   let amt = 0;
-  let through = date;
+  const through = date;
   if (l.interest_accrual === 'MONTHLY') {
     if (!isMonthEnd(date)) return null;
     // Every month-end after the marker and up to the value date, in case
-    // one was missed.
+    // one was missed; each month priced as one period at the base.
     const start = toUTC(fromIso);
     const end = toUTC(date);
-    let months = 0;
     for (let y = start.getUTCFullYear(), m = start.getUTCMonth(); ; m += 1) {
       const monthEnd = new Date(Date.UTC(y, m + 1, 0));
       if (monthEnd > end) break;
-      if (monthEnd > start) months += 1;
+      if (monthEnd > start) amt = round2(amt + interestBetween(base, t, new Date(Date.UTC(y, m, 0)), monthEnd));
     }
-    amt = round2(base * rate / 100 * months);
   } else if (!dynamic && installments.length) {
-    amt = round2(scheduledInterestThrough(l, installments, date, dc)
-      - scheduledInterestThrough(l, installments, fromIso, dc));
+    amt = round2(scheduledInterestThrough(l, installments, date, t.convention)
+      - scheduledInterestThrough(l, installments, fromIso, t.convention));
   } else {
-    amt = interestFor(base, rate, fromIso, date, dc);
+    amt = interestBetween(base, t, fromIso, date);
   }
+
+  // A loan in arrears under a charge cap may not be charged past it.
+  if (amt > 0 && l.status === 'IN_ARREARS') amt = await require('./workflow').capAllows(c, l, amt);
 
   await c.query(
-    'UPDATE loan_accounts SET interest_accrued = interest_accrued + $1, accrued_through = $2::date, updated_at = now() WHERE id = $3',
+    `UPDATE loan_accounts SET interest_accrued = interest_accrued + $1, accrued_through = $2::date,
+       charges_since_arrears = charges_since_arrears + CASE WHEN status = 'IN_ARREARS' THEN $1 ELSE 0 END,
+       updated_at = now() WHERE id = $3`,
     [amt, through, l.id]
   );
-  if (!(amt > 0)) return null;
 
-  let entryId = null;
-  if (isAccrual(l)) {
-    const entry = await acct.post(c, {
-      debits: [{ glCode: l.gl_interest_rec, amount: amt, memberId: l.member_id }],
-      credits: [{ glCode: l.gl_interest_inc, amount: amt, memberId: l.member_id }],
-      narration: `Interest accrual ${l.account_no} ${fromIso} to ${date}`,
-      sourceType: 'LOAN_INTEREST_ACCRUAL', sourceId: l.id, bookingDate: date, createdBy,
+  let recorded = null;
+  if (amt > 0) {
+    let entryId = null;
+    if (isAccrual(l) && !capitalizing) {
+      entryId = await post(c, l, {
+        debits: [{ glCode: l.gl_interest_rec, amount: amt, memberId: l.member_id }],
+        credits: [{ glCode: l.gl_interest_inc, amount: amt, memberId: l.member_id }],
+        narration: `Interest accrual ${l.account_no} ${fromIso} to ${date}`,
+        sourceType: 'LOAN_INTEREST_ACCRUAL', sourceId: l.id, bookingDate: date, createdBy,
+      });
+    }
+    recorded = await savings.record(c, {
+      reference: savings.ref('LI'), kind: 'LOAN_INTEREST_ACCRUAL', memberId: l.member_id,
+      loanAccountId: l.id, amount: amt, valueDate: date, entryId,
+      allocation: {
+        from: fromIso, through, base, dayCount: t.convention, method: l.interest_accrual,
+        interestType: t.interestType, productType: l.product_type, basis: dynamic ? 'ACTUAL_BALANCE' : 'SCHEDULE',
+      },
+      createdBy,
     });
-    entryId = entry.entryId;
   }
+
+  // Capitalising products fold the interest earned into principal on each
+  // due date that this run crossed (and at repayment, which calls here first).
+  if (capitalizing && dynamic) {
+    const crossed = installments.some((i) => ymd(i.nominal_due) > fromIso && ymd(i.nominal_due) <= date);
+    if (crossed) await capitalizeInterest(c, l.id, { valueDate: date, createdBy });
+  }
+  return recorded;
+}
+
+/**
+ * Move a loan's unpaid accrued interest into principal (CAPITALIZED interest
+ * type): Dr Portfolio, Cr Interest Income. From here on it is repaid, and
+ * earns interest, as principal.
+ */
+async function capitalizeInterest(c, loanId, { valueDate, createdBy } = {}) {
+  const l = await lock(c, loanId);
+  const amt = Math.max(0, round2(l.interest_accrued - l.interest_paid));
+  if (!(amt > 0)) return null;
+  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  await c.query(
+    `UPDATE loan_accounts SET interest_accrued = interest_accrued - $1,
+       principal_capitalized = principal_capitalized + $1, updated_at = now() WHERE id = $2`, [amt, l.id]);
+  const entryId = await post(c, l, {
+    debits: [{ glCode: l.gl_portfolio, amount: amt, memberId: l.member_id }],
+    credits: [{ glCode: l.gl_interest_inc, amount: amt, memberId: l.member_id }],
+    narration: `Interest capitalised ${l.account_no}`,
+    sourceType: 'LOAN_INTEREST_CAPITALIZED', sourceId: l.id, bookingDate: date, createdBy,
+  });
   return savings.record(c, {
-    reference: savings.ref('LI'), kind: 'LOAN_INTEREST_ACCRUAL', memberId: l.member_id,
-    loanAccountId: l.id, amount: amt, valueDate: date, entryId,
-    allocation: {
-      from: fromIso, through, base, dayCount: l.day_count, method: l.interest_accrual,
-      productType: l.product_type, basis: dynamic ? 'ACTUAL_BALANCE' : 'SCHEDULE',
-    },
-    createdBy,
+    reference: savings.ref('LC'), kind: 'LOAN_INTEREST_CAPITALIZED', memberId: l.member_id,
+    loanAccountId: l.id, amount: amt, valueDate: date, entryId, createdBy,
   });
 }
 
 async function writeOff(c, loanId, { narration, createdBy } = {}) {
+  const workflow = require('./workflow');
   const l = await lock(c, loanId);
-  if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
+  if (!['ACTIVE', 'IN_ARREARS', 'LOCKED'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
+  await workflow.assertMayWriteOff(c, l);
   const b = balances(l);
   if (b.total <= 0) throw err('NOTHING_TO_WRITE_OFF', 409);
 
@@ -897,15 +1068,16 @@ async function writeOff(c, loanId, { narration, createdBy } = {}) {
     }
   }
   const booked = round2(credits.reduce((s2, x) => s2 + x.amount, 0));
-  const entry = await acct.post(c, {
+  const entryId = await post(c, l, {
     debits: [{ glCode: l.gl_writeoff_exp, amount: booked, memberId: l.member_id }],
     credits: credits.filter((x) => x.amount > 0),
     narration: narration || `Write off ${l.account_no}`,
     sourceType: 'LOAN_WRITE_OFF', sourceId: l.id, createdBy,
   });
   await c.query(
-    "UPDATE loan_accounts SET status = 'CLOSED_WRITTEN_OFF', updated_at = now() WHERE id = $1", [l.id]
+    "UPDATE loan_accounts SET status = 'CLOSED_WRITTEN_OFF', closed_on = current_date, updated_at = now() WHERE id = $1", [l.id]
   );
+  await workflow.history(c, l.id, { from: l.status, to: 'CLOSED_WRITTEN_OFF', action: 'WRITE_OFF', actor: createdBy, note: narration });
   // Guarantors are called, not released: their pledge is what covers this.
   await c.query(
     "UPDATE loan_guarantors SET status = 'CALLED' WHERE loan_id = $1 AND status = 'PLEDGED'", [l.id]
@@ -913,7 +1085,7 @@ async function writeOff(c, loanId, { narration, createdBy } = {}) {
 
   return savings.record(c, {
     reference: savings.ref('LW'), kind: 'LOAN_WRITE_OFF', memberId: l.member_id,
-    loanAccountId: l.id, amount: b.total, entryId: entry.entryId,
+    loanAccountId: l.id, amount: b.total, entryId,
     allocation: b, narration, createdBy,
   });
 }
@@ -925,7 +1097,7 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
   if (tx.reversed_by) throw err('TRANSACTION_ALREADY_REVERSED', 409);
   if (!tx.loan_account_id) throw err('NOT_A_LOAN_TRANSACTION');
 
-  const entry = await acct.reverse(c, tx.entry_id, narration, createdBy);
+  const entry = tx.entry_id ? await acct.reverse(c, tx.entry_id, narration, createdBy) : { entryId: null };
   const a = tx.allocation || {};
 
   if (tx.kind === 'LOAN_REPAYMENT') {
@@ -934,6 +1106,7 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
          penalty_paid = penalty_paid - $1, fees_paid = fees_paid - $2,
          interest_paid = interest_paid - $3, principal_paid = principal_paid - $4,
          status = CASE WHEN status = 'CLOSED_REPAID' THEN 'ACTIVE' ELSE status END,
+         closed_on = CASE WHEN status = 'CLOSED_REPAID' THEN NULL ELSE closed_on END,
          updated_at = now()
        WHERE id = $5`,
       [a.penalty || 0, a.fees || 0, a.interest || 0, a.principal || 0, tx.loan_account_id]
@@ -951,10 +1124,11 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
     // goes back to the schedule it was disbursed with and is redrawn from
     // the balance as it now stands.
     const restored = await lock(c, tx.loan_account_id);
-    const dynamic = restored.product_type === 'DYNAMIC_TERM';
+    const dynamic = isDynamic(restored);
     if (dynamic) await buildSchedule(c, restored);
     await c.query(
-      `UPDATE loan_installments SET principal_paid = 0, interest_paid = 0, fee_paid = 0, status = 'PENDING'
+      `UPDATE loan_installments SET principal_paid = 0, interest_paid = 0, fee_paid = 0,
+         status = CASE WHEN status = 'GRACE' THEN 'GRACE' ELSE 'PENDING' END
        WHERE loan_id = $1`, [tx.loan_account_id]
     );
     const { rows: remaining } = await c.query(
@@ -970,13 +1144,18 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
     await applyToInstallments(c, tx.loan_account_id, {
       principal: Number(remaining[0].p), interest: Number(remaining[0].i), fees: Number(remaining[0].f),
     }, dynamic ? { dueBy: today } : {});
+    await require('./fees').resettle(c, tx.loan_account_id, Number(remaining[0].f));
     if (dynamic) await reschedule(c, await lock(c, tx.loan_account_id), today);
   } else if (tx.kind === 'LOAN_DISBURSEMENT') {
     await c.query(
       `UPDATE loan_accounts SET principal_disbursed = principal_disbursed - $1,
-         status = 'APPROVED', disbursed_on = NULL, updated_at = now() WHERE id = $2`,
+         principal_capitalized = 0, interest_accrued = 0, accrued_through = NULL,
+         status = 'APPROVED', disbursed_on = NULL, disbursed_by = NULL, updated_at = now() WHERE id = $2`,
       [tx.amount, tx.loan_account_id]
     );
+    await require('./fees').undoDisbursementFees(c, tx.loan_account_id, { createdBy });
+    await c.query('DELETE FROM loan_installments WHERE loan_id = $1', [tx.loan_account_id]);
+    await require('./workflow').history(c, tx.loan_account_id, { from: 'ACTIVE', to: 'APPROVED', action: 'UNDO_DISBURSE', actor: createdBy, note: narration });
   }
 
   const rev = await savings.record(c, {
@@ -988,28 +1167,23 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
   return rev;
 }
 
-/** Mark overdue installments and flip the loan into arrears. */
+/**
+ * Mark overdue installments and flip loans into arrears, honouring each
+ * product's arrears tolerance (days, and percentage of outstanding with a
+ * floor). The arrears logic itself lives in ./workflow so the EOD job, the
+ * repayment path and the console read one definition.
+ */
 async function markArrears(c, { asOf = null } = {}) {
-  await c.query(
-    `UPDATE loan_installments SET status = 'OVERDUE'
-     WHERE status IN ('PENDING','PARTIALLY_PAID')
-       AND due_date < COALESCE($1::date, current_date)`,
-    [asOf]
-  );
-  const { rows } = await c.query(
-    `UPDATE loan_accounts l SET status = 'IN_ARREARS', updated_at = now()
-     WHERE l.status = 'ACTIVE'
-       AND EXISTS (SELECT 1 FROM loan_installments i WHERE i.loan_id = l.id AND i.status = 'OVERDUE')
-     RETURNING l.id, l.account_no`
-  );
-  return rows;
+  return require('./workflow').markArrears(c, { asOf });
 }
 
 module.exports = {
-  TRANSITIONS, lock, balances, buildSchedule, shiftOffClosedDays, reschedule, maturityDate,
-  apply, changeState, disburse, repay, accrueInterest, writeOff,
+  lock, balances, principalOutstanding, effective, terms, isDynamic, isInterestFree, isAccrual, booksEntries, post,
+  buildSchedule, previewSchedule, shiftOffClosedDays, reschedule, maturityDate,
+  apply, changeState, disburse, repay, accrueInterest, capitalizeInterest, writeOff,
   reverseTransaction, addGuarantor, guarantorCoverage, releaseGuarantors,
   checkEligibility, enforceEligibility, markArrears, applyToInstallments,
   dayCount, interestFor, isMonthEnd, paidCredit, writeOffCredit,
-  addMonths, annuityPayment, planInstallments, scheduledInterestThrough, scheduledOutstanding,
+  addMonths, annuityPayment, scheduledInterestThrough, scheduledOutstanding,
+  fillPattern, nextAccountNo, OPEN_APPLICATION,
 };

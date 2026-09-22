@@ -86,9 +86,15 @@ src/
   domain/
     accounting.js      double-entry posting, reversal, trial balance
     close.js           financial years, year-end close, statutory reserve
-    loans.js           lifecycle, schedule, day counts, accrual, allocation,
-                       guarantors, eligibility, arrears
-    penalties.js       late payment charges, grace, waiver
+    loans.js           lifecycle, disbursement, accrual, allocation, guarantors,
+                       eligibility, account numbering
+    schedule.js        the schedule engine: dates, rates, interest types, lines
+                       (pure functions, no database)
+    fees.js            product fees of every type, applying, waiving, settling
+    workflow.js        states and undo, approval and disbursement limits,
+                       amendments by state, arrears, cap on charges, controls
+    restructure.js     reschedule and refinance
+    penalties.js       late payment charges on Mambu's four bases, waiver
     provisioning.js    loan loss provisioning by PAR band
     reports.js         balance sheet, income statement, prudential, PAR
     returns.js         regulatory return engine, templates held as data
@@ -122,7 +128,8 @@ test/reporting.test.js     45 assertions
 test/portal.test.js        49 assertions
 test/loan-accounting.test.js 55 assertions
 test/product-types.test.js 48 assertions
-test/console.test.js       23 assertions, real browser, npm run test:browser
+test/loan-config.test.js   135 assertions
+test/console.test.js       25 assertions, real browser, npm run test:browser
 test/portal-ui.test.js     20 assertions, real browser, npm run test:browser
 ```
 
@@ -287,42 +294,127 @@ corrections included: the trial balance still balances.
 
 ## Loan products and their accounting
 
-A product is the template every loan under it follows: type, interest
-method, pricing, eligibility, allocation order, and the accounting rules.
-`GET/POST/PATCH
-/api/loan-products` manages them, with every GL mapping checked against the
-chart of accounts for existence and type, and the console has a Products
-screen. The rate is copied onto a loan at application, so repricing a
-product does not touch running loans; the accounting method and GL mappings
-are read live, so a wrong mapping can be corrected.
+A product is the template every loan under it follows, and the whole of
+Mambu's loan product form is here: identity and numbering, type and
+interest method, interest type, rate and its bands, amount and term,
+repayment interval and grace, balloon and rounding, arrears and penalties,
+the cap on charges, internal controls, fees, eligibility, allocation order,
+and accounting. `GET/POST/PATCH /api/loan-products` manages products,
+`/api/loan-products/:id/fees` their fees, and
+`POST /api/loan-products/:id/schedule-preview` draws the schedule a loan
+would get. The console's Products screen opens each product to its settings
+and fees.
 
-### The posting rules
+Changing a product does not touch loans already running: the rate and type
+are copied onto the loan at application and the schedule is drawn at
+disbursement. GL mappings and the accounting method are read live, so a
+wrong mapping can be corrected. The settings that decide how interest is
+computed (type, method, interest type, posting, rate frequency, day count,
+repayment interval) are frozen once a loan exists under the product, and the
+product type is frozen from creation: a SACCO that needs different
+arithmetic creates a new product. Every setting has a default that
+reproduces the behaviour before it existed, so an existing product is
+unchanged until somebody edits it.
 
-Taken from Mambu's published behaviour for loan products
-([Linking Products to Accounting](https://docs.mambu.com/docs/linking-products-to-accounting/),
-[Cash vs Accruals Accounting](https://docs.mambu.com/docs/cash-vs-accruals-accounting/)).
-Each product picks `accounting_method`:
+### The configuration, setting by setting
 
-| Event | ACCRUAL | CASH |
+| Area | Settings | Notes |
 |---|---|---|
-| Disbursement | Dr Portfolio, Cr Source | same |
-| Interest applied | Dr Interest Receivable, Cr Interest Income | nothing booked |
-| Fee applied | Dr Fee Receivable, Cr Fee Income | nothing booked |
-| Penalty applied | Dr Penalty Receivable, Cr Penalty Income | nothing booked |
-| Interest, fee, penalty paid | Dr Source, Cr the receivable | Dr Source, Cr income |
-| Principal paid | Dr Source, Cr Portfolio | same |
-| Write-off | Dr Write-off Expense, Cr Portfolio and each receivable | Dr Write-off Expense, Cr Portfolio |
+| Numbering | `id_pattern`, `id_mode` | `#` digit, `@` letter, `$` either, other characters literal. INCREMENTAL fills the `#` run from a counter shared by every product using the same prefix, so `LN######` continues the existing LN series; RANDOM draws each placeholder. |
+| Initial state | `initial_state` | PENDING_APPROVAL, or PARTIAL_APPLICATION for a product whose applications need documents before they can be judged. |
+| Type and method | `product_type`, `method` | FIXED_TERM, DYNAMIC_TERM, INTEREST_FREE; FLAT, REDUCING, REDUCING_EQUAL_INSTALLMENTS. See below. |
+| Interest type | `interest_type`, `simple_base` | SIMPLE (linear), CAPITALIZED (applied interest joins the principal, Dr Portfolio Cr Income, and is repaid as principal), COMPOUND (daily exponential; the annuity uses the periodic compound rate). SIMPLE on a dynamic equal-installment product may run on principal and unpaid interest. Figures reproduce Mambu's worked examples to the cent. |
+| Posting | `interest_posting` | ON_REPAYMENT, or ON_DISBURSEMENT for a fixed-term product that applies the whole term's interest on day one. |
+| Rate | `monthly_rate`, `rate_frequency`, `rate_min`, `rate_max` | The rate is quoted PER_MONTH, PER_YEAR, PER_WEEK or PER_DAY; a loan may take a rate inside the band. |
+| Amount and term | `min/default/max_principal`, `min/default/max_term` | Bands checked at application and amendment. `term_months` on a loan is the number of installments. |
+| Interval | `repayment_interval_unit/count`, `fixed_days_of_month`, `short_month_handling`, `first_due_offset_days` (+ band) | Every n months, weeks or days, or on fixed days of the month (payday: 1 and 15) with the 29th to 31st moved to the last day or the 1st of the next. |
+| Grace | `grace_type`, `grace_periods` | PRINCIPAL: interest-only installments first. PURE: nothing due for those installments, their interest spread over the rest; stored as GRACE lines that never go overdue. |
+| Balloon | `amortization_periods` | Amortise as if over this many periods; the last scheduled installment carries the balance. |
+| Rounding | `rounding` | NONE, WHOLE, WHOLE_UP, applied to each payment; the last line takes the remainder. |
+| Arrears | `arrears_tolerance_days`, `arrears_tolerance_percent`, `arrears_tolerance_floor`, `arrears_count_from`, `arrears_non_working_days` | A loan stays ACTIVE for the tolerance days (working days only, if so set); a shortfall under the greater of the percentage of outstanding and the floor is a partial payment, not arrears. Days in arrears count from the oldest late installment or from when the loan first went into arrears. |
+| Penalties | `penalty_rate` (+ band), `penalty_basis`, `penalty_tolerance_days` | Daily rate on OVERDUE_PRINCIPAL, OVERDUE_PRINCIPAL_INTEREST, OVERDUE_ALL or OUTSTANDING_PRINCIPAL, or NONE; applied once the tolerance lapses, for every late day. A loan may carry its own rate inside the band. |
+| Cap on charges | `charge_cap_percent`, `charge_cap_base`, `charge_cap_mode` | When interest, fees and penalties charged since the loan went into arrears reach the percentage of the original or outstanding principal, the loan is LOCKED: HARD refuses the charge that would cross the line, SOFT applies it first. Ships unset; the in duplum position is 100% of outstanding principal, HARD. |
+| Controls | `auto_lock_arrears_days`, `allow_arbitrary_fees` | Per product. Tenant-wide controls are separate, below. |
+| Accounting | `accounting_method` | ACCRUAL, CASH, or NONE: balances kept, no journal entries, no GL accounts needed. |
 
-Income is recognised exactly once under either method. The code before this
-credited interest income at accrual and again at repayment, and debited
-penalties to the loan portfolio, so income was overstated and the portfolio
-carried uncollected penalties as if they were principal.
-`test/loan-accounting.test.js` asserts the receivable rises and falls and
-the income account moves once.
+### Fees
 
-Each product names its own receivable, income and write-off accounts
-(`gl_interest_rec`, `gl_fee_rec`, `gl_penalty_rec`, `gl_writeoff_exp`, and
-the income accounts), defaulting to the seeded ones.
+`loan_product_fees` holds a product's fees, after Mambu's "Loan Fees
+Setup". Each says when it happens and how much:
+
+| `fee_type` | When | `calculation` |
+|---|---|---|
+| MANUAL | a user applies it when the event occurs | FLAT (amount may be left to the teller), PERCENT_OF_AMOUNT |
+| DISBURSEMENT_DEDUCTED | taken out of what the member receives | FLAT, PERCENT_OF_AMOUNT |
+| DISBURSEMENT_CAPITALIZED | added to what the member repays | FLAT, PERCENT_OF_AMOUNT |
+| DISBURSEMENT_UPFRONT | due at disbursement, paid with a later payment (first installment on a fixed-term loan, at once on a dynamic one) | FLAT, PERCENT_OF_AMOUNT |
+| PAYMENT_DUE | on the schedule, one share per installment; applied at disbursement on a fixed-term loan, on each due date on a dynamic one | FLAT, FLAT_PER_INSTALLMENT, PERCENT_OF_AMOUNT, PERCENT_PER_INSTALLMENT |
+| LATE_REPAYMENT | once per installment that goes overdue | FLAT, PERCENT_OF_AMOUNT, PERCENT_OF_INSTALLMENT_PRINCIPAL |
+
+Each fee is Required or Optional (optional ones are named at
+disbursement), has a min and max, and may name its own income and
+receivable accounts. Applying a fee writes a `loan_fees` row, raises
+`fees_due`, and under accrual books Dr Fee Receivable, Cr Fee Income
+(deducted and capitalised fees credit income in the disbursement entry
+itself). Waiving reverses the open part. A fee that has been applied can be
+deactivated and repriced but not deleted or retyped. The legacy
+`processing_fee` column is an upfront flat fee called "Processing fee".
+Arbitrary fees (any name, any amount) need `allow_arbitrary_fees`.
+
+### The life cycle
+
+After Mambu's "Loan Account Life Cycle and States". Every step is a
+`loan_state_history` row and a `POST /api/loans/:id/<action>`:
+
+```
+PARTIAL_APPLICATION --request-approval--> PENDING_APPROVAL --approve--> APPROVED --disbursements--> ACTIVE <--> IN_ARREARS
+        ^                                       |                          |                            |
+        +-------------set-incomplete------------+        undo-approve      |                    lock / unlock: LOCKED
+reject / undo-reject, withdraw / undo-withdraw close and reopen an application (and an approved loan may be withdrawn)
+repayments in full: CLOSED_REPAID    write-off: CLOSED_WRITTEN_OFF    reschedule / refinance: CLOSED_RESCHEDULED / CLOSED_REFINANCED
+```
+
+`PATCH /api/loans/:id` amends a loan: the terms (amount, installments,
+rate, penalty rate, first due offset, grace, amortisation, arrears
+tolerance, each inside the product's band) while the application is open;
+only purpose and notes once approved. To change the terms of an approved
+loan, undo the approval. Undoing a disbursement is the reversal of the
+disbursement transaction, which removes the schedule and the fees it
+created.
+
+Approval is one step, guarded by the product's eligibility rules, the
+tenant's exposure controls and the approving user's `approval_limit`
+(`platform.users`); disbursement by the user's `disbursement_limit` and,
+when the tenant's `two_man_rule` is on, by the rule that the approver may
+not disburse. The loan records `approved_by` and `disbursed_by`.
+
+`lending_controls` (`GET/PATCH /api/loans/controls`, TENANT_ADMIN) holds
+the tenant-wide controls from Mambu's "Internal Controls": maximum
+exposure per member (UNLIMITED, SUM_OF_LOANS, SUM_MINUS_DEPOSITS with an
+amount), one active loan per member, minimum days in arrears before a
+write-off, the window for undoing a closure, and the two-man rule. All off
+by default.
+
+A LOCKED loan accrues nothing and takes no repayment until unlocked. A lock
+for the charge cap lifts only once the charges are paid or the loan is out
+of arrears; a manual lock lifts when a manager says so.
+
+### Reschedule and refinance
+
+`POST /api/loans/:id/reschedule` and `/refinance` close the loan and open
+a new one under it (`parent_loan_id`), with new installments, optionally a
+new rate or product, and for a refinance a top-up paid out through a
+channel. Interest, fees and penalties owed are CAPITALIZED onto the new
+principal or WRITTEN_OFF. The principal moves portfolio to portfolio in one
+entry, no cash; guarantors' pledges move with it. Both accounts carry the
+step in their history.
+
+### The daily sequence, for loans
+
+`accrueInterest`, `markArrears`, `accruePenalties`, `applyFees` (a dynamic
+loan's payment-due fees on their dates, late fees on installments that
+went overdue), `enforceControls` (lock at the cap or after the product's
+days in arrears). Each is idempotent per business date.
 
 ### Product type decides what interest is
 
@@ -535,7 +627,11 @@ it off and use a CronJob calling the CLI instead.
 2. `accrueInterest`
 3. `markArrears`
 4. `accruePenalties`, which reads the arrears state the previous job produced
-5. `provision`, which reads the same arrears and posts only the movement
+5. `applyFees`: a dynamic loan's payment-due fees on their dates, late fees on
+   installments that went overdue
+6. `enforceControls`: lock loans at the product's charge cap or after its
+   days in arrears
+7. `provision`, which reads the same arrears and posts only the movement
    since the last run. While the bands have no rates it records a skip, not a
    failure, so a tenant that has not configured provisioning does not fill
    the job log with red.
@@ -573,10 +669,12 @@ additive.
 
 ## Penalties
 
-Charged per installment per day, with a per-product rate, a grace period,
-and a choice of basis: `OVERDUE` applies the rate to the amount actually in
-arrears, `OUTSTANDING` to the whole remaining principal. SACCOs price it
-both ways.
+Charged per installment per day, with a per-product rate (a loan may carry
+its own, inside the product's band), a tolerance period, and Mambu's four
+bases: `OVERDUE_PRINCIPAL`, `OVERDUE_PRINCIPAL_INTEREST`, `OVERDUE_ALL` (the
+amount actually in arrears) and `OUTSTANDING_PRINCIPAL` (the whole remaining
+principal, a penalty rate on top of the rate). A loan under a charge cap is
+charged no further than the cap allows.
 
 Rerunning the accrual charges nothing extra. A unique index on
 `(installment_id, charged_on)` combined with `ON CONFLICT DO NOTHING` makes
@@ -896,8 +994,11 @@ official forms are not.
    with explicit dates.
 5. **Early settlement of a fixed-term loan charges accrued interest only.**
    Recovering the rest of the schedule on settlement is not a setting yet.
-   Mambu's other loan product types (tranched, revolving credit,
-   interest-free) are not modelled either.
+6. **Not modelled from Mambu's product form:** tranched loans, revolving
+   credit, fee amortisation profiles (deferred fee income), VAT on
+   interest and fees, index-linked rates, funding sources, and payment
+   holidays. Auto-close of paid-off loans is moot: a paid-off loan closes
+   at once.
 
 ## Before real member data
 

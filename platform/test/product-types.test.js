@@ -17,6 +17,7 @@ const { withTenant, withTenantRead } = require('../src/db/tenantContext');
 const { migratePlatform, migrateAllTenants } = require('../src/db/migrate');
 const provision = require('../src/tenancy/provision');
 const L = require('../src/domain/loans');
+const SCH = require('../src/domain/schedule');
 const S = require('../src/domain/savings');
 const acct = require('../src/domain/accounting');
 
@@ -114,9 +115,11 @@ const PRODUCT_SQL = `
     check('the annuity payment on 120,000 at 1% over twelve months is 10,661.85',
       L.annuityPayment(120000, 0.01, 12) === 10661.85, String(L.annuityPayment(120000, 0.01, 12)));
 
-    const flat = L.planInstallments({ principal: 120000, rate: 0.01, method: 'FLAT', count: 12 });
-    const red = L.planInstallments({ principal: 120000, rate: 0.01, method: 'REDUCING', count: 12 });
-    const eq = L.planInstallments({ principal: 120000, rate: 0.01, method: 'REDUCING_EQUAL_INSTALLMENTS', count: 12 });
+    const terms = { rate: 1, frequency: 'PER_MONTH', convention: 'THIRTY_360', interestType: 'SIMPLE' };
+    const draw = (method) => SCH.draftSchedule({ start: '2026-01-12', count: 12, principal: 120000, terms, method });
+    const flat = draw('FLAT');
+    const red = draw('REDUCING');
+    const eq = draw('REDUCING_EQUAL_INSTALLMENTS');
     check('flat: the same interest every period, on the original principal',
       flat.length === 12 && flat.every((x) => x.interest === 1200) && sum(flat, (x) => x.principal) === 120000);
     check('reducing: equal principal, interest falling from 1,200 to 100',
