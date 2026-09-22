@@ -41,6 +41,8 @@ async function restructure(c, loanId, {
 
   let old = await L().lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS', 'LOCKED'].includes(old.status)) throw err(`LOAN_NOT_RESTRUCTURABLE: ${old.status}`, 409);
+  if (Number(old.credit_balance) > 0) throw err(`LOAN_HAS_A_CREDIT_BALANCE: ${old.credit_balance}`, 409);
+  if (await require('./funding').isFunded(c, old.id)) throw err('FUNDED_LOANS_CANNOT_BE_RESTRUCTURED_HERE', 409);
   const term = Number(termMonths);
   if (!(Number.isInteger(term) && term > 0)) throw err('INVALID_TERM', 400);
 

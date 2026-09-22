@@ -115,16 +115,23 @@ async function disbursementFees(c, l, { amount, selected = [] }) {
       if (!all.some((f) => f.code === s || f.id === s)) throw err(`UNKNOWN_FEE: ${s}`, 400);
     }
   }
+  // Each item carries the gross the member is charged (amount), the income
+  // (net) and the tax, where the product taxes fees.
+  const tax = require('./tax');
   const items = [];
+  const push = (base) => {
+    const tx = tax.split(l, 'FEE', base.net, { taxable: base.taxable });
+    items.push({ ...base, amount: tx.gross, net: tx.income, tax: tx.tax });
+  };
   for (const fee of fees) {
     if (!chosen(fee, selected)) continue;
     const amt = feeAmount(fee, { principal: amount, count: Number(l.term_months) });
     if (!(amt > 0)) continue;
-    items.push({ productFeeId: fee.id, code: fee.code, name: fee.name, feeType: fee.fee_type, amount: amt, ...glFor(l, fee) });
+    push({ productFeeId: fee.id, code: fee.code, name: fee.name, feeType: fee.fee_type, net: amt, taxable: fee.taxable !== false, ...glFor(l, fee) });
   }
   if (Number(l.processing_fee) > 0) {
-    items.push({ productFeeId: null, code: 'PROCESSING', name: 'Processing fee', feeType: 'DISBURSEMENT_UPFRONT',
-      amount: round2(l.processing_fee), ...glFor(l, null) });
+    push({ productFeeId: null, code: 'PROCESSING', name: 'Processing fee', feeType: 'DISBURSEMENT_UPFRONT',
+      net: round2(l.processing_fee), taxable: true, ...glFor(l, null) });
   }
   const sum = (type) => round2(items.filter((x) => x.feeType === type).reduce((s, x) => s + x.amount, 0));
   return { items, deducted: sum('DISBURSEMENT_DEDUCTED'), capitalized: sum('DISBURSEMENT_CAPITALIZED'), upfront: sum('DISBURSEMENT_UPFRONT') };
@@ -137,19 +144,23 @@ async function disbursementFees(c, l, { amount, selected = [] }) {
  * Dr Fee Receivable, Cr Fee Income.
  */
 async function recordFee(c, l, { productFeeId = null, name, feeType, amount, valueDate, createdBy, settled = false,
-  installmentId = null, glIncome, glReceivable, note = null }) {
-  const amt = round2(amount);
-  if (!(amt > 0)) return null;
+  installmentId = null, glIncome, glReceivable, note = null, taxable = true }) {
+  const net = round2(amount);
+  if (!(net > 0)) return null;
   const date = valueDate ? ymd(valueDate) : today();
   const gl = { glIncome: glIncome || l.gl_fee_inc || l.gl_interest_inc, glReceivable: glReceivable || l.gl_fee_rec };
+  // Tax on fees, where the product charges it: the member owes the gross.
+  const tax = require('./tax');
+  const tx = tax.split(l, 'FEE', net, { taxable });
+  const amt = tx.gross;
 
   let entryId = null;
   if (!settled) {
-    await c.query('UPDATE loan_accounts SET fees_due = fees_due + $1, updated_at = now() WHERE id = $2', [amt, l.id]);
+    await c.query('UPDATE loan_accounts SET fees_due = fees_due + $1, tax_charged = tax_charged + $3, updated_at = now() WHERE id = $2', [amt, l.id, tx.tax]);
     if (L().isAccrual(l)) {
       entryId = await L().post(c, l, {
         debits: [{ glCode: gl.glReceivable, amount: amt, memberId: l.member_id }],
-        credits: [{ glCode: gl.glIncome, amount: amt, memberId: l.member_id }],
+        credits: tax.incomeCredits(l, tx, gl.glIncome, l.member_id),
         narration: `${name} ${l.account_no}`,
         sourceType: 'LOAN_FEE', sourceId: l.id, bookingDate: date, createdBy,
       });
@@ -157,6 +168,8 @@ async function recordFee(c, l, { productFeeId = null, name, feeType, amount, val
     if (['IN_ARREARS', 'LOCKED'].includes(l.status)) {
       await c.query('UPDATE loan_accounts SET charges_since_arrears = charges_since_arrears + $1 WHERE id = $2', [amt, l.id]);
     }
+  } else if (tx.tax > 0) {
+    await c.query('UPDATE loan_accounts SET tax_charged = tax_charged + $2 WHERE id = $1', [l.id, tx.tax]);
   }
   const { rows: [row] } = await c.query(
     `INSERT INTO loan_fees (loan_id, product_fee_id, installment_id, name, fee_type, amount, paid, applied_on, entry_id, status, note, created_by)
@@ -167,7 +180,7 @@ async function recordFee(c, l, { productFeeId = null, name, feeType, amount, val
   await savings.record(c, {
     reference: savings.ref('LF'), kind: 'LOAN_FEE', memberId: l.member_id, loanAccountId: l.id,
     amount: amt, valueDate: date, entryId,
-    allocation: { fee: name, feeType, feeId: row.id, settled: settled ? 'AT_DISBURSEMENT' : null },
+    allocation: { fee: name, feeType, feeId: row.id, settled: settled ? 'AT_DISBURSEMENT' : null, ...(tx.tax > 0 ? { tax: tx.tax, net } : {}) },
     narration: note, createdBy,
   });
   return row;
@@ -246,7 +259,7 @@ async function applyLateFees(c, l, asOf) {
       if (!(allowed > 0)) continue;
       await recordFee(c, l, {
         productFeeId: fee.id, name: fee.name, feeType: 'LATE_REPAYMENT', amount: allowed, valueDate: asOf,
-        installmentId: inst.id, ...glFor(l, fee), createdBy: 'SYSTEM',
+        installmentId: inst.id, ...glFor(l, fee), createdBy: 'SYSTEM', taxable: fee.taxable !== false,
       });
       await c.query('UPDATE loan_installments SET fee_due = fee_due + $1 WHERE id = $2', [allowed, inst.id]);
       applied += 1;
@@ -265,7 +278,7 @@ async function applyManualFee(c, loanId, { fee: feeRef, amount = null, note, val
   if (!fee) throw err(`UNKNOWN_MANUAL_FEE: ${feeRef}`, 404);
   const amt = feeAmount(fee, { principal: Number(l.principal), entered: amount });
   const row = await recordFee(c, l, {
-    productFeeId: fee.id, name: fee.name, feeType: 'MANUAL', amount: amt, valueDate, note, createdBy, ...glFor(l, fee),
+    productFeeId: fee.id, name: fee.name, feeType: 'MANUAL', amount: amt, valueDate, note, createdBy, ...glFor(l, fee), taxable: fee.taxable !== false,
   });
   return row;
 }
@@ -291,9 +304,12 @@ async function waive(c, feeId, { reason = '', createdBy } = {}) {
   let entryId = null;
   if (f.entry_id && L().isAccrual(l)) {
     // The original entry may have been partly paid down; reverse only what
-    // is still open, as its own entry, so both sides stay traceable.
+    // is still open, as its own entry, so both sides stay traceable. The
+    // tax share, if any, comes back out of the payable.
+    const tax = require('./tax');
+    const sp = tax.splitPaid(l, 'FEE', remaining);
     entryId = await L().post(c, l, {
-      debits: [{ glCode: l.gl_fee_inc || l.gl_interest_inc, amount: remaining, memberId: l.member_id }],
+      debits: tax.incomeCredits(l, sp, l.gl_fee_inc || l.gl_interest_inc, l.member_id),
       credits: [{ glCode: l.gl_fee_rec, amount: remaining, memberId: l.member_id }],
       narration: `Fee waived ${l.account_no}: ${reason}`,
       sourceType: 'LOAN_FEE_WAIVED', sourceId: l.id, createdBy,

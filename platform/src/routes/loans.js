@@ -10,6 +10,10 @@ const P = require('../domain/penalties');
 const F = require('../domain/fees');
 const W = require('../domain/workflow');
 const R = require('../domain/restructure');
+const TR = require('../domain/tranches');
+const SEC = require('../domain/securities');
+const FU = require('../domain/funding');
+const RV = require('../domain/revolving');
 
 const router = express.Router();
 
@@ -156,7 +160,7 @@ const STATE_ROUTES = {
   'request-approval': 'REQUEST_APPROVAL', submit: 'REQUEST_APPROVAL', 'set-incomplete': 'SET_INCOMPLETE',
   approve: 'APPROVE', 'undo-approve': 'UNDO_APPROVE',
   reject: 'REJECT', 'undo-reject': 'UNDO_REJECT', withdraw: 'WITHDRAW', 'undo-withdraw': 'UNDO_WITHDRAW',
-  lock: 'LOCK', unlock: 'UNLOCK',
+  lock: 'LOCK', unlock: 'UNLOCK', close: 'CLOSE',
 };
 const TELLER_ACTIONS = ['REQUEST_APPROVAL', 'SET_INCOMPLETE', 'WITHDRAW'];
 for (const [path, action] of Object.entries(STATE_ROUTES)) {
@@ -170,6 +174,32 @@ router.get('/:id/history', ...read((c, req) => W.historyOf(c, req.params.id)));
 // Amendments: the terms while the application is open, the narrative
 // afterwards. The domain layer decides which is which.
 router.patch('/:id', ...tx((c, req, _res, { actor }) => W.amend(c, req.params.id, req.body, { actor }), TELLER));
+
+// --- tranches, securities, funding, credit balance -------------------------
+
+router.get('/:id/tranches', ...read((c, req) => TR.forLoan(c, req.params.id)));
+router.put('/:id/tranches', ...tx((c, req, _res, { actor }) => TR.setTranches(c, req.params.id, req.body?.tranches || req.body, { createdBy: actor }), TELLER));
+
+router.get('/:id/collateral', ...read((c, req) => SEC.forLoan(c, req.params.id)));
+router.post('/:id/collateral', ...tx(async (c, req, res, { actor }) => {
+  res.status(201).json(await SEC.addCollateral(c, req.params.id, { ...req.body, createdBy: actor }));
+}, TELLER));
+router.post('/collateral/:collateralId/release', ...tx((c, req, _res, { actor }) =>
+  SEC.releaseCollateral(c, req.params.collateralId, { ...req.body, createdBy: actor }), APPROVER));
+
+router.get('/:id/funding', ...read(async (c, req) => {
+  const { rows: [l] } = await c.query('SELECT id FROM loan_accounts WHERE id::text = $1 OR account_no = $1', [req.params.id]);
+  return l ? FU.fundingOf(c, l.id) : null;
+}));
+router.post('/:id/funding', ...tx(async (c, req, res, { actor }) => {
+  res.status(201).json(await FU.addFundingSource(c, req.params.id, { ...req.body, createdBy: actor }));
+}, TELLER));
+router.delete('/funding/:fundingId', ...tx((c, req, _res, { actor }) => FU.removeFundingSource(c, req.params.fundingId, { createdBy: actor }), TELLER));
+
+router.post('/:id/credit-balance-deposits', ...tx(async (c, req, res, { actor }) => {
+  res.status(201).json(await RV.depositToCreditBalance(c, req.params.id, { ...req.body, createdBy: actor }));
+}, TELLER));
+router.post('/revolving/bill', ...tx((c, req) => RV.billAll(c, req.body), APPROVER));
 
 // --- fees -----------------------------------------------------------------
 

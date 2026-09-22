@@ -27,7 +27,10 @@ const READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR', 'TELLER'];
 const ADMIN = ['TENANT_ADMIN', 'MANAGER'];
 
 const ENUMS = {
-  product_type: ['FIXED_TERM', 'DYNAMIC_TERM', 'INTEREST_FREE'],
+  product_type: ['FIXED_TERM', 'DYNAMIC_TERM', 'INTEREST_FREE', 'TRANCHED', 'REVOLVING'],
+  revolving_repayment_method: ['PRINCIPAL_FLAT', 'PRINCIPAL_PERCENT', 'TOTAL_DUE_PERCENT'],
+  tax_method: ['EXCLUSIVE', 'INCLUSIVE'],
+  funder_allocation: ['PERCENT_OF_FUNDING', 'FIXED_COMMISSIONS'],
   category: ['PERSONAL', 'PURCHASE_FINANCING', 'MORTGAGE', 'SME', 'COMMERCIAL', 'UNCATEGORIZED'],
   method: ['FLAT', 'REDUCING', 'REDUCING_EQUAL_INSTALLMENTS'],
   interest_type: ['SIMPLE', 'CAPITALIZED', 'COMPOUND'],
@@ -82,6 +85,17 @@ const FIELDS = {
   glPenaltyInc: 'gl_penalty_inc', glInterestRec: 'gl_interest_rec', glFeeRec: 'gl_fee_rec',
   glPenaltyRec: 'gl_penalty_rec', glWriteoffExp: 'gl_writeoff_exp',
   isActive: 'is_active',
+  maxTranches: 'max_tranches',
+  revolvingRepaymentMethod: 'revolving_repayment_method', revolvingRepaymentValue: 'revolving_repayment_value',
+  revolvingRepaymentFloor: 'revolving_repayment_floor', revolvingRepaymentCeiling: 'revolving_repayment_ceiling',
+  creditBalanceEnabled: 'credit_balance_enabled', maxCreditBalance: 'max_credit_balance', glCreditBalance: 'gl_credit_balance',
+  enableGuarantors: 'enable_guarantors', enableCollateral: 'enable_collateral',
+  taxRatePercent: 'tax_rate_percent', taxMethod: 'tax_method', taxOnInterest: 'tax_on_interest', taxOnFees: 'tax_on_fees',
+  taxOnPenalties: 'tax_on_penalties', glTaxPayable: 'gl_tax_payable',
+  fundingEnabled: 'funding_enabled', funderAllocation: 'funder_allocation', orgCommission: 'org_commission',
+  orgCommissionMin: 'org_commission_min', orgCommissionMax: 'org_commission_max',
+  funderRateDefault: 'funder_rate_default', funderRateMin: 'funder_rate_min', funderRateMax: 'funder_rate_max',
+  lockFundsAtApproval: 'lock_funds_at_approval',
 };
 // The old name for the penalty tolerance still works on the wire.
 FIELDS.penaltyGraceDays = 'penalty_tolerance_days';
@@ -89,14 +103,15 @@ FIELDS.penaltyGraceDays = 'penalty_tolerance_days';
 // Settings that change how a loan's interest is worked out. Frozen once a
 // loan exists under the product.
 const FROZEN_WITH_LOANS = ['product_type', 'method', 'interest_type', 'simple_base', 'interest_posting',
-  'rate_frequency', 'day_count', 'repayment_interval_unit', 'repayment_interval_count', 'fixed_days_of_month'];
+  'rate_frequency', 'day_count', 'repayment_interval_unit', 'repayment_interval_count', 'fixed_days_of_month',
+  'tax_method', 'funding_enabled', 'funder_allocation'];
 
 // Which GL type each mapping must point at. A portfolio account that is an
 // income account would balance every entry and be wrong on every report.
 const GL_TYPES = {
   gl_portfolio: ['ASSET'], gl_interest_rec: ['ASSET'], gl_fee_rec: ['ASSET'], gl_penalty_rec: ['ASSET'],
   gl_interest_inc: ['INCOME'], gl_fee_inc: ['INCOME'], gl_penalty_inc: ['INCOME'],
-  gl_writeoff_exp: ['EXPENSE'],
+  gl_writeoff_exp: ['EXPENSE'], gl_credit_balance: ['LIABILITY'], gl_tax_payable: ['LIABILITY'],
 };
 
 const num = (v) => (v === null || v === undefined ? null : Number(v));
@@ -134,6 +149,18 @@ const publicProduct = (p) => ({
     penaltyIncome: p.gl_penalty_inc, interestReceivable: p.gl_interest_rec,
     feeReceivable: p.gl_fee_rec, penaltyReceivable: p.gl_penalty_rec, writeOffExpense: p.gl_writeoff_exp,
   },
+  maxTranches: p.max_tranches,
+  revolving: p.product_type === 'REVOLVING' ? {
+    repaymentMethod: p.revolving_repayment_method, repaymentValue: num(p.revolving_repayment_value),
+    repaymentFloor: num(p.revolving_repayment_floor), repaymentCeiling: num(p.revolving_repayment_ceiling),
+    creditBalanceEnabled: p.credit_balance_enabled, maxCreditBalance: num(p.max_credit_balance), glCreditBalance: p.gl_credit_balance,
+  } : null,
+  securities: { guarantors: p.enable_guarantors, collateral: p.enable_collateral, requiredCoverPercent: p.require_guarantor_cover ? Number(p.min_cover_percent) : null },
+  tax: { ratePercent: num(p.tax_rate_percent), method: p.tax_method, onInterest: p.tax_on_interest, onFees: p.tax_on_fees, onPenalties: p.tax_on_penalties, glTaxPayable: p.gl_tax_payable },
+  funding: p.funding_enabled ? {
+    allocation: p.funder_allocation, orgCommission: num(p.org_commission), orgCommissionMin: num(p.org_commission_min), orgCommissionMax: num(p.org_commission_max),
+    funderRateDefault: num(p.funder_rate_default), funderRateMin: num(p.funder_rate_min), funderRateMax: num(p.funder_rate_max), lockFundsAtApproval: p.lock_funds_at_approval,
+  } : null,
   isActive: p.is_active, updatedAt: p.updated_at,
   ...(p.fees ? { fees: p.fees.map(publicFee) } : {}),
 });
@@ -141,7 +168,7 @@ const publicProduct = (p) => ({
 const publicFee = (f) => ({
   id: f.id, code: f.code, name: f.name, feeType: f.fee_type, calculation: f.calculation,
   amount: num(f.amount), percent: num(f.percent), minAmount: num(f.min_amount), maxAmount: num(f.max_amount),
-  required: f.required, glIncome: f.gl_income, glReceivable: f.gl_receivable, isActive: f.is_active,
+  required: f.required, glIncome: f.gl_income, glReceivable: f.gl_receivable, isActive: f.is_active, taxable: f.taxable,
 });
 
 const isBool = (v) => typeof v === 'boolean';
@@ -149,10 +176,13 @@ const isInt = (v) => Number.isInteger(Number(v));
 
 async function validate(c, cols, { creating, before = null, loans = 0 }) {
   const problems = [];
+  // Null clears a setting that may be unset (the revolving method on a
+  // product that is not revolving); the rest must be one of the list.
+  const NULLABLE_ENUMS = ['revolving_repayment_method'];
   for (const [col, allowed] of Object.entries(ENUMS)) {
-    if (cols[col] !== undefined && !allowed.includes(cols[col])) {
-      problems.push(`${col} must be one of ${allowed.join(', ')}`);
-    }
+    if (cols[col] === undefined) continue;
+    if (cols[col] === null && NULLABLE_ENUMS.includes(col)) continue;
+    if (!allowed.includes(cols[col])) problems.push(`${col} must be one of ${allowed.join(', ')}`);
   }
   const merged = { ...(before || {}), ...cols };
   const type = merged.product_type || 'FIXED_TERM';
@@ -165,8 +195,24 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
     const changed = FROZEN_WITH_LOANS.filter((k) => k !== 'product_type' && cols[k] !== undefined && JSON.stringify(cols[k]) !== JSON.stringify(before[k]));
     if (changed.length) problems.push(`${changed.join(', ')} cannot change while ${loans} loan(s) exist under the product; create a new product`);
   }
-  if (type === 'DYNAMIC_TERM' && method === 'FLAT') {
-    problems.push('a DYNAMIC_TERM product cannot use the FLAT method; use REDUCING or REDUCING_EQUAL_INSTALLMENTS');
+  if (['DYNAMIC_TERM', 'TRANCHED', 'REVOLVING'].includes(type) && method === 'FLAT') {
+    problems.push(`a ${type} product cannot use the FLAT method; use REDUCING or REDUCING_EQUAL_INSTALLMENTS`);
+  }
+  if (type === 'TRANCHED' && (!merged.max_tranches || Number(merged.max_tranches) < 2)) problems.push('a TRANCHED product needs max_tranches of 2 or more');
+  if (type === 'REVOLVING') {
+    if (method !== 'REDUCING') problems.push('a REVOLVING product uses the REDUCING method');
+    if (!merged.revolving_repayment_method || merged.revolving_repayment_value === null || merged.revolving_repayment_value === undefined) {
+      problems.push('a REVOLVING product needs revolving_repayment_method and revolving_repayment_value');
+    }
+    if (merged.credit_balance_enabled && !merged.gl_credit_balance && merged.accounting_method !== 'NONE') problems.push('credit_balance_enabled needs gl_credit_balance');
+  }
+  const taxed = merged.tax_on_interest || merged.tax_on_fees || merged.tax_on_penalties;
+  if (taxed && (merged.tax_rate_percent === null || merged.tax_rate_percent === undefined)) problems.push('taxing interest, fees or penalties needs tax_rate_percent');
+  if (taxed && !merged.gl_tax_payable && merged.accounting_method !== 'NONE') problems.push('a taxed product linked to accounting needs gl_tax_payable');
+  if (merged.funding_enabled) {
+    if (!['FIXED_TERM', 'DYNAMIC_TERM'].includes(type)) problems.push('funding sources are available on FIXED_TERM and DYNAMIC_TERM products');
+    if (merged.accounting_method === 'CASH') problems.push('a funded product uses ACCRUAL or NONE accounting');
+    if (merged.org_commission === null || merged.org_commission === undefined) problems.push('a funded product needs org_commission');
   }
   if (type === 'INTEREST_FREE' && Number(merged.monthly_rate || 0) > 0) problems.push('an INTEREST_FREE product has no rate');
   if (merged.interest_type === 'CAPITALIZED' && type !== 'DYNAMIC_TERM') problems.push('CAPITALIZED interest needs a DYNAMIC_TERM product');
@@ -176,12 +222,16 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
   }
   if (merged.interest_posting === 'ON_DISBURSEMENT' && type === 'DYNAMIC_TERM') problems.push('ON_DISBURSEMENT posting needs a FIXED_TERM product');
 
-  for (const col of ['accrue_late_interest', 'enforce_deposit_multiplier', 'require_guarantor_cover', 'is_active', 'allow_arbitrary_fees']) {
+  for (const col of ['accrue_late_interest', 'enforce_deposit_multiplier', 'require_guarantor_cover', 'is_active', 'allow_arbitrary_fees',
+    'credit_balance_enabled', 'enable_guarantors', 'enable_collateral', 'tax_on_interest', 'tax_on_fees', 'tax_on_penalties',
+    'funding_enabled', 'lock_funds_at_approval']) {
     if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
   }
   const nonNeg = ['monthly_rate', 'rate_min', 'rate_max', 'processing_fee', 'penalty_rate', 'penalty_rate_min', 'penalty_rate_max',
     'penalty_tolerance_days', 'arrears_tolerance_days', 'arrears_tolerance_percent', 'arrears_tolerance_floor',
-    'min_principal', 'max_principal', 'default_principal', 'charge_cap_percent', 'first_due_offset_days', 'grace_periods'];
+    'min_principal', 'max_principal', 'default_principal', 'charge_cap_percent', 'first_due_offset_days', 'grace_periods',
+    'revolving_repayment_value', 'revolving_repayment_floor', 'revolving_repayment_ceiling', 'max_credit_balance', 'tax_rate_percent',
+    'org_commission', 'org_commission_min', 'org_commission_max', 'funder_rate_default', 'funder_rate_min', 'funder_rate_max'];
   for (const col of nonNeg) {
     if (cols[col] !== undefined && cols[col] !== null && !(Number(cols[col]) >= 0)) problems.push(`${col} must be zero or more`);
   }
@@ -337,7 +387,7 @@ router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
 const FEE_FIELDS = {
   code: 'code', name: 'name', feeType: 'fee_type', calculation: 'calculation', amount: 'amount', percent: 'percent',
   minAmount: 'min_amount', maxAmount: 'max_amount', required: 'required', glIncome: 'gl_income',
-  glReceivable: 'gl_receivable', isActive: 'is_active',
+  glReceivable: 'gl_receivable', isActive: 'is_active', taxable: 'taxable',
 };
 const FEE_ENUMS = {
   fee_type: ['MANUAL', 'DISBURSEMENT_DEDUCTED', 'DISBURSEMENT_CAPITALIZED', 'DISBURSEMENT_UPFRONT', 'PAYMENT_DUE', 'LATE_REPAYMENT'],
@@ -369,7 +419,7 @@ async function validateFee(c, cols, before) {
   }
   if (m.min_amount !== null && m.max_amount !== null && m.min_amount !== undefined && m.max_amount !== undefined
     && Number(m.min_amount) > Number(m.max_amount)) problems.push('min_amount exceeds max_amount');
-  for (const col of ['required', 'is_active']) {
+  for (const col of ['required', 'is_active', 'taxable']) {
     if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
   }
   for (const [col, types] of [['gl_income', ['INCOME']], ['gl_receivable', ['ASSET']]]) {
