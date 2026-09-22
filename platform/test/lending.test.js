@@ -156,9 +156,12 @@ async function assertBalanced(label) {
     check('principal reduced to 110000', bal.principal === 110000, String(bal.principal));
 
     section('interest accrual then allocation');
-    await T((c) => L.accrueInterest(c, loan.id, { createdBy: 'test' }));
+    // Interest accrues per day now. Thirty days at 1% a month under 30E/360
+    // is exactly one month's interest, which is what the schedule promises.
+    const plus30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+    await T((c) => L.accrueInterest(c, loan.id, { valueDate: plus30, createdBy: 'test' }));
     bal = await T(async (c) => L.balances(await L.lock(c, loan.id)));
-    check('interest accrued at 1% of principal', bal.interest === 1200, String(bal.interest));
+    check('interest accrued at 1% of principal for thirty days', bal.interest === 1200, String(bal.interest));
     await assertBalanced('accrual');
 
     const rep2 = await T((c) => L.repay(c, loan.id, { amount: 5000, createdBy: 'test' }));

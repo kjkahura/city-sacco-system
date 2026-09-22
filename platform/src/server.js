@@ -121,6 +121,7 @@ tenantApi.use('/members', members);
 const savings = require('./routes/savings');
 tenantApi.use('/savings', savings);
 tenantApi.use('/loans', require('./routes/loans'));
+tenantApi.use('/loan-products', require('./routes/loanProducts'));
 tenantApi.use('/accounting', savings.accounting);
 
 const shares = require('./routes/shares');
