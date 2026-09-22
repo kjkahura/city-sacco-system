@@ -94,6 +94,11 @@ src/
     workflow.js        states and undo, approval and disbursement limits,
                        amendments by state, arrears, cap on charges, controls
     restructure.js     reschedule and refinance
+    tranches.js        tranched disbursement
+    revolving.js       revolving credit: drawdowns, billing, credit balance
+    securities.js      collateral assets alongside guarantors
+    tax.js             value-added tax on interest, fees and penalties
+    funding.js         funding sources (peer-to-peer lending)
     penalties.js       late payment charges on Mambu's four bases, waiver
     provisioning.js    loan loss provisioning by PAR band
     reports.js         balance sheet, income statement, prudential, PAR
@@ -129,6 +134,7 @@ test/portal.test.js        49 assertions
 test/loan-accounting.test.js 55 assertions
 test/product-types.test.js 48 assertions
 test/loan-config.test.js   135 assertions
+test/loan-extensions.test.js 74 assertions
 test/console.test.js       25 assertions, real browser, npm run test:browser
 test/portal-ui.test.js     20 assertions, real browser, npm run test:browser
 ```
@@ -322,7 +328,12 @@ unchanged until somebody edits it.
 |---|---|---|
 | Numbering | `id_pattern`, `id_mode` | `#` digit, `@` letter, `$` either, other characters literal. INCREMENTAL fills the `#` run from a counter shared by every product using the same prefix, so `LN######` continues the existing LN series; RANDOM draws each placeholder. |
 | Initial state | `initial_state` | PENDING_APPROVAL, or PARTIAL_APPLICATION for a product whose applications need documents before they can be judged. |
-| Type and method | `product_type`, `method` | FIXED_TERM, DYNAMIC_TERM, INTEREST_FREE; FLAT, REDUCING, REDUCING_EQUAL_INSTALLMENTS. See below. |
+| Type and method | `product_type`, `method` | FIXED_TERM, DYNAMIC_TERM, INTEREST_FREE, TRANCHED, REVOLVING; FLAT, REDUCING, REDUCING_EQUAL_INSTALLMENTS. See below. |
+| Tranches | `max_tranches` | TRANCHED: the most parts a loan may be paid out in. |
+| Revolving | `revolving_repayment_method/value/floor/ceiling`, `credit_balance_enabled`, `max_credit_balance`, `gl_credit_balance` | REVOLVING: how each billed installment's principal is set (flat, % of outstanding, % of total due) and whether overpayments are held on the loan. |
+| Securities | `enable_guarantors`, `enable_collateral` | Which securities the product takes; both count towards the required cover. |
+| Tax | `tax_rate_percent`, `tax_method`, `tax_on_interest/fees/penalties`, `gl_tax_payable` | EXCLUSIVE adds the tax on top for the member to pay; INCLUSIVE splits the quoted figure. Booked to Taxes Payable. A fee may be marked non-taxable. |
+| Funding | `funding_enabled`, `funder_allocation`, `org_commission` (+ band), `funder_rate_default` (+ band), `lock_funds_at_approval` | FIXED_TERM and DYNAMIC_TERM products, ACCRUAL or NONE accounting. |
 | Interest type | `interest_type`, `simple_base` | SIMPLE (linear), CAPITALIZED (applied interest joins the principal, Dr Portfolio Cr Income, and is repaid as principal), COMPOUND (daily exponential; the annuity uses the periodic compound rate). SIMPLE on a dynamic equal-installment product may run on principal and unpaid interest. Figures reproduce Mambu's worked examples to the cent. |
 | Posting | `interest_posting` | ON_REPAYMENT, or ON_DISBURSEMENT for a fixed-term product that applies the whole term's interest on day one. |
 | Rate | `monthly_rate`, `rate_frequency`, `rate_min`, `rate_max` | The rate is quoted PER_MONTH, PER_YEAR, PER_WEEK or PER_DAY; a loan may take a rate inside the band. |
@@ -409,12 +420,82 @@ principal or WRITTEN_OFF. The principal moves portfolio to portfolio in one
 entry, no cash; guarantors' pledges move with it. Both accounts carry the
 step in their history.
 
+### Tranched loans
+
+A TRANCHED product's loan is approved for one amount and paid out in parts
+(`loan_tranches`: amount and expected date, set at application or with
+`PUT /api/loans/:id/tranches`; they must add up to the principal and stay
+within `max_tranches`, and approval refuses a loan whose tranches do not).
+Each `POST /disbursements` pays the next planned tranche (the amount may be
+lowered; upfront fees are charged with the first). The loan is ACTIVE from
+the first tranche, interest runs on what has been disbursed, and each later
+tranche redraws the future installments over the new balance.
+
+### Revolving credit
+
+A REVOLVING product's loan is a limit (`principal`) the member draws on and
+repays for `term_months`. Drawdowns are `POST /disbursements` while ACTIVE,
+up to limit − outstanding + credit balance. There is no schedule up front:
+the `billRevolving` job generates an installment on each billing date (the
+product's interval or fixed days of month) from the balance: principal by
+`revolving_repayment_method` with its floor and ceiling, interest accrued
+to the date, fees due. Arrears, penalties and late fees then work as on any
+loan. A revolving loan does not close itself at zero; `POST /close` does,
+and is refused while a credit balance stands.
+
+The credit balance (`credit_balance_enabled`) is the member's own money on
+the loan: an overpayment lands there (up to `max_credit_balance`) instead of
+in savings, `POST /credit-balance-deposits` tops it up, and the next
+drawdown uses it first, owing nothing for that part. It is a liability
+(`gl_credit_balance`). Restructuring and closing are blocked while it is
+above zero, as in Mambu.
+
+### Securities
+
+Guarantors (members pledging deposits) and collateral assets
+(`loan_collateral`: type, description, value, reference; `POST
+/api/loans/:id/collateral`, `POST /api/loans/collateral/:id/release`) both
+count towards `min_cover_percent` when `require_guarantor_cover` is on, and
+`GET /eligibility` shows them. An asset cannot be released from a running
+loan if that would leave it under cover; a write-off marks collateral
+SEIZED, a payoff releases it. A product may take either, both or neither.
+
+### Value-added tax
+
+When a product taxes interest, fees or penalties, applying the charge books
+Dr Receivable (gross), Cr Income (net), Cr Taxes Payable (tax) under
+accrual; under cash the member's payment is split the same way. EXCLUSIVE:
+the member pays the tax on top (1,000 of interest is owed as 1,160 at 16%).
+INCLUSIVE: the quoted 1,000 is owed and 862.07 is income, 137.93 tax. The
+loan's `tax_charged` says how much of what it is owed is tax.
+
+### Funding sources
+
+After Mambu's P2P lending (which Mambu withdrew from sale in 2022; the
+mechanics are documented and reproduced here). A savings product flagged
+`is_funding_account` makes funding accounts. A loan under a
+`funding_enabled` product takes funders (`POST /api/loans/:id/funding`:
+account, amount, rate under FIXED_COMMISSIONS) and cannot be approved until
+funded to 100% with the money in place; at approval the funders' money is
+locked (it counts as pledged) and, under FIXED_COMMISSIONS, the loan's rate
+is set: commission + Σ(funder rate × share).
+
+The principal is not the SACCO's asset: disbursement moves it from the
+funders' accounts to the channel (no portfolio entry), each repayment
+returns principal to them by share and their part of the interest, and
+`LOAN_FUNDED` / `LOAN_REPAID_TO_FUNDER` transactions sit on their accounts.
+The organisation's commission is its income and is accrued as such; fees
+and penalties are its too. Reversing a repayment takes the money back.
+Reproduces Mambu's worked examples (2.50 to the organisation, 30 + 1.75 and
+70 + 4.08 to the funders on a 108.33 installment; 9.7% on the fixed-
+commissions example). Funded loans are not rescheduled or refinanced here.
+
 ### The daily sequence, for loans
 
-`accrueInterest`, `markArrears`, `accruePenalties`, `applyFees` (a dynamic
-loan's payment-due fees on their dates, late fees on installments that
-went overdue), `enforceControls` (lock at the cap or after the product's
-days in arrears). Each is idempotent per business date.
+`billRevolving`, `accrueInterest`, `markArrears`, `accruePenalties`,
+`applyFees` (a dynamic loan's payment-due fees on their dates, late fees on
+installments that went overdue), `enforceControls` (lock at the cap or
+after the product's days in arrears). Each is idempotent per business date.
 
 ### Product type decides what interest is
 
@@ -624,14 +705,16 @@ it off and use a CronJob calling the CLI instead.
 1. `ensureFinancialYear`: opens the calendar year covering the business date
    if no financial year does. On 1 January the new year opens itself; a SACCO
    on a July to June year opens its years by hand and this leaves them alone.
-2. `accrueInterest`
-3. `markArrears`
-4. `accruePenalties`, which reads the arrears state the previous job produced
-5. `applyFees`: a dynamic loan's payment-due fees on their dates, late fees on
+2. `billRevolving`: generates the installment on every revolving loan whose
+   billing date has come
+3. `accrueInterest`
+4. `markArrears`
+5. `accruePenalties`, which reads the arrears state the previous job produced
+6. `applyFees`: a dynamic loan's payment-due fees on their dates, late fees on
    installments that went overdue
-6. `enforceControls`: lock loans at the product's charge cap or after its
+7. `enforceControls`: lock loans at the product's charge cap or after its
    days in arrears
-7. `provision`, which reads the same arrears and posts only the movement
+8. `provision`, which reads the same arrears and posts only the movement
    since the last run. While the bands have no rates it records a skip, not a
    failure, so a tenant that has not configured provisioning does not fill
    the job log with red.
@@ -994,11 +1077,11 @@ official forms are not.
    with explicit dates.
 5. **Early settlement of a fixed-term loan charges accrued interest only.**
    Recovering the rest of the schedule on settlement is not a setting yet.
-6. **Not modelled from Mambu's product form:** tranched loans, revolving
-   credit, fee amortisation profiles (deferred fee income), VAT on
-   interest and fees, index-linked rates, funding sources, and payment
-   holidays. Auto-close of paid-off loans is moot: a paid-off loan closes
-   at once.
+6. **Not modelled from Mambu's product form:** fee amortisation profiles
+   (deferred fee income), index-linked rates, payment holidays, billing
+   cycles distinct from due dates on revolving loans, refunds on revolving
+   loans, and the secondary marketplace for funded loans. Auto-close of
+   paid-off loans is moot: a paid-off loan closes at once.
 
 ## Before real member data
 

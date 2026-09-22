@@ -8,12 +8,12 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/isolation.test.js && node test/lending.test.js && node test/ops.test.js && node test/security.test.js && node test/finance.test.js && node test/provisioning.test.js && node test/close.test.js && node test/reporting.test.js && node test/portal.test.js && node test/loan-accounting.test.js && node test/product-types.test.js && node test/loan-config.test.js",
+    "test": "node test/isolation.test.js && node test/lending.test.js && node test/ops.test.js && node test/security.test.js && node test/finance.test.js && node test/provisioning.test.js && node test/close.test.js && node test/reporting.test.js && node test/portal.test.js && node test/loan-accounting.test.js && node test/product-types.test.js && node test/loan-config.test.js && node test/loan-extensions.test.js",
     "migrate": "node bin/cli.js migrate:platform && node bin/cli.js migrate:all",
     "cli": "node bin/cli.js",
     "test:isolation": "node test/isolation.test.js",
     "test:lending": "node test/lending.test.js",
-    "test:product-types": "node test/product-types.test.js && node test/loan-config.test.js",
+    "test:product-types": "node test/product-types.test.js && node test/loan-config.test.js && node test/loan-extensions.test.js",
     "test:ops": "node test/ops.test.js",
     "eod": "node bin/cli.js eod:run",
     "backup": "node bin/cli.js backup:run",
@@ -27,7 +27,7 @@
     "test:portal": "node test/portal.test.js",
     "test:portal-ui": "node test/portal-ui.test.js",
     "test:browser": "node test/console.test.js && node test/portal-ui.test.js",
-    "test:loan-accounting": "node test/loan-accounting.test.js && node test/product-types.test.js && node test/loan-config.test.js"
+    "test:loan-accounting": "node test/loan-accounting.test.js && node test/product-types.test.js && node test/loan-config.test.js && node test/loan-extensions.test.js"
   },
   "keywords": [],
   "author": "",

@@ -95,6 +95,14 @@ const JOBS = {
     return withTenant(tenant.schema_name, (c) => W.enforceControls(c, { asOf: businessDate }));
   },
 
+  /**
+   * Revolving loans: generate the installment for every billing date that
+   * has come, interest brought up to the date first.
+   */
+  async billRevolving(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => require('../domain/revolving').billAll(c, { asOf: businessDate }));
+  },
+
   /** Flag overdue installments and move loans into arrears. */
   async markArrears(tenant, businessDate) {
     return withTenant(tenant.schema_name, async (c) => {
@@ -191,7 +199,7 @@ async function runJob(tenant, job, { businessDate = null, force = false } = {}) 
  * posts, arrears before penalties (penalties read arrears state), and
  * provisioning last because it reads the arrears the others just produced.
  */
-const DEFAULT_JOBS = ['ensureFinancialYear', 'accrueInterest', 'markArrears', 'accruePenalties', 'applyFees', 'enforceControls', 'provision'];
+const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'accrueInterest', 'markArrears', 'accruePenalties', 'applyFees', 'enforceControls', 'provision'];
 
 async function runAll({ businessDate = null, jobs = DEFAULT_JOBS, force = false } = {}) {
   const { rows: tenants } = await pool.query(

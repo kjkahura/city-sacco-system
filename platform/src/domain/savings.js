@@ -34,13 +34,18 @@ async function channel(c, id) {
 }
 
 /** Amount pledged as loan security and therefore not withdrawable. */
+/**
+ * What a member's deposits are committed to: guarantor pledges on others'
+ * loans, and funding pledged on approved loans not yet disbursed.
+ */
 async function pledgedAmount(c, memberId) {
   const { rows: [r] } = await c.query(
     `SELECT COALESCE(SUM(pledged_amount), 0) AS total
      FROM loan_guarantors WHERE member_id = $1 AND status = 'PLEDGED'`,
     [memberId]
   );
-  return round2(r.total);
+  const locked = await require('./funding').lockedFunding(c, memberId);
+  return round2(Number(r.total) + locked);
 }
 
 async function summary(c, accountId) {

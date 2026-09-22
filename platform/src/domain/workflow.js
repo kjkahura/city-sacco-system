@@ -39,6 +39,9 @@ const ACTIONS = {
   UNDO_WITHDRAW:    { from: ['CLOSED_WITHDRAWN'], to: 'PREVIOUS' },
   LOCK:             { from: RUNNING, to: 'LOCKED' },
   UNLOCK:           { from: ['LOCKED'], to: 'PREVIOUS' },
+  // A revolving loan does not close itself when its balance reaches zero,
+  // since the member may draw again; closing it is a decision.
+  CLOSE:            { from: ['ACTIVE'], to: 'CLOSED_REPAID' },
 };
 // Names the first API used; kept so nothing that learned them breaks.
 const ALIASES = { SUBMIT: 'REQUEST_APPROVAL', UNAPPROVE: 'UNDO_APPROVE' };
@@ -201,6 +204,8 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     // may record one for any amount; approving it is the credit decision.
     await L().enforceEligibility(c, l);
     await assertMayApprove(c, l, { user });
+    await require('./tranches').assertPlanned(c, l);
+    await require('./funding').assertFundedForApproval(c, l);
     set('approved_on', new Date().toISOString().slice(0, 10));
     set('approved_by', createdBy || null);
   }
@@ -229,6 +234,14 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
       }
       set('closed_on', null);
     }
+  }
+  if (name === 'CLOSE') {
+    const b = L().balances(l);
+    if (b.total > 0) throw err(`LOAN_HAS_A_BALANCE: ${b.total}`, 409);
+    if (Number(l.credit_balance) > 0) throw err(`LOAN_HAS_A_CREDIT_BALANCE: ${l.credit_balance}; it must be drawn or refunded first`, 409);
+    set('closed_on', new Date().toISOString().slice(0, 10));
+    await L().releaseGuarantors(c, l.id);
+    await require('./securities').onClose(c, l.id);
   }
   if (name === 'LOCK') {
     set('locked_at', new Date()); set('locked_reason', reason && ['MANUAL', 'CAPPED', 'ARREARS'].includes(reason) ? reason : 'MANUAL');

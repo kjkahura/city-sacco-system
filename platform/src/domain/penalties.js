@@ -80,6 +80,9 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
     if (!(amount > 0)) continue;
     amount = await W.capAllows(c, l, amount);
     if (!(amount > 0)) break;
+    // Tax on penalties, where the product charges it.
+    const tx = require('./tax').split(l, 'PENALTY', amount);
+    amount = tx.gross;
 
     // ON CONFLICT DO NOTHING rather than catching a unique violation:
     // inside a transaction, any statement error aborts the whole
@@ -105,17 +108,17 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
     if (L.isAccrual(l)) {
       entryId = await L.post(c, l, {
         debits: [{ glCode: l.gl_penalty_rec, amount, memberId: l.member_id }],
-        credits: [{ glCode: glIncome, amount, memberId: l.member_id }],
+        credits: require('./tax').incomeCredits(l, tx, glIncome, l.member_id),
         narration: `Penalty ${l.account_no} installment ${inst.number}, ${late} days late`,
         sourceType: 'LOAN_PENALTY', sourceId: l.id, bookingDate: date, createdBy,
       });
       if (entryId) await c.query('UPDATE penalty_charges SET entry_id = $1 WHERE id = $2', [entryId, inserted.id]);
     }
     await c.query(
-      `UPDATE loan_accounts SET penalty_accrued = penalty_accrued + $1,
+      `UPDATE loan_accounts SET penalty_accrued = penalty_accrued + $1, tax_charged = tax_charged + $3,
          charges_since_arrears = charges_since_arrears + CASE WHEN status = 'IN_ARREARS' THEN $1 ELSE 0 END,
          updated_at = now() WHERE id = $2`,
-      [amount, l.id]
+      [amount, l.id, tx.tax]
     );
     l.charges_since_arrears = Number(l.charges_since_arrears || 0) + amount;
 
