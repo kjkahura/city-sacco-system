@@ -4,6 +4,7 @@ const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const { apiError, notFound, badRequest, paginate, withPaginationHeaders, applyFilterCriteria } = require('../lib/http');
+const { pageQuery, sendPage } = require('../lib/page');
 
 const router = express.Router();
 
@@ -21,34 +22,43 @@ const COLUMNS = `id, member_no, first_name, last_name, national_id, kra_pin, pho
 
 router.get('/', requireAuth(), async (req, res, next) => {
   try {
-    const { status, q } = req.query;
-    const rows = await withTenantRead(req.tenant.schema_name, async (c) => {
-      const where = [];
-      const params = [];
-      if (status) { params.push(status); where.push(`status = $${params.length}`); }
-      if (q) {
-        params.push(`%${String(q).toLowerCase()}%`);
-        where.push(`(lower(first_name) LIKE $${params.length} OR lower(last_name) LIKE $${params.length}
-                     OR lower(member_no) LIKE $${params.length} OR phone LIKE $${params.length})`);
-      }
-      const sql = `SELECT ${COLUMNS} FROM members
-                   ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-                   ORDER BY last_name, first_name`;
-      return (await c.query(sql, params)).rows;
-    });
-    const p = paginate(req, rows);
-    withPaginationHeaders(res, p).json(p.page);
+    const q = req.query.q ? `%${String(req.query.q).toLowerCase()}%` : null;
+    const page = await withTenantRead(req.tenant.schema_name, (c) => pageQuery(
+      c,
+      `SELECT ${COLUMNS} FROM members
+       WHERE ($1::text IS NULL OR status = $1::text)
+         AND ($2::text IS NULL OR
+              lower(first_name) LIKE $2::text OR lower(last_name) LIKE $2::text OR
+              lower(member_no) LIKE $2::text OR phone LIKE $2::text)
+       ORDER BY last_name, first_name, id`,
+      [req.query.status || null, q],
+      req.query
+    ));
+    sendPage(res, page);
   } catch (e) { next(e); }
 });
 
 // Exported and mounted by the parent as POST /members:search — Express 5
 // cannot match a colon suffix inside a sub-router path.
+// The filter operators run in JavaScript, so this one has to materialise
+// rows before it can filter them. It is bounded rather than unbounded: a
+// scan cap keeps one client from pulling a 40,000-member register into
+// memory, and the response says plainly when the scan was cut short instead
+// of quietly returning a subset as if it were the whole answer.
+const SEARCH_SCAN_CAP = 5000;
+
 const searchMembers = [requireAuth(), async (req, res, next) => {
   try {
     const rows = await withTenantRead(req.tenant.schema_name, async (c) =>
-      (await c.query(`SELECT ${COLUMNS} FROM members`)).rows);
-    const filtered = applyFilterCriteria(rows, req.body?.filterCriteria);
+      (await c.query(
+        `SELECT ${COLUMNS} FROM members ORDER BY last_name, first_name, id LIMIT $1`,
+        [SEARCH_SCAN_CAP + 1]
+      )).rows);
+    const truncated = rows.length > SEARCH_SCAN_CAP;
+    const filtered = applyFilterCriteria(rows.slice(0, SEARCH_SCAN_CAP), req.body?.filterCriteria);
     const p = paginate(req, filtered);
+    res.set('items-scan-cap', String(SEARCH_SCAN_CAP));
+    res.set('items-truncated', String(truncated));
     withPaginationHeaders(res, p).json(p.page);
   } catch (e) { next(e); }
 }];

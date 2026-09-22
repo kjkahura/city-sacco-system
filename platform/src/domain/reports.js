@@ -1,6 +1,7 @@
 'use strict';
 
 const acct = require('./accounting');
+const { pageQuery } = require('../lib/page');
 const { round2 } = acct;
 
 /**
@@ -12,16 +13,22 @@ const { round2 } = acct;
  * expects.
  */
 
-async function byType(c, { from = null, to = null } = {}) {
+/**
+ * Net movement per account for a period, debit-positive.
+ *
+ * The period filter sits inside the aggregate (see accounting.MOVEMENT_SQL)
+ * rather than in an outer join onto journal_entries. Put it in the outer join
+ * and the line rows survive with their entry columns nulled, so every line is
+ * counted whatever the dates say, which is how a statement for one month ends
+ * up reporting the whole book.
+ */
+async function byType(c, { from = null, to = null, includeClosing = true } = {}) {
+  const movement = includeClosing ? acct.MOVEMENT_SQL : acct.MOVEMENT_SQL_TRADING;
   const { rows } = await c.query(
     `SELECT g.code, g.name, g.type, g.regulatory_class,
-            COALESCE(SUM(CASE WHEN l.direction='DEBIT' THEN l.amount ELSE -l.amount END), 0) AS net
+            COALESCE(m.debit, 0) - COALESCE(m.credit, 0) AS net
      FROM gl_accounts g
-     LEFT JOIN journal_lines l ON l.gl_code = g.code
-     LEFT JOIN journal_entries e ON e.id = l.entry_id
-       AND ($1::date IS NULL OR e.booking_date >= $1::date)
-       AND ($2::date IS NULL OR e.booking_date <= $2::date)
-     GROUP BY g.code, g.name, g.type, g.regulatory_class
+     LEFT JOIN (${movement}) m ON m.gl_code = g.code
      ORDER BY g.code`,
     [from, to]
   );
@@ -31,12 +38,39 @@ async function byType(c, { from = null, to = null } = {}) {
 const sum = (rows, pred) => round2(rows.filter(pred).reduce((s, r) => s + r.net, 0));
 
 /**
+ * Line paging for the statements.
+ *
+ * These two are the one place where slicing in JavaScript is the right
+ * answer: the row count is bounded by the chart of accounts, not by the size
+ * of the book, and both statements need every line anyway to compute totals
+ * that are true. So the totals are always over the whole set and only the
+ * presentation is cut. Anything that grows with members or postings pages in
+ * SQL instead, through lib/page.js.
+ */
+function pageLines(lines, { offset = 0, limit = null } = {}) {
+  const off = Math.max(0, Number(offset) || 0);
+  if (limit === null || limit === undefined) {
+    return { page: lines, meta: { offset: 0, limit: null, total: lines.length } };
+  }
+  const lim = Math.max(1, Number(limit));
+  return {
+    page: lines.slice(off, off + lim),
+    meta: { offset: off, limit: lim, total: lines.length },
+  };
+}
+
+/**
  * Income statement for a period.
  * Surplus is what a SACCO calls profit, and it is what feeds retained
  * earnings on the balance sheet.
  */
-async function incomeStatement(c, { from = null, to = null } = {}) {
-  const rows = await byType(c, { from, to });
+async function incomeStatement(c, {
+  from = null, to = null, offset = 0, limit = null, includeClosing = false,
+} = {}) {
+  // Trading only by default: the year-end sweep and the reserve transfer are
+  // postings, not performance, and counting them makes a closed year look
+  // like it broke exactly even.
+  const rows = await byType(c, { from, to, includeClosing });
   const income = rows.filter((r) => r.type === 'INCOME' && r.net !== 0)
     .map((r) => ({ code: r.code, name: r.name, amount: round2(-r.net) }));
   const expenses = rows.filter((r) => r.type === 'EXPENSE' && r.net !== 0)
@@ -45,10 +79,14 @@ async function incomeStatement(c, { from = null, to = null } = {}) {
   const totalIncome = round2(income.reduce((s, r) => s + r.amount, 0));
   const totalExpenses = round2(expenses.reduce((s, r) => s + r.amount, 0));
 
+  const i = pageLines(income, { offset, limit });
+  const e = pageLines(expenses, { offset, limit });
+
   return {
     period: { from, to },
-    income,
-    expenses,
+    income: i.page,
+    expenses: e.page,
+    page: { income: i.meta, expenses: e.meta },
     totalIncome,
     totalExpenses,
     surplus: round2(totalIncome - totalExpenses),
@@ -63,7 +101,7 @@ async function incomeStatement(c, { from = null, to = null } = {}) {
  * not happened yet. Without that line the sheet would not balance, and a
  * balance sheet that does not balance is worse than no balance sheet.
  */
-async function balanceSheet(c, { asAt = null } = {}) {
+async function balanceSheet(c, { asAt = null, offset = 0, limit = null } = {}) {
   const rows = await byType(c, { to: asAt });
 
   const assets = rows.filter((r) => r.type === 'ASSET' && r.net !== 0)
@@ -89,11 +127,16 @@ async function balanceSheet(c, { asAt = null } = {}) {
 
   const difference = round2(totalAssets - (totalLiabilities + totalEquity));
 
+  const a = pageLines(assets, { offset, limit });
+  const l = pageLines(liabilities, { offset, limit });
+  const q = pageLines(equity, { offset, limit });
+
   return {
     asAt: asAt || new Date().toISOString().slice(0, 10),
-    assets,
-    liabilities,
-    equity,
+    assets: a.page,
+    liabilities: l.page,
+    equity: q.page,
+    page: { assets: a.meta, liabilities: l.meta, equity: q.meta },
     totalAssets,
     totalLiabilities,
     totalEquity,
@@ -197,24 +240,8 @@ async function prudentialRatios(c, { asAt = null } = {}) {
 async function portfolioAtRisk(c, { asAt = null } = {}) {
   const date = asAt || new Date().toISOString().slice(0, 10);
   const { rows } = await c.query(
-    `WITH arrears AS (
-       SELECT l.id,
-              GREATEST(0, MAX($1::date - i.due_date)) AS days_late
-       FROM loan_accounts l
-       LEFT JOIN loan_installments i
-         ON i.loan_id = l.id AND i.status <> 'PAID' AND i.due_date < $1::date
-       WHERE l.status IN ('ACTIVE','IN_ARREARS')
-       GROUP BY l.id
-     )
-     SELECT
-       CASE
-         WHEN a.days_late IS NULL OR a.days_late = 0 THEN 'CURRENT'
-         WHEN a.days_late <= 30  THEN 'PAR_1_30'
-         WHEN a.days_late <= 90  THEN 'PAR_31_90'
-         WHEN a.days_late <= 180 THEN 'PAR_91_180'
-         WHEN a.days_late <= 360 THEN 'PAR_181_360'
-         ELSE 'PAR_OVER_360'
-       END AS bucket,
+    `WITH arrears AS (${PAR_ARREARS_SQL})
+     SELECT ${PAR_BUCKET_SQL} AS bucket,
        count(*)::int AS loans,
        COALESCE(SUM(l.principal_disbursed - l.principal_paid), 0) AS outstanding
      FROM arrears a JOIN loan_accounts l ON l.id = a.id
@@ -235,4 +262,51 @@ async function portfolioAtRisk(c, { asAt = null } = {}) {
   };
 }
 
-module.exports = { balanceSheet, incomeStatement, prudentialRatios, portfolioAtRisk, byType };
+/**
+ * The loans behind the PAR buckets, one row each.
+ *
+ * This is the report a credit committee actually works from, and it is the
+ * one that grows without limit, so it pages in SQL. The bucket boundaries are
+ * the same expression as the summary above; they live in one SQL fragment so
+ * the two cannot drift apart and report different numbers for the same day.
+ */
+const PAR_BUCKET_SQL = `
+  CASE
+    WHEN a.days_late IS NULL OR a.days_late = 0 THEN 'CURRENT'
+    WHEN a.days_late <= 30  THEN 'PAR_1_30'
+    WHEN a.days_late <= 90  THEN 'PAR_31_90'
+    WHEN a.days_late <= 180 THEN 'PAR_91_180'
+    WHEN a.days_late <= 360 THEN 'PAR_181_360'
+    ELSE 'PAR_OVER_360'
+  END`;
+
+const PAR_ARREARS_SQL = `
+  SELECT l.id, GREATEST(0, MAX($1::date - i.due_date)) AS days_late
+  FROM loan_accounts l
+  LEFT JOIN loan_installments i
+    ON i.loan_id = l.id AND i.status <> 'PAID' AND i.due_date < $1::date
+  WHERE l.status IN ('ACTIVE','IN_ARREARS')
+  GROUP BY l.id`;
+
+async function portfolioAtRiskLoans(c, { asAt = null, bucket = null, offset = 0, limit = 50 } = {}) {
+  const date = asAt || new Date().toISOString().slice(0, 10);
+  const sql = `
+    WITH arrears AS (${PAR_ARREARS_SQL})
+    SELECT l.account_no, l.status, m.member_no, m.first_name, m.last_name,
+           COALESCE(a.days_late, 0)::int AS days_late,
+           ${PAR_BUCKET_SQL} AS bucket,
+           round(l.principal_disbursed - l.principal_paid, 2) AS outstanding
+    FROM arrears a
+    JOIN loan_accounts l ON l.id = a.id
+    JOIN members m ON m.id = l.member_id
+    WHERE ($2::text IS NULL OR ${PAR_BUCKET_SQL} = $2::text)
+    ORDER BY COALESCE(a.days_late, 0) DESC, l.account_no`;
+
+  const p = await pageQuery(c, sql, [date, bucket], { offset, limit });
+  return { asAt: date, bucket: bucket || 'ALL', ...p };
+}
+
+module.exports = {
+  balanceSheet, incomeStatement, prudentialRatios,
+  portfolioAtRisk, portfolioAtRiskLoans, byType, pageLines,
+};

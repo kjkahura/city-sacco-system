@@ -35,6 +35,9 @@ function toSchemaName(slug) {
  */
 const SEED_GL = [
   ['100-100', 'Loan Portfolio',              'ASSET',     'LOAN_PORTFOLIO'],
+  // Contra-asset. Classed with the portfolio so assets are reported net of
+  // the allowance rather than gross.
+  ['100-150', 'Allowance for Loan Losses',   'ASSET',     'LOAN_PORTFOLIO'],
   ['100-200', 'Cash on Hand',                'ASSET',     'LIQUID_ASSET'],
   ['100-210', 'Bank Account',                'ASSET',     'LIQUID_ASSET'],
   ['100-220', 'Mobile Money Settlement',     'ASSET',     'LIQUID_ASSET'],
@@ -43,6 +46,7 @@ const SEED_GL = [
   ['200-200', 'Dividends Payable',           'LIABILITY', 'SHORT_TERM_LIABILITY'],
   ['300-100', 'Share Capital',               'EQUITY',    'SHARE_CAPITAL'],
   ['300-200', 'Retained Earnings',           'EQUITY',    'INSTITUTIONAL_CAPITAL'],
+  ['300-300', 'Statutory Reserve',           'EQUITY',    'INSTITUTIONAL_CAPITAL'],
   ['400-100', 'Interest Income on Loans',    'INCOME',    'INCOME'],
   ['400-200', 'Fee and Commission Income',   'INCOME',    'INCOME'],
   ['500-100', 'Interest Expense on Deposits','EXPENSE',   'EXPENSE'],

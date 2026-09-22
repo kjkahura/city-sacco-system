@@ -2,6 +2,7 @@
 
 const acct = require('./accounting');
 const savings = require('./savings');
+const { pageQuery } = require('../lib/page');
 const { err, round2 } = acct;
 
 const round4 = (n) => Math.round((Number(n) + Number.EPSILON) * 1e4) / 1e4;
@@ -18,7 +19,7 @@ async function lock(c, accountId) {
   const { rows } = await c.query(
     `SELECT a.*, p.unit_price, p.min_units, p.gl_equity
      FROM share_accounts a JOIN share_products p ON p.id = a.product_id
-     WHERE a.id = $1 OR a.account_no = $1::text
+     WHERE a.id::text = $1 OR a.account_no = $1
      FOR UPDATE OF a`,
     [accountId]
   );
@@ -323,16 +324,32 @@ async function reversePurchase(c, reference, { narration = 'Reversal', createdBy
   return rev;
 }
 
-async function register(c, { asAt = null } = {}) {
-  const { rows } = await c.query(
-    `SELECT m.id AS member_id, m.member_no, m.first_name, m.last_name,
-            units_as_at(m.id, COALESCE($1::date, current_date)) AS units
-     FROM members m
-     WHERE units_as_at(m.id, COALESCE($1::date, current_date)) > 0
-     ORDER BY units DESC`,
-    [asAt]
-  );
-  return rows;
+/**
+ * The share register: one row per member holding units.
+ *
+ * It grows with membership, so it pages in SQL. The total units and the
+ * member count are computed over the whole register, not the page, because
+ * the register's own footer is the number people quote at an AGM.
+ */
+async function register(c, { asAt = null, offset = 0, limit = 50 } = {}) {
+  const sql = `
+    SELECT m.id AS member_id, m.member_no, m.first_name, m.last_name,
+           units_as_at(m.id, COALESCE($1::date, current_date)) AS units
+    FROM members m
+    WHERE units_as_at(m.id, COALESCE($1::date, current_date)) > 0
+    ORDER BY units DESC, m.member_no`;
+
+  const { rows: [t] } = await c.query(
+    `SELECT COALESCE(SUM(units),0) AS units, count(*)::int AS holders FROM (${sql}) r`, [asAt]);
+
+  const p = await pageQuery(c, sql, [asAt], { offset, limit });
+  return {
+    asAt: asAt || new Date().toISOString().slice(0, 10),
+    holders: p.items,
+    totalUnits: Number(t.units),
+    totalHolders: t.holders,
+    page: { offset: p.offset, limit: p.limit, total: p.total, hasMore: p.hasMore },
+  };
 }
 
 module.exports = { open, purchase, transfer, reversePurchase, declare, allocate, pay, register, lock };

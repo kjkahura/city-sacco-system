@@ -2,6 +2,7 @@
 
 const acct = require('./accounting');
 const savings = require('./savings');
+const { pageQuery } = require('../lib/page');
 const { err, round2 } = acct;
 
 /**
@@ -155,17 +156,22 @@ async function waive(c, chargeId, { reason = '', createdBy } = {}) {
   return { waived: true, amount: Number(ch.amount), reason };
 }
 
-async function forLoan(c, loanId) {
-  const { rows } = await c.query(
+/**
+ * Every penalty charged on one loan. One row per installment per day, so a
+ * loan two years in arrears has hundreds; paged for that reason.
+ */
+async function forLoan(c, loanId, { offset = 0, limit = 50 } = {}) {
+  return pageQuery(
+    c,
     `SELECT pc.*, i.number AS installment_number, i.due_date
      FROM penalty_charges pc
      LEFT JOIN loan_installments i ON i.id = pc.installment_id
      JOIN loan_accounts l ON l.id = pc.loan_id
-     WHERE l.id = $1 OR l.account_no = $1::text
-     ORDER BY pc.charged_on DESC`,
-    [loanId]
+     WHERE l.id::text = $1 OR l.account_no = $1
+     ORDER BY pc.charged_on DESC, pc.id`,
+    [loanId],
+    { offset, limit }
   );
-  return rows;
 }
 
 module.exports = { accrueForLoan, accrueAll, waive, forLoan, daysLate };

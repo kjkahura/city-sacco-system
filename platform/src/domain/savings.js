@@ -17,7 +17,7 @@ async function lock(c, accountId) {
     `SELECT a.*, p.gl_liability, p.gl_interest_exp, p.withdrawable, p.min_balance
      FROM savings_accounts a
      JOIN savings_products p ON p.id = a.product_id
-     WHERE a.id = $1 OR a.account_no = $1::text
+     WHERE a.id::text = $1 OR a.account_no = $1
      FOR UPDATE OF a`,
     [accountId]
   );

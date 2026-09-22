@@ -3,7 +3,8 @@
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
-const { notFound, paginate, withPaginationHeaders } = require('../lib/http');
+const { notFound } = require('../lib/http');
+const { pageQuery, sendPage, pageParams } = require('../lib/page');
 const L = require('../domain/loans');
 const P = require('../domain/penalties');
 
@@ -40,19 +41,17 @@ const TELLER = ['TENANT_ADMIN', 'MANAGER', 'TELLER'];
 
 router.get('/', requireAuth(), async (req, res, next) => {
   try {
-    const rows = await withTenantRead(req.tenant.schema_name, async (c) => {
-      const where = [];
-      const params = [];
-      if (req.query.status) { params.push(req.query.status); where.push(`l.status = $${params.length}`); }
-      if (req.query.memberId) { params.push(req.query.memberId); where.push(`l.member_id = $${params.length}`); }
-      return (await c.query(
-        `SELECT l.*, m.member_no, m.first_name, m.last_name
-         FROM loan_accounts l JOIN members m ON m.id = l.member_id
-         ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-         ORDER BY l.created_at DESC`, params)).rows;
-    });
-    const p = paginate(req, rows);
-    withPaginationHeaders(res, p).json(p.page);
+    const page = await withTenantRead(req.tenant.schema_name, (c) => pageQuery(
+      c,
+      `SELECT l.*, m.member_no, m.first_name, m.last_name
+       FROM loan_accounts l JOIN members m ON m.id = l.member_id
+       WHERE ($1::text IS NULL OR l.status = $1::text)
+         AND ($2::uuid IS NULL OR l.member_id = $2::uuid)
+       ORDER BY l.created_at DESC, l.id`,
+      [req.query.status || null, req.query.memberId || null],
+      req.query
+    ));
+    sendPage(res, page);
   } catch (e) { next(e); }
 });
 
@@ -60,14 +59,14 @@ router.get('/:id', ...read(async (c, req) => {
   const { rows } = await c.query(
     `SELECT l.*, m.member_no, m.first_name, m.last_name
      FROM loan_accounts l JOIN members m ON m.id = l.member_id
-     WHERE l.id = $1 OR l.account_no = $1::text`, [req.params.id]);
+     WHERE l.id::text = $1 OR l.account_no = $1`, [req.params.id]);
   if (!rows.length) return null;
   return { ...rows[0], balances: L.balances(rows[0]) };
 }));
 
 router.get('/:id/balances', ...read(async (c, req) => {
   const { rows } = await c.query(
-    'SELECT * FROM loan_accounts WHERE id = $1 OR account_no = $1::text', [req.params.id]);
+    'SELECT * FROM loan_accounts WHERE id::text = $1 OR account_no = $1', [req.params.id]);
   return rows.length ? L.balances(rows[0]) : null;
 }));
 
@@ -75,17 +74,24 @@ router.get('/:id/schedule', ...read(async (c, req) => {
   const { rows } = await c.query(
     `SELECT i.* FROM loan_installments i
      JOIN loan_accounts l ON l.id = i.loan_id
-     WHERE l.id = $1 OR l.account_no = $1::text ORDER BY i.number`, [req.params.id]);
+     WHERE l.id::text = $1 OR l.account_no = $1 ORDER BY i.number`, [req.params.id]);
   return rows;
 }));
 
-router.get('/:id/transactions', ...read(async (c, req) => {
-  const { rows } = await c.query(
-    `SELECT t.* FROM transactions t
-     JOIN loan_accounts l ON l.id = t.loan_account_id
-     WHERE l.id = $1 OR l.account_no = $1::text ORDER BY t.created_at DESC`, [req.params.id]);
-  return rows;
-}));
+router.get('/:id/transactions', requireAuth(), async (req, res, next) => {
+  try {
+    const page = await withTenantRead(req.tenant.schema_name, (c) => pageQuery(
+      c,
+      `SELECT t.* FROM transactions t
+       JOIN loan_accounts l ON l.id = t.loan_account_id
+       WHERE l.id::text = $1 OR l.account_no = $1
+       ORDER BY t.created_at DESC, t.id`,
+      [req.params.id],
+      req.query
+    ));
+    sendPage(res, page);
+  } catch (e) { next(e); }
+});
 
 router.get('/:id/guarantors', ...read(async (c, req) => {
   const { rows } = await c.query(
@@ -93,7 +99,7 @@ router.get('/:id/guarantors', ...read(async (c, req) => {
      FROM loan_guarantors g
      JOIN members m ON m.id = g.member_id
      JOIN loan_accounts l ON l.id = g.loan_id
-     WHERE l.id = $1 OR l.account_no = $1::text`, [req.params.id]);
+     WHERE l.id::text = $1 OR l.account_no = $1`, [req.params.id]);
   return rows;
 }));
 
@@ -151,7 +157,13 @@ router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { act
   res.status(201).json(await L.reverseTransaction(c, req.params.reference, { ...req.body, createdBy: actor }));
 }, APPROVER));
 
-router.get('/:id/penalties', ...read((c, req) => P.forLoan(c, req.params.id)));
+router.get('/:id/penalties', requireAuth(), async (req, res, next) => {
+  try {
+    const page = await withTenantRead(req.tenant.schema_name, (c) =>
+      P.forLoan(c, req.params.id, pageParams(req.query)));
+    sendPage(res, page);
+  } catch (e) { next(e); }
+});
 
 router.post('/:id/penalties/accrue', ...tx((c, req, _res, { actor }) =>
   P.accrueForLoan(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));

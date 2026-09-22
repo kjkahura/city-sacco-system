@@ -1,5 +1,6 @@
 'use strict';
 
+const path = require('path');
 const express = require('express');
 const { pool } = require('./db/pool');
 const { resolveTenant, requireAuth } = require('./tenancy/resolve');
@@ -35,6 +36,29 @@ app.get('/health', async (_req, res) => {
     res.status(503).json({ status: 'degraded', error: e.message });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Back office console
+//
+// Static files, no build step, no server-side rendering: the console is an
+// ordinary API client that happens to be served from the same origin. It
+// carries no secrets, so it needs no authentication to fetch; everything it
+// can actually do still goes through the API with a token.
+//
+// The CSP is strict and self-only. There is no CDN and no inline script, so
+// a stored cross-site payload in a member name has nowhere to execute.
+// ---------------------------------------------------------------------------
+const CONSOLE_DIR = path.join(__dirname, '..', 'public');
+app.use('/console', (req, res, next) => {
+  res.set('Content-Security-Policy',
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    + "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Referrer-Policy', 'same-origin');
+  next();
+}, express.static(CONSOLE_DIR, { index: 'index.html', maxAge: '5m' }));
+
+app.get('/', (_req, res) => res.redirect(302, '/console/'));
 
 // ---------------------------------------------------------------------------
 // Control plane. Platform admins only; never tenant-scoped.
@@ -89,6 +113,11 @@ const shares = require('./routes/shares');
 tenantApi.use('/shares', shares);
 tenantApi.use('/dividends', shares.dividends);
 tenantApi.use('/reports', require('./routes/reports'));
+
+const finance = require('./routes/finance');
+tenantApi.use('/provisioning', finance.provisioning);
+tenantApi.use('/periods', finance.periods);
+tenantApi.use('/returns', finance.returns);
 
 tenantApi.get('/', requireAuth(), (req, res) => res.json({
   tenant: req.tenant.slug,

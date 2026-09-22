@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/isolation.test.js && node test/lending.test.js && node test/ops.test.js && node test/security.test.js && node test/finance.test.js",
+    "test": "node test/isolation.test.js && node test/lending.test.js && node test/ops.test.js && node test/security.test.js && node test/finance.test.js && node test/provisioning.test.js && node test/close.test.js && node test/reporting.test.js",
     "migrate": "node bin/cli.js migrate:platform && node bin/cli.js migrate:all",
     "cli": "node bin/cli.js",
     "test:isolation": "node test/isolation.test.js",
@@ -17,7 +17,12 @@
     "eod": "node bin/cli.js eod:run",
     "backup": "node bin/cli.js backup:run",
     "test:security": "node test/security.test.js",
-    "test:finance": "node test/finance.test.js"
+    "test:finance": "node test/finance.test.js",
+    "test:provisioning": "node test/provisioning.test.js",
+    "test:close": "node test/close.test.js",
+    "test:reporting": "node test/reporting.test.js",
+    "provision": "node bin/cli.js provision:run",
+    "test:console": "node test/console.test.js"
   },
   "keywords": [],
   "author": "",
