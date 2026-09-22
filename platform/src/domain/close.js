@@ -264,4 +264,23 @@ async function reopen(c, year, { reason = '', createdBy = 'SYSTEM' } = {}) {
   return { year: y.year, status: 'OPEN', reversedClose: cl?.id || null, reason };
 }
 
-module.exports = { settings, setSettings, openYear, years, preview, close, reopen };
+/**
+ * Make sure a financial year covers the given date, opening a calendar year
+ * if none does. Called nightly by EOD so 1 January opens itself.
+ *
+ * Calendar years only. A SACCO on a July to June year opens its years by
+ * hand with explicit dates, and this leaves them alone: if any year covers
+ * the date, whatever its shape, nothing happens.
+ */
+async function ensureYearFor(c, date, { createdBy = 'EOD' } = {}) {
+  const d = date || new Date().toISOString().slice(0, 10);
+  const { rows: [existing] } = await c.query(
+    'SELECT year, status FROM financial_years WHERE $1::date BETWEEN starts_on AND ends_on', [d]);
+  if (existing) return { year: existing.year, status: existing.status, opened: false };
+
+  const year = Number(String(d).slice(0, 4));
+  const y = await openYear(c, { year, createdBy });
+  return { year: y.year, status: y.status, opened: true };
+}
+
+module.exports = { settings, setSettings, openYear, years, preview, close, reopen, ensureYearFor };

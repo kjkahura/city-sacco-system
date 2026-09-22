@@ -115,6 +115,16 @@ accounting.get('/journal', requireAuth(...LEDGER_READER), async (req, res, next)
   } catch (e) { next(e); }
 });
 
+// The rollup checked against the lines. An auditor's endpoint: it answers
+// "can I trust the numbers on the other reports" with a recomputation.
+accounting.get('/verify', requireAuth(...LEDGER_READER), async (req, res, next) => {
+  try {
+    res.json(await withTenantRead(req.tenant.schema_name, (c) => acct.verifyRollup(c, {
+      from: req.query.from || null, to: req.query.to || null,
+    })));
+  } catch (e) { next(e); }
+});
+
 accounting.get('/gl', requireAuth(...LEDGER_READER), async (req, res, next) => {
   try {
     // One query for every balance. This used to be a query per account.

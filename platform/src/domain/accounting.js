@@ -102,39 +102,42 @@ async function reverse(c, entryId, narration = 'Reversal', createdBy = 'SYSTEM',
 /** Net movement on one GL account, debit-positive. */
 async function balance(c, glCode, { from = null, to = null } = {}) {
   const { rows: [r] } = await c.query(
-    `SELECT COALESCE(SUM(CASE WHEN l.direction='DEBIT' THEN l.amount ELSE -l.amount END), 0) AS bal
-     FROM journal_lines l
-     JOIN journal_entries e ON e.id = l.entry_id
-     WHERE l.gl_code = $1
-       AND ($2::date IS NULL OR e.booking_date >= $2::date)
-       AND ($3::date IS NULL OR e.booking_date <= $3::date)`,
+    `SELECT COALESCE(SUM(debit) - SUM(credit), 0) AS bal
+     FROM gl_daily_balances
+     WHERE gl_code = $1
+       AND ($2::date IS NULL OR booking_date >= $2::date)
+       AND ($3::date IS NULL OR booking_date <= $3::date)`,
     [glCode, from, to]
   );
   return round2(r.bal);
 }
 
 /**
- * Movement per account for a period.
+ * Movement per account for a period, read from the daily rollup.
  *
- * The date filter belongs in the join between lines and entries, not in an
- * outer LEFT JOIN onto journal_entries. An earlier version had it there, and
- * because the line row survives a failed LEFT JOIN with only the entry
- * columns nulled, every line was still summed: `from` and `to` silently did
- * nothing and a one-month income statement reported the whole book. The
- * aggregate is done first, in its own scan, and then joined to the chart of
- * accounts so accounts with no movement in the period still appear.
+ * gl_daily_balances holds one row per account per day per closing flag,
+ * maintained by a trigger on journal_lines (migration 007). Reports read
+ * that instead of the lines: a day's postings collapse to one row per
+ * account, so a six-year trial balance touches a few hundred thousand rows
+ * rather than tens of millions. The rollup is exact because the journal is
+ * append-only; `verifyRollup` below recomputes from the lines and compares,
+ * so that is a checkable claim rather than an assumption.
+ *
+ * The period filter sits inside the aggregate. An earlier version had it in
+ * an outer LEFT JOIN onto journal_entries, where a line row survives with
+ * the entry columns nulled and is summed anyway, so `from` and `to` did
+ * nothing and a one-month statement reported the whole book. The aggregate
+ * is done first, then joined to the chart of accounts so accounts with no
+ * movement in the period still appear.
  */
 const MOVEMENT_SQL_BASE = `
-  SELECT l.gl_code,
-         SUM(CASE WHEN l.direction='DEBIT'  THEN l.amount ELSE 0 END) AS debit,
-         SUM(CASE WHEN l.direction='CREDIT' THEN l.amount ELSE 0 END) AS credit
-  FROM journal_lines l
-  JOIN journal_entries e ON e.id = l.entry_id
-  WHERE ($1::date IS NULL OR e.booking_date >= $1::date)
-    AND ($2::date IS NULL OR e.booking_date <= $2::date)`;
+  SELECT b.gl_code, SUM(b.debit) AS debit, SUM(b.credit) AS credit
+  FROM gl_daily_balances b
+  WHERE ($1::date IS NULL OR b.booking_date >= $1::date)
+    AND ($2::date IS NULL OR b.booking_date <= $2::date)`;
 
 const MOVEMENT_SQL = `${MOVEMENT_SQL_BASE}
-  GROUP BY l.gl_code`;
+  GROUP BY b.gl_code`;
 
 /**
  * The same aggregate with the year-end sweep left out.
@@ -146,8 +149,45 @@ const MOVEMENT_SQL = `${MOVEMENT_SQL_BASE}
  * halves from this view rather than one.
  */
 const MOVEMENT_SQL_TRADING = `${MOVEMENT_SQL_BASE}
-    AND (e.source_type IS NULL OR e.source_type NOT IN ('YEAR_END_CLOSE','STATUTORY_RESERVE'))
+    AND NOT b.is_closing
+  GROUP BY b.gl_code`;
+
+/**
+ * The same figures computed the slow way, straight from the lines. Used
+ * only to check the rollup; nothing user-facing reads this.
+ */
+const MOVEMENT_SQL_FROM_LINES = `
+  SELECT l.gl_code,
+         SUM(CASE WHEN l.direction='DEBIT'  THEN l.amount ELSE 0 END) AS debit,
+         SUM(CASE WHEN l.direction='CREDIT' THEN l.amount ELSE 0 END) AS credit
+  FROM journal_lines l
+  JOIN journal_entries e ON e.id = l.entry_id
+  WHERE ($1::date IS NULL OR e.booking_date >= $1::date)
+    AND ($2::date IS NULL OR e.booking_date <= $2::date)
   GROUP BY l.gl_code`;
+
+/**
+ * Recompute every account's movement from the lines and compare it with the
+ * rollup. Returns the accounts that disagree; an empty array is the claim
+ * "the rollup is exact" made good. Run it after a restore, after any manual
+ * SQL against the ledger, or whenever a number looks wrong.
+ */
+async function verifyRollup(c, { from = null, to = null } = {}) {
+  const { rows } = await c.query(
+    `SELECT COALESCE(r.gl_code, l.gl_code) AS gl_code,
+            COALESCE(r.debit, 0)  AS rollup_debit,  COALESCE(l.debit, 0)  AS lines_debit,
+            COALESCE(r.credit, 0) AS rollup_credit, COALESCE(l.credit, 0) AS lines_credit
+     FROM (${MOVEMENT_SQL}) r
+     FULL OUTER JOIN (${MOVEMENT_SQL_FROM_LINES}) l ON l.gl_code = r.gl_code
+     WHERE COALESCE(r.debit, 0)  <> COALESCE(l.debit, 0)
+        OR COALESCE(r.credit, 0) <> COALESCE(l.credit, 0)
+     ORDER BY 1`,
+    [from, to]
+  );
+  const { rows: [n] } = await c.query(
+    'SELECT count(*)::int AS rollup_rows, (SELECT count(*) FROM journal_lines)::int AS line_rows FROM gl_daily_balances');
+  return { mismatches: rows, rollupRows: n.rollup_rows, lineRows: n.line_rows, exact: rows.length === 0 };
+}
 
 /**
  * Trial balance for a period.
@@ -209,6 +249,6 @@ async function balances(c, { from = null, to = null } = {}) {
 }
 
 module.exports = {
-  post, reverse, balance, balances, trialBalance, round2, err,
-  MOVEMENT_SQL, MOVEMENT_SQL_TRADING,
+  post, reverse, balance, balances, trialBalance, verifyRollup, round2, err,
+  MOVEMENT_SQL, MOVEMENT_SQL_TRADING, MOVEMENT_SQL_FROM_LINES,
 };

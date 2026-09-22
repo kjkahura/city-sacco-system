@@ -48,10 +48,15 @@ function rateLimit({ limit = 600, windowMs = 60_000, keyFn } = {}) {
  * password across many accounts from one address is caught, and so is
  * hammering one account from many addresses.
  */
+// Staff sign in with an email, members with a phone, activation with a
+// member number. Whichever the body carries is the account key.
+const accountKey = (req) => String(
+  req.body?.memberNo || req.body?.email || req.body?.phone || '').toLowerCase().replace(/\s+/g, '');
+
 function loginRateLimit({ perIp = 20, perAccount = 8, windowMs = 900_000 } = {}) {
   return async (req, res, next) => {
     try {
-      const email = String(req.body?.email || '').toLowerCase();
+      const email = accountKey(req);
       const tenant = req.tenant?.slug || 'unknown';
       const [byIp, byAccount] = await Promise.all([
         store.incr(windowKey('login:ip', req.ip, windowMs), windowMs),
@@ -69,7 +74,7 @@ function loginRateLimit({ perIp = 20, perAccount = 8, windowMs = 900_000 } = {})
 /** Clear the account counter after a success, so one fat-fingered password
  *  does not count against the user for the next fifteen minutes. */
 async function clearLoginAttempts(req, { windowMs = 900_000 } = {}) {
-  const email = String(req.body?.email || '').toLowerCase();
+  const email = accountKey(req);
   const tenant = req.tenant?.slug || 'unknown';
   await store.reset(windowKey('login:acct', `${tenant}:${email}`, windowMs));
 }

@@ -11,6 +11,7 @@ const { withTenant, withTenantRead } = require('../src/db/tenantContext');
 const PV = require('../src/domain/provisioning');
 const CL = require('../src/domain/close');
 const RT = require('../src/domain/returns');
+const acct = require('../src/domain/accounting');
 
 const [, , cmd, ...args] = process.argv;
 
@@ -88,7 +89,7 @@ const COMMANDS = {
   async 'eod:run'() {
     const results = await eod.runAll({
       businessDate: arg('date'),
-      jobs: (arg('jobs') || 'accrueInterest,markArrears').split(','),
+      jobs: arg('jobs') ? arg('jobs').split(',') : eod.DEFAULT_JOBS,
       force: args.includes('--force'),
     });
     for (const r of results) {
@@ -240,6 +241,19 @@ const COMMANDS = {
           ? `\n  ${l.label}`
           : `  ${l.ref.padEnd(5)} ${l.label.padEnd(42)} ${l.value === null ? '-' : l.value.toFixed(2).padStart(16)}`);
       }
+    }, { read: true });
+  },
+
+  async 'ledger:verify'() {
+    await inTenant(async (c) => {
+      const v = await acct.verifyRollup(c, { from: arg('from'), to: arg('to') });
+      console.log(`  rollup rows ${v.rollupRows}, journal lines ${v.lineRows}`);
+      if (v.exact) return console.log('  ok   rollup matches the journal exactly');
+      for (const m of v.mismatches) {
+        console.log(`  FAIL ${m.gl_code}: rollup ${m.rollup_debit}/${m.rollup_credit} ` +
+          `lines ${m.lines_debit}/${m.lines_credit}`);
+      }
+      process.exitCode = 1;
     }, { read: true });
   },
 

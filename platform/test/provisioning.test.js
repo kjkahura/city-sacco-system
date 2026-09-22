@@ -17,6 +17,7 @@ const L = require('../src/domain/loans');
 const S = require('../src/domain/savings');
 const PV = require('../src/domain/provisioning');
 const acct = require('../src/domain/accounting');
+const eod = require('../src/ops/eod');
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -78,6 +79,20 @@ const allowanceHeld = () => Rd(async (c) => -(await acct.balance(c, PV.GL_ALLOWA
       () => T((c) => PV.run(c, {})),
       (e) => /PROVISION_RATES_NOT_CONFIGURED/.test(e.message));
 
+    section('the nightly job while nothing is configured');
+    const tenantRow = (await pool.query(
+      'SELECT id, slug, schema_name FROM platform.tenants WHERE slug=$1', [SLUG])).rows[0];
+    const nightly = await eod.runJob(tenantRow, 'provision', { businessDate: daysAgo(400) });
+    check('the EOD job records a skip rather than a failure while rates are unset',
+      nightly.skipped === 'RATES_NOT_CONFIGURED', JSON.stringify(nightly));
+    const jr = (await pool.query(
+      `SELECT status FROM platform.job_runs WHERE schema_name=$1 AND job='provision'
+       ORDER BY started_at DESC LIMIT 1`, [tenantRow.schema_name])).rows[0];
+    check('so the job run is SUCCEEDED, not FAILED', jr.status === 'SUCCEEDED', jr.status);
+    check('provisioning is in the default daily sequence, after arrears',
+      eod.DEFAULT_JOBS.indexOf('provision') > eod.DEFAULT_JOBS.indexOf('markArrears'),
+      eod.DEFAULT_JOBS.join(','));
+
     section('the database refuses overlapping bands');
     await throws('a band that overlaps another is rejected',
       () => T((c) => PV.setBand(c, 'WATCH', { maxDays: 200, createdBy: 'test' })),
@@ -115,8 +130,11 @@ const allowanceHeld = () => Rd(async (c) => -(await acct.balance(c, PV.GL_ALLOWA
     check('required provision is 1% of it', p1.requiredTotal === 1200, String(p1.requiredTotal));
     check('nothing is held yet', p1.heldTotal === 0, String(p1.heldTotal));
 
-    const r1 = await T((c) => PV.run(c, { createdBy: 'test' }));
-    check('the run posts the movement', r1.movement === 1200 && r1.entryId, JSON.stringify(r1.movement));
+    // The first run goes through the nightly job, the way it will in
+    // production, with today as the business date.
+    const r1 = await eod.runJob(tenantRow, 'provision', { businessDate: daysAgo(0) });
+    check('once configured, the nightly job posts the movement',
+      r1.movement === 1200 && r1.entryId, JSON.stringify({ movement: r1.movement, skipped: r1.skipped }));
     check('the allowance now holds it', (await allowanceHeld()) === 1200);
     const expense = await Rd((c) => acct.balance(c, PV.GL_EXPENSE));
     check('the charge is in the provision expense account', expense === 1200, String(expense));

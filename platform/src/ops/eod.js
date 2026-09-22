@@ -5,6 +5,7 @@ const { withTenant } = require('../db/tenantContext');
 const L = require('../domain/loans');
 const P = require('../domain/penalties');
 const P2 = require('../domain/provisioning');
+const CL = require('../domain/close');
 
 /**
  * End-of-day processing.
@@ -73,14 +74,39 @@ const JOBS = {
   },
 
   /**
-   * Loan loss provisioning. Not in the default daily sequence: most SACCOs
-   * provision at month end, and running it daily would post a movement every
-   * night. Call it explicitly, or add it to --jobs on the last day of the
-   * month. It refuses to run while the bands have no rates, and the job
-   * record captures that refusal rather than silently provisioning nothing.
+   * Make sure the financial year covering the business date exists.
+   *
+   * First in the daily sequence, so on 1 January the new calendar year is
+   * open before anything posts into it, and nobody has to remember. It also
+   * covers a tenant that has never opened a year at all. Idempotent: a year
+   * that already exists is left alone, and the database refuses an overlap
+   * if someone has opened an unusual year by hand.
+   */
+  async ensureFinancialYear(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => CL.ensureYearFor(c, businessDate, { createdBy: 'EOD' }));
+  },
+
+  /**
+   * Loan loss provisioning, daily.
+   *
+   * Running it every night keeps the allowance tracking the portfolio rather
+   * than jumping once a month, and each run posts only the movement since
+   * the last one, so the entries are small. Until someone has entered the
+   * rates the job records a skip, not a failure: a nightly FAILED row for a
+   * tenant that has simply not configured provisioning yet would bury the
+   * failures that matter.
    */
   async provision(tenant, businessDate) {
-    return withTenant(tenant.schema_name, (c) => P2.run(c, { asOf: businessDate, asAt: businessDate, createdBy: 'EOD' }));
+    return withTenant(tenant.schema_name, async (c) => {
+      try {
+        return await P2.run(c, { asAt: businessDate, createdBy: 'EOD' });
+      } catch (e) {
+        if (/PROVISION_RATES_NOT_CONFIGURED|PROVISION_BANDS_NOT_DEFINED/.test(e.message)) {
+          return { skipped: 'RATES_NOT_CONFIGURED', detail: e.message };
+        }
+        throw e;
+      }
+    });
   },
 
   /** Dormancy: no activity in the configured window. */
@@ -130,9 +156,14 @@ async function runJob(tenant, job, { businessDate = null, force = false } = {}) 
   }
 }
 
-/** Run the full end-of-day sequence across every active tenant. */
-async function runAll({ businessDate = null,
-  jobs = ['accrueInterest', 'markArrears', 'accruePenalties'], force = false } = {}) {
+/**
+ * The daily sequence, run across every active tenant. Order matters: the year has to exist before anything
+ * posts, arrears before penalties (penalties read arrears state), and
+ * provisioning last because it reads the arrears the others just produced.
+ */
+const DEFAULT_JOBS = ['ensureFinancialYear', 'accrueInterest', 'markArrears', 'accruePenalties', 'provision'];
+
+async function runAll({ businessDate = null, jobs = DEFAULT_JOBS, force = false } = {}) {
   const { rows: tenants } = await pool.query(
     "SELECT id, slug, schema_name FROM platform.tenants WHERE status = 'ACTIVE' ORDER BY slug");
   const results = [];
@@ -156,4 +187,4 @@ async function history({ slug = null, limit = 50 } = {}) {
   return rows;
 }
 
-module.exports = { JOBS, runJob, runAll, history };
+module.exports = { JOBS, DEFAULT_JOBS, runJob, runAll, history };
