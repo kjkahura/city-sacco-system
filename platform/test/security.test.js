@@ -87,7 +87,9 @@ async function call(method, p, { token, tenant = SLUG, body } = {}) {
     section('TOTP primitive');
     const secret = totp.generateSecret();
     check('secret is 32 base32 chars', /^[A-Z2-7]{32}$/.test(secret), secret);
-    const now = Date.now();
+    // Pinned to the start of a thirty-second step, so "a second later" is
+    // the same step whatever the wall clock was doing when the test began.
+    const now = Date.now() - (Date.now() % 30000);
     const c1 = totp.code(secret, { at: now });
     check('code is six digits', /^\d{6}$/.test(c1), c1);
     check('same step gives the same code', totp.code(secret, { at: now + 1000 }) === c1);
