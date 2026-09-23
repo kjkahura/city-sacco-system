@@ -23,7 +23,14 @@ const { err, round2 } = acct;
  * tenant turns it on, the two-man rule: the approver may not disburse.
  */
 
-const L = () => require('./loans');
+const ledger = require('./ledger');
+const eligibility = require('./eligibility');
+const tranches = require('./tranches');
+const funding = require('./funding');
+const securities = require('./securities');
+const {
+  controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse,
+} = require('./controls');
 
 const OPEN = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL'];
 const RUNNING = ['ACTIVE', 'IN_ARREARS'];
@@ -68,111 +75,8 @@ async function previousState(c, loanId, current) {
   return h?.from_status || null;
 }
 
-// --------------------------------------------------------------------------
-// Controls
-// --------------------------------------------------------------------------
+// Controls live in ./controls; re-exported below for callers that know them here.
 
-async function controls(c) {
-  const { rows: [r] } = await c.query('SELECT * FROM lending_controls WHERE id = 1');
-  return r || {
-    max_exposure_mode: 'UNLIMITED', max_exposure_amount: null, one_active_loan_per_member: false,
-    min_arrears_days_before_writeoff: 0, max_days_undo_close: null, two_man_rule: false,
-  };
-}
-
-const CONTROL_FIELDS = {
-  maxExposureMode: 'max_exposure_mode', maxExposureAmount: 'max_exposure_amount',
-  oneActiveLoanPerMember: 'one_active_loan_per_member',
-  minArrearsDaysBeforeWriteoff: 'min_arrears_days_before_writeoff',
-  maxDaysUndoClose: 'max_days_undo_close', twoManRule: 'two_man_rule',
-};
-
-async function updateControls(c, patch, { actor } = {}) {
-  const before = await controls(c);
-  const sets = [];
-  const vals = [];
-  for (const [k, col] of Object.entries(CONTROL_FIELDS)) {
-    if (patch[k] === undefined) continue;
-    if (col === 'max_exposure_mode' && !['UNLIMITED', 'SUM_OF_LOANS', 'SUM_MINUS_DEPOSITS'].includes(patch[k])) {
-      throw err('INVALID_EXPOSURE_MODE', 400);
-    }
-    vals.push(patch[k]);
-    sets.push(`${col} = $${vals.length}`);
-  }
-  if (!sets.length) throw err('NO_UPDATABLE_FIELDS', 400);
-  const { rows: [after] } = await c.query(
-    `UPDATE lending_controls SET ${sets.join(', ')}, updated_at = now() WHERE id = 1 RETURNING *`, vals);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,'LENDING_CONTROLS_CHANGED','lending_controls','1',$2,$3)`,
-    [actor || 'SYSTEM', JSON.stringify(before), JSON.stringify(after)]);
-  return after;
-}
-
-/**
- * The tenant's exposure rules for one member: the sum of their running
- * loans (less deposits, if the mode says so) against the cap, and the
- * one-active-loan rule. `loanId` is the application under review, which is
- * not itself counted.
- */
-async function exposure(c, { memberId, loanId = null, requested = 0 }) {
-  const ctl = await controls(c);
-  const reasons = [];
-  const rules = {};
-  const { rows: [x] } = await c.query(
-    `SELECT COALESCE(SUM(principal_disbursed + principal_capitalized - principal_paid), 0) AS outstanding,
-            COUNT(*)::int AS active
-     FROM loan_accounts WHERE member_id = $1 AND status IN ('ACTIVE','IN_ARREARS','LOCKED') AND ($2::uuid IS NULL OR id <> $2)`,
-    [memberId, loanId]);
-  const outstanding = round2(x.outstanding);
-  let deposits = 0;
-  if (ctl.max_exposure_mode === 'SUM_MINUS_DEPOSITS') {
-    const { rows: [d] } = await c.query(
-      "SELECT COALESCE(SUM(balance),0) AS t FROM savings_accounts WHERE member_id = $1 AND status = 'ACTIVE'", [memberId]);
-    deposits = round2(d.t);
-  }
-  const exposed = round2(outstanding + Number(requested) - deposits);
-  if (ctl.max_exposure_mode !== 'UNLIMITED' && ctl.max_exposure_amount !== null) {
-    const ok = exposed <= Number(ctl.max_exposure_amount);
-    rules.maxExposure = ok ? 'MET' : 'BREACHED';
-    if (!ok) reasons.push('EXCEEDS_MAXIMUM_EXPOSURE');
-  } else rules.maxExposure = 'NOT_ENFORCED';
-  if (ctl.one_active_loan_per_member) {
-    rules.oneActiveLoan = x.active === 0 ? 'MET' : 'BREACHED';
-    if (x.active > 0) reasons.push('ONE_ACTIVE_LOAN_PER_MEMBER');
-  } else rules.oneActiveLoan = 'NOT_ENFORCED';
-  return {
-    reasons, rules,
-    exposure: { mode: ctl.max_exposure_mode, limit: ctl.max_exposure_amount === null ? null : Number(ctl.max_exposure_amount),
-      outstanding, deposits, requested: round2(requested), exposed, activeLoans: x.active },
-  };
-}
-
-/** The signed-in user's limits, when the caller told us who they are. */
-async function userLimits(c, user) {
-  if (!user?.sub) return { approval: null, disbursement: null, email: user?.email || null };
-  const { rows: [u] } = await c.query(
-    'SELECT email, approval_limit, disbursement_limit FROM platform.users WHERE id = $1', [user.sub]);
-  return { approval: u?.approval_limit ?? null, disbursement: u?.disbursement_limit ?? null, email: u?.email || user.email };
-}
-
-async function assertMayApprove(c, l, { user }) {
-  const lim = await userLimits(c, user);
-  if (lim.approval !== null && Number(l.principal) > Number(lim.approval)) {
-    throw err(`ABOVE_YOUR_APPROVAL_LIMIT: limit ${Number(lim.approval)}, loan ${Number(l.principal)}`, 403);
-  }
-}
-
-async function assertMayDisburse(c, l, { actor, amount, user = null }) {
-  const ctl = await controls(c);
-  if (ctl.two_man_rule && l.approved_by && actor && l.approved_by === actor) {
-    throw err('TWO_MAN_RULE: the user who approved a loan may not disburse it', 403);
-  }
-  const lim = await userLimits(c, user);
-  if (lim.disbursement !== null && Number(amount) > Number(lim.disbursement)) {
-    throw err(`ABOVE_YOUR_DISBURSEMENT_LIMIT: limit ${Number(lim.disbursement)}, amount ${Number(amount)}`, 403);
-  }
-}
 
 async function assertMayWriteOff(c, l) {
   const ctl = await controls(c);
@@ -191,7 +95,7 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
   const name = ALIASES[String(action).toUpperCase()] || String(action).toUpperCase();
   const t = ACTIONS[name];
   if (!t) throw err(`UNSUPPORTED_ACTION: ${action}`);
-  const l = await L().lock(c, loanId);
+  const l = await ledger.lock(c, loanId);
   if (!t.from.includes(l.status)) throw err(`INVALID_STATE_TRANSITION: ${l.status} -> ${name}`, 409);
 
   let to = t.to;
@@ -202,10 +106,10 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
   if (name === 'APPROVE') {
     // Approval is where the rules bite. Applying is a request and a teller
     // may record one for any amount; approving it is the credit decision.
-    await L().enforceEligibility(c, l);
+    await eligibility.enforceEligibility(c, l);
     await assertMayApprove(c, l, { user });
-    await require('./tranches').assertPlanned(c, l);
-    await require('./funding').assertFundedForApproval(c, l);
+    await tranches.assertPlanned(c, l);
+    await funding.assertFundedForApproval(c, l);
     set('approved_on', new Date().toISOString().slice(0, 10));
     set('approved_by', createdBy || null);
   }
@@ -216,7 +120,7 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
       if (l.locked_reason === 'CAPPED') {
         // A cap lock lifts when the charges are paid or the loan is out of
         // arrears; otherwise it would relock at the next EOD.
-        const b = L().balances(l);
+        const b = ledger.balances(l);
         const charges = round2(b.interest + b.fees + b.penalty);
         const { rows: [o] } = await c.query(
           "SELECT count(*)::int AS n FROM loan_installments WHERE loan_id = $1 AND status = 'OVERDUE'", [l.id]);
@@ -236,12 +140,12 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     }
   }
   if (name === 'CLOSE') {
-    const b = L().balances(l);
+    const b = ledger.balances(l);
     if (b.total > 0) throw err(`LOAN_HAS_A_BALANCE: ${b.total}`, 409);
     if (Number(l.credit_balance) > 0) throw err(`LOAN_HAS_A_CREDIT_BALANCE: ${l.credit_balance}; it must be drawn or refunded first`, 409);
     set('closed_on', new Date().toISOString().slice(0, 10));
-    await L().releaseGuarantors(c, l.id);
-    await require('./securities').onClose(c, l.id);
+    await eligibility.releaseGuarantors(c, l.id);
+    await securities.onClose(c, l.id);
   }
   if (name === 'LOCK') {
     set('locked_at', new Date()); set('locked_reason', reason && ['MANUAL', 'CAPPED', 'ARREARS'].includes(reason) ? reason : 'MANUAL');
@@ -254,7 +158,7 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
   const { rows } = await c.query(
     `UPDATE loan_accounts SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length} RETURNING *`, vals);
 
-  if (['CLOSED_REJECTED', 'CLOSED_WITHDRAWN'].includes(to)) await L().releaseGuarantors(c, l.id);
+  if (['CLOSED_REJECTED', 'CLOSED_WITHDRAWN'].includes(to)) await eligibility.releaseGuarantors(c, l.id);
   await history(c, l.id, { from: l.status, to, action: name, actor: createdBy, note });
   await c.query(
     `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
@@ -268,58 +172,49 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
 // Amendments: what may change, in which state
 // --------------------------------------------------------------------------
 
-// Terms may change while the application is open. After approval only the
-// narrative fields may (Mambu: name, notes, custom fields); to change the
-// terms, undo the approval first.
-const TERM_FIELDS = ['principal', 'termMonths', 'monthlyRate', 'penaltyRate', 'firstDueOffsetDays',
-  'gracePeriods', 'amortizationPeriods', 'arrearsToleranceDays'];
+// The loan's own terms (principal, installments) and every override the
+// product allows (ledger.OVERRIDES) may change while the application is
+// open. After approval only the narrative fields may (Mambu: name, notes,
+// custom fields); to change the terms, undo the approval first.
+const CORE_FIELDS = { principal: 'principal', termMonths: 'term_months' };
+const TERM_FIELDS = [...Object.keys(CORE_FIELDS), ...Object.keys(ledger.OVERRIDES)];
 const NARRATIVE_FIELDS = ['purpose', 'notes'];
 const COLUMN = {
-  principal: 'principal', termMonths: 'term_months', monthlyRate: 'monthly_rate', penaltyRate: 'penalty_rate',
-  firstDueOffsetDays: 'first_due_offset_days', gracePeriods: 'grace_periods', amortizationPeriods: 'amortization_periods',
-  arrearsToleranceDays: 'arrears_tolerance_days', purpose: 'purpose', notes: 'notes',
+  ...CORE_FIELDS,
+  ...Object.fromEntries(Object.entries(ledger.OVERRIDES).map(([k, o]) => [k, o.column])),
+  purpose: 'purpose', notes: 'notes',
 };
 
-function within(label, value, min, max) {
-  if (min !== null && min !== undefined && Number(value) < Number(min)) throw err(`${label}_BELOW_PRODUCT_MINIMUM: ${min}`, 400);
-  if (max !== null && max !== undefined && Number(value) > Number(max)) throw err(`${label}_ABOVE_PRODUCT_MAXIMUM: ${max}`, 400);
-}
-
 async function amend(c, loanId, patch, { actor } = {}) {
-  const l = await L().lock(c, loanId);
+  const l = await ledger.lock(c, loanId);
   const keys = Object.keys(patch || {}).filter((k) => COLUMN[k]);
   if (!keys.length) throw err('NO_UPDATABLE_FIELDS', 400);
   const allowed = OPEN.includes(l.status) ? [...TERM_FIELDS, ...NARRATIVE_FIELDS] : NARRATIVE_FIELDS;
   const refused = keys.filter((k) => !allowed.includes(k));
   if (refused.length) throw err(`NOT_EDITABLE_IN_STATE_${l.status}: ${refused.join(', ')}`, 409);
 
-  const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1', [l.product_id]);
-  const next = {
-    principal: patch.principal ?? l.principal, termMonths: patch.termMonths ?? l.term_months,
-    monthlyRate: patch.monthlyRate ?? l.monthly_rate, penaltyRate: patch.penaltyRate ?? l.penalty_rate,
-    firstDueOffsetDays: patch.firstDueOffsetDays ?? l.first_due_offset_days,
-    gracePeriods: patch.gracePeriods ?? l.grace_periods, amortizationPeriods: patch.amortizationPeriods ?? l.amortization_periods,
-  };
+  // Terms are validated as a set: a shorter term can break a grace period
+  // or amortisation that was fine before, even if neither is in the patch.
+  const values = {};
   if (keys.some((k) => TERM_FIELDS.includes(k))) {
-    if (!(round2(next.principal) > 0)) throw err('INVALID_PRINCIPAL', 400);
-    within('PRINCIPAL', next.principal, p.min_principal, p.max_principal);
-    const term = Number(next.termMonths);
+    const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1', [l.product_id]);
+    const principal = patch.principal ?? l.principal;
+    if (!(round2(principal) > 0)) throw err('INVALID_PRINCIPAL', 400);
+    ledger.within('PRINCIPAL', principal, p.min_principal, p.max_principal);
+    const term = Number(patch.termMonths ?? l.term_months);
     if (!(Number.isInteger(term) && term > 0)) throw err('INVALID_TERM', 400);
     if (term > p.max_term) throw err(`TERM_EXCEEDS_PRODUCT_MAX: ${p.max_term}`, 400);
-    within('TERM', term, p.min_term, null);
-    if (p.product_type === 'INTEREST_FREE' && Number(next.monthlyRate) > 0) throw err('INTEREST_FREE_PRODUCT_TAKES_NO_RATE', 400);
-    if (patch.monthlyRate !== undefined) within('RATE', next.monthlyRate, p.rate_min, p.rate_max);
-    if (patch.penaltyRate !== undefined && patch.penaltyRate !== null) within('PENALTY_RATE', next.penaltyRate, p.penalty_rate_min, p.penalty_rate_max);
-    if (patch.firstDueOffsetDays !== undefined) within('FIRST_DUE_OFFSET', next.firstDueOffsetDays, p.first_due_offset_min, p.first_due_offset_max);
-    if (next.gracePeriods !== null && next.gracePeriods !== undefined && Number(next.gracePeriods) >= term) throw err('GRACE_EXCEEDS_TERM', 400);
-    if (next.amortizationPeriods !== null && next.amortizationPeriods !== undefined && Number(next.amortizationPeriods) < term) {
-      throw err('AMORTIZATION_SHORTER_THAN_TERM', 400);
-    }
+    ledger.within('TERM', term, p.min_term, null);
+    const given = Object.fromEntries(keys.filter((k) => ledger.OVERRIDES[k]).map((k) => [k, patch[k]]));
+    Object.assign(values, ledger.resolveOverrides(p, given, { term, current: l }));
   }
 
   const sets = [];
   const vals = [];
-  for (const k of keys) { vals.push(patch[k]); sets.push(`${COLUMN[k]} = $${vals.length}`); }
+  for (const k of keys) {
+    vals.push(Object.prototype.hasOwnProperty.call(values, COLUMN[k]) ? values[COLUMN[k]] : patch[k]);
+    sets.push(`${COLUMN[k]} = $${vals.length}`);
+  }
   vals.push(l.id);
   const { rows } = await c.query(
     `UPDATE loan_accounts SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length} RETURNING *`, vals);
@@ -380,8 +275,8 @@ async function markArrears(c, { asOf = null } = {}) {
   const date = asOf || new Date().toISOString().slice(0, 10);
   const { rows: cands } = await c.query(
     `SELECT i.*, l.account_no, l.status AS loan_status, l.arrears_since, l.principal_disbursed, l.principal_capitalized, l.principal_paid,
-            COALESCE(l.arrears_tolerance_days, p.arrears_tolerance_days, 0) AS tol_days,
-            COALESCE(l.arrears_tolerance_percent, p.arrears_tolerance_percent) AS tol_pct,
+            ${ledger.overrideSql('arrearsToleranceDays')} AS tol_days,
+            ${ledger.overrideSql('arrearsTolerancePercent')} AS tol_pct,
             p.arrears_tolerance_floor AS tol_floor, p.arrears_non_working_days, p.arrears_count_from
      FROM loan_installments i
      JOIN loan_accounts l ON l.id = i.loan_id
@@ -449,7 +344,7 @@ async function refreshArrears(c, l, asOf) {
 
 function capLimit(l) {
   if (l.charge_cap_percent === null || l.charge_cap_percent === undefined) return null;
-  const base = l.charge_cap_base === 'ORIGINAL_PRINCIPAL' ? Number(l.principal) : L().principalOutstanding(l);
+  const base = l.charge_cap_base === 'ORIGINAL_PRINCIPAL' ? Number(l.principal) : ledger.principalOutstanding(l);
   return round2(base * Number(l.charge_cap_percent) / 100);
 }
 
@@ -493,7 +388,7 @@ async function enforceControls(c, { asOf = null } = {}) {
     `SELECT l.id FROM loan_accounts l JOIN loan_products p ON p.id = l.product_id
      WHERE l.status = 'IN_ARREARS' AND (p.charge_cap_percent IS NOT NULL OR p.auto_lock_arrears_days IS NOT NULL)`);
   for (const r of rows) {
-    const l = await L().lock(c, r.id);
+    const l = await ledger.lock(c, r.id);
     if (l.status !== 'IN_ARREARS') continue;
     const limit = capLimit(l);
     if (limit !== null && Number(l.charges_since_arrears) >= limit) { await lockForCap(c, l); out.capped += 1; continue; }

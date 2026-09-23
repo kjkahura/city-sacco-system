@@ -6,16 +6,17 @@ const { err, round2 } = acct;
 /**
  * Collateral assets, after Mambu's "Loan Securities - Guarantors and
  * Collateral Assets". Guarantors (members pledging their deposits) live in
- * loans.js; this is the physical side: a vehicle, a title, equipment, with
+ * eligibility.js; this is the physical side: a vehicle, a title, equipment, with
  * a value the SACCO accepts as security. Both count towards the cover a
  * product requires at approval (require_guarantor_cover / min_cover_percent),
  * as in Mambu's "Required Securities Validation".
  */
 
-const L = () => require('./loans');
+const ledger = require('./ledger');
+const eligibility = require('./eligibility');
 
 async function addCollateral(c, loanId, { assetType = 'OTHER', description, value, originalCurrency = null, originalValue = null, reference = null, note = null, createdBy }) {
-  const l = await L().lock(c, loanId);
+  const l = await ledger.lock(c, loanId);
   if (!l.enable_collateral) throw err('PRODUCT_DOES_NOT_TAKE_COLLATERAL', 409);
   if (!['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'IN_ARREARS'].includes(l.status)) {
     throw err(`CANNOT_ADD_COLLATERAL_IN_STATE: ${l.status}`, 409);
@@ -37,11 +38,11 @@ async function releaseCollateral(c, collateralId, { status = 'RELEASED', note = 
   const { rows: [col] } = await c.query('SELECT * FROM loan_collateral WHERE id = $1 FOR UPDATE', [collateralId]);
   if (!col) throw err('COLLATERAL_NOT_FOUND', 404);
   if (col.status !== 'PLEDGED') throw err(`COLLATERAL_ALREADY_${col.status}`, 409);
-  const l = await L().lock(c, col.loan_id);
+  const l = await ledger.lock(c, col.loan_id);
   // Security may not be released from under a running loan if that would
   // leave it under the product's required cover.
   if (status === 'RELEASED' && ['APPROVED', 'ACTIVE', 'IN_ARREARS', 'LOCKED'].includes(l.status) && l.require_guarantor_cover) {
-    const e = await L().checkEligibility(c, { memberId: l.member_id, productId: l.product_id, principal: L().principalOutstanding(l) || l.principal, loanId: l.id, excludeCollateralId: col.id });
+    const e = await eligibility.checkEligibility(c, { memberId: l.member_id, productId: l.product_id, principal: ledger.principalOutstanding(l) || l.principal, loanId: l.id, excludeCollateralId: col.id });
     if (e.rules.guarantorCover === 'BREACHED') throw err(`RELEASE_WOULD_BREACH_REQUIRED_COVER: cover ${e.cover}, required ${e.coverRequired}`, 409);
   }
   const { rows } = await c.query(
@@ -53,13 +54,8 @@ async function releaseCollateral(c, collateralId, { status = 'RELEASED', note = 
   return rows[0];
 }
 
-/** Value of the collateral pledged on a loan. */
-async function collateralCoverage(c, loanId, { exclude = null } = {}) {
-  const { rows: [r] } = await c.query(
-    `SELECT COALESCE(SUM(value), 0) AS v FROM loan_collateral
-     WHERE loan_id = $1 AND status = 'PLEDGED' AND ($2::uuid IS NULL OR id <> $2)`, [loanId, exclude]);
-  return round2(r.v);
-}
+/** Value of the collateral pledged on a loan (summed in ./eligibility, with the rest of the cover). */
+const { collateralCoverage } = eligibility;
 
 async function forLoan(c, loanId) {
   const { rows } = await c.query(

@@ -41,7 +41,8 @@ router.get('/', requireAuth(), async (req, res, next) => {
 });
 
 router.post('/', ...tx(async (c, req, res) => {
-  res.status(201).json(await S.open(c, req.body));
+  res.status(201);
+  return await S.open(c, req.body);
 }, TELLER));
 
 router.get('/:id/balance', ...tx((c, req) => S.summary(c, req.params.id)));
@@ -62,19 +63,23 @@ router.get('/:id/transactions', requireAuth(), async (req, res, next) => {
 });
 
 router.post('/:id/deposits', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await S.deposit(c, req.params.id, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await S.deposit(c, req.params.id, { ...req.body, createdBy: actor });
 }, TELLER));
 
 router.post('/:id/withdrawals', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await S.withdraw(c, req.params.id, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await S.withdraw(c, req.params.id, { ...req.body, createdBy: actor });
 }, TELLER));
 
 router.post('/:id/transfers', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await S.transfer(c, req.params.id, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await S.transfer(c, req.params.id, { ...req.body, createdBy: actor });
 }, TELLER));
 
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await S.reverseTransaction(c, req.params.reference, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await S.reverseTransaction(c, req.params.reference, { ...req.body, createdBy: actor });
 }, APPROVER));
 
 // --- accounting -----------------------------------------------------------

@@ -1,0 +1,155 @@
+'use strict';
+
+const acct = require('./accounting');
+const savings = require('./savings');
+const lending = require('./controls');
+const { err, round2 } = acct;
+const { lock } = require('./ledger');
+
+/**
+ * Security and eligibility: guarantors pledging their deposits, the value
+ * of collateral pledged, and the rules a loan must meet to be approved
+ * (deposit multiplier, required cover, product band, exposure controls).
+ *
+ * Collateral assets themselves are recorded in ./securities; their value is
+ * summed here because cover is one figure made of deposits, pledges and
+ * collateral, and approval, release of security and the teller's preview
+ * must all read the same one.
+ */
+
+/** Value of the collateral pledged on a loan. */
+async function collateralCoverage(c, loanId, { exclude = null } = {}) {
+  const { rows: [r] } = await c.query(
+    `SELECT COALESCE(SUM(value), 0) AS v FROM loan_collateral
+     WHERE loan_id = $1 AND status = 'PLEDGED' AND ($2::uuid IS NULL OR id <> $2)`, [loanId, exclude]);
+  return round2(r.v);
+}
+
+// --------------------------------------------------------------------------
+// Guarantors. The SACCO-specific piece: members pledge their own deposits.
+// --------------------------------------------------------------------------
+
+const OPEN_APPLICATION = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL'];
+
+async function addGuarantor(c, loanId, { memberId, amount }) {
+  const l = await lock(c, loanId);
+  if (l.enable_guarantors === false) throw err('PRODUCT_DOES_NOT_TAKE_GUARANTORS', 409);
+  if (!OPEN_APPLICATION.includes(l.status)) {
+    throw err(`CANNOT_ADD_GUARANTOR_IN_STATE: ${l.status}`, 409);
+  }
+  if (memberId === l.member_id) throw err('MEMBER_CANNOT_GUARANTEE_OWN_LOAN');
+  const amt = round2(amount);
+  if (!(amt > 0)) throw err('INVALID_PLEDGE_AMOUNT');
+
+  // The guarantor must actually have the deposits they are pledging, net of
+  // anything already pledged elsewhere.
+  const { rows: [bal] } = await c.query(
+    'SELECT COALESCE(SUM(balance), 0) AS total FROM savings_accounts WHERE member_id = $1 AND status = $2',
+    [memberId, 'ACTIVE']
+  );
+  const alreadyPledged = await savings.pledgedAmount(c, memberId);
+  const free = round2(bal.total - alreadyPledged);
+  if (amt > free) {
+    throw err(`GUARANTOR_HAS_INSUFFICIENT_FREE_DEPOSITS: free ${free}, pledged ${amt}`, 409);
+  }
+
+  const { rows } = await c.query(
+    `INSERT INTO loan_guarantors (loan_id, member_id, pledged_amount) VALUES ($1,$2,$3) RETURNING *`,
+    [l.id, memberId, amt]
+  );
+  return rows[0];
+}
+
+async function guarantorCoverage(c, loanId) {
+  const { rows: [r] } = await c.query(
+    `SELECT COALESCE(SUM(pledged_amount), 0) AS pledged
+     FROM loan_guarantors WHERE loan_id = $1 AND status = 'PLEDGED'`,
+    [loanId]
+  );
+  return round2(r.pledged);
+}
+
+async function releaseGuarantors(c, loanId) {
+  await c.query(
+    "UPDATE loan_guarantors SET status = 'RELEASED' WHERE loan_id = $1 AND status = 'PLEDGED'",
+    [loanId]
+  );
+}
+
+// --------------------------------------------------------------------------
+// Eligibility
+// --------------------------------------------------------------------------
+
+/**
+ * The SACCO rules: you may borrow up to N times your own deposits, and the
+ * loan must be covered by your deposits plus what guarantors have pledged.
+ *
+ * Returns the picture; `enforceEligibility` below is what refuses. Kept
+ * separate so a teller can show a member the ceiling before an application
+ * is written, and so approval and the preview cannot disagree about it.
+ */
+async function checkEligibility(c, { memberId, productId, principal, loanId = null, excludeCollateralId = null }) {
+  const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1', [productId]);
+  if (!p) throw err('UNKNOWN_LOAN_PRODUCT', 404);
+  const { rows: [d] } = await c.query(
+    "SELECT COALESCE(SUM(balance), 0) AS total FROM savings_accounts WHERE member_id = $1 AND status = 'ACTIVE'",
+    [memberId]
+  );
+  const deposits = round2(d.total);
+  const requested = round2(principal);
+  const ceiling = round2(deposits * Number(p.max_multiplier));
+  const pledged = loanId ? await guarantorCoverage(c, loanId) : 0;
+  const collateral = loanId ? await collateralCoverage(c, loanId, { exclude: excludeCollateralId }) : 0;
+  const coverRequired = round2(requested * Number(p.min_cover_percent || 100) / 100);
+  const cover = round2(deposits + pledged + collateral);
+
+  const withinMultiplier = requested <= ceiling;
+  const covered = cover >= coverRequired;
+  const reasons = [];
+  if (p.enforce_deposit_multiplier && !withinMultiplier) reasons.push('LOAN_EXCEEDS_DEPOSIT_MULTIPLIER');
+  if (p.require_guarantor_cover && !covered) reasons.push('INSUFFICIENT_GUARANTOR_COVER');
+  if (p.min_principal && requested < Number(p.min_principal)) reasons.push('BELOW_PRODUCT_MINIMUM');
+  if (p.max_principal && requested > Number(p.max_principal)) reasons.push('ABOVE_PRODUCT_MAXIMUM');
+
+  // Tenant-wide exposure controls (Mambu "Internal Controls").
+  const controls = await lending.exposure(c, { memberId, loanId, requested });
+  reasons.push(...controls.reasons);
+
+  return {
+    deposits,
+    multiplier: Number(p.max_multiplier),
+    ceiling,
+    requested,
+    eligible: withinMultiplier,                 // kept for older clients
+    shortfall: round2(Math.max(0, requested - ceiling)),
+    pledged,
+    collateral,
+    coverRequired,
+    cover,
+    coverShortfall: round2(Math.max(0, coverRequired - cover)),
+    exposure: controls.exposure,
+    rules: {
+      depositMultiplier: p.enforce_deposit_multiplier ? (withinMultiplier ? 'MET' : 'BREACHED') : 'NOT_ENFORCED',
+      guarantorCover: p.require_guarantor_cover ? (covered ? 'MET' : 'BREACHED') : 'NOT_ENFORCED',
+      ...controls.rules,
+    },
+    approvable: reasons.length === 0,
+    reasons,
+  };
+}
+
+/** Refuse a loan that breaks a rule its product enforces. */
+async function enforceEligibility(c, l) {
+  const e = await checkEligibility(c, {
+    memberId: l.member_id, productId: l.product_id, principal: l.principal, loanId: l.id,
+  });
+  if (!e.approvable) {
+    throw err(`${e.reasons[0]}: deposits ${e.deposits}, pledged ${e.pledged}, requested ${e.requested}`, 409);
+  }
+  return e;
+}
+
+module.exports = {
+  OPEN_APPLICATION, addGuarantor, guarantorCoverage, releaseGuarantors, collateralCoverage,
+  checkEligibility, enforceEligibility,
+};

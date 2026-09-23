@@ -2,6 +2,9 @@
 
 const acct = require('./accounting');
 const savings = require('./savings');
+const tax = require('./tax');
+const L = require('./ledger');
+const W = require('./workflow');
 const { pageQuery } = require('../lib/page');
 const { err, round2 } = acct;
 
@@ -38,8 +41,6 @@ function daysLate(dueDate, asOf) {
 async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {}) {
   const date = asOf || new Date().toISOString().slice(0, 10);
 
-  const L = require('./loans');
-  const W = require('./workflow');
   const l = await L.lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) return [];
   if (!l.penalty_basis || l.penalty_basis === 'NONE') return [];
@@ -81,7 +82,7 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
     amount = await W.capAllows(c, l, amount);
     if (!(amount > 0)) break;
     // Tax on penalties, where the product charges it.
-    const tx = require('./tax').split(l, 'PENALTY', amount);
+    const tx = tax.split(l, 'PENALTY', amount);
     amount = tx.gross;
 
     // ON CONFLICT DO NOTHING rather than catching a unique violation:
@@ -108,7 +109,7 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
     if (L.isAccrual(l)) {
       entryId = await L.post(c, l, {
         debits: [{ glCode: l.gl_penalty_rec, amount, memberId: l.member_id }],
-        credits: require('./tax').incomeCredits(l, tx, glIncome, l.member_id),
+        credits: tax.incomeCredits(l, tx, glIncome, l.member_id),
         narration: `Penalty ${l.account_no} installment ${inst.number}, ${late} days late`,
         sourceType: 'LOAN_PENALTY', sourceId: l.id, bookingDate: date, createdBy,
       });
@@ -135,7 +136,7 @@ async function accrueAll(c, { asOf = null, createdBy = 'EOD' } = {}) {
      JOIN loan_products p ON p.id = l.product_id
      JOIN loan_installments i ON i.loan_id = l.id
      WHERE l.status IN ('ACTIVE','IN_ARREARS')
-       AND COALESCE(l.penalty_rate, p.penalty_rate) > 0
+       AND ${L.overrideSql('penaltyRate')} > 0
        AND p.penalty_basis <> 'NONE'
        AND i.status NOT IN ('PAID', 'GRACE')
        AND i.due_date < $1::date`,

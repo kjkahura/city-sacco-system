@@ -2,6 +2,7 @@
 
 const acct = require('./accounting');
 const savings = require('./savings');
+const ledger = require('./ledger');
 const { err, round2 } = acct;
 
 /**
@@ -24,7 +25,6 @@ const { err, round2 } = acct;
  *                        commission plus each funder's rate weighted by share
  */
 
-const L = () => require('./loans');
 
 async function fundingOf(c, loanId) {
   const { rows } = await c.query(
@@ -40,7 +40,7 @@ async function fundingOf(c, loanId) {
 const isFunded = async (c, loanId) => (await fundingOf(c, loanId)).length > 0;
 
 async function addFundingSource(c, loanId, { savingsAccountId, amount, funderRate = null, createdBy }) {
-  const l = await L().lock(c, loanId);
+  const l = await ledger.lock(c, loanId);
   if (!l.funding_enabled) throw err('PRODUCT_HAS_NO_FUNDING_SOURCES', 409);
   if (!['PARTIAL_APPLICATION', 'PENDING_APPROVAL'].includes(l.status)) throw err(`CANNOT_ADD_FUNDING_IN_STATE: ${l.status}`, 409);
   const amt = round2(amount);
@@ -74,7 +74,7 @@ async function addFundingSource(c, loanId, { savingsAccountId, amount, funderRat
 async function removeFundingSource(c, fundingId, { createdBy } = {}) {
   const { rows: [f] } = await c.query('SELECT * FROM loan_funding_sources WHERE id = $1 FOR UPDATE', [fundingId]);
   if (!f) throw err('FUNDING_SOURCE_NOT_FOUND', 404);
-  const l = await L().lock(c, f.loan_id);
+  const l = await ledger.lock(c, f.loan_id);
   if (!['PARTIAL_APPLICATION', 'PENDING_APPROVAL'].includes(l.status)) throw err(`CANNOT_REMOVE_FUNDING_IN_STATE: ${l.status}`, 409);
   await c.query("UPDATE loan_funding_sources SET status = 'RELEASED' WHERE id = $1", [fundingId]);
   await c.query(
@@ -88,15 +88,7 @@ async function removeFundingSource(c, fundingId, { createdBy } = {}) {
  * yet disbursed: locked, so the money cannot be withdrawn or promised twice
  * (lock_funds_at_approval).
  */
-async function lockedFunding(c, memberId) {
-  const { rows: [r] } = await c.query(
-    `SELECT COALESCE(SUM(f.amount), 0) AS t
-     FROM loan_funding_sources f
-     JOIN loan_accounts l ON l.id = f.loan_id
-     JOIN loan_products p ON p.id = l.product_id
-     WHERE f.member_id = $1 AND f.status = 'PLEDGED' AND l.status = 'APPROVED' AND p.lock_funds_at_approval`, [memberId]);
-  return round2(r.t);
-}
+const { lockedFunding } = savings;
 
 /**
  * At approval: the loan must be fully funded and every funder must hold the
@@ -113,7 +105,7 @@ async function assertFundedForApproval(c, l) {
       throw err(`FUNDER_${f.account_no}_HAS_INSUFFICIENT_BALANCE: ${round2(f.balance - pledged)} free, ${f.amount} pledged`, 409);
     }
   }
-  const orgCommission = Number(l.org_commission ?? l.product_org_commission ?? 0);
+  const orgCommission = ledger.effective(l).orgCommission;
   if (l.org_commission_min !== null && orgCommission < Number(l.org_commission_min)) throw err('ORG_COMMISSION_BELOW_PRODUCT_MINIMUM', 400);
   if (l.org_commission_max !== null && orgCommission > Number(l.org_commission_max)) throw err('ORG_COMMISSION_ABOVE_PRODUCT_MAXIMUM', 400);
   let rate = Number(l.monthly_rate);
