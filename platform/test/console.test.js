@@ -166,9 +166,11 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('the sample template is listed',
       (await page.textContent('main')).includes('SAMPLE_FINPOS'));
     await page.click('table tbody tr');
-    await page.waitForSelector('.notice');
+    // The list screen has a notice of its own, so wait for the rendered
+    // return's disclaimer rather than for any notice.
+    await page.waitForSelector('.notice:has-text("NOT an official return")', { timeout: 5000 }).catch(() => {});
     check('rendering it warns that it is not an official return',
-      /NOT an official return/.test(await page.textContent('.notice')));
+      /NOT an official return/.test(await page.textContent('main')));
     const x1 = await page.textContent('table tbody tr:last-child td:last-child');
     check('and it ties to the ledger', x1.trim() === '0.00', x1);
 

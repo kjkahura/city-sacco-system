@@ -13,7 +13,7 @@ const { err, round2 } = acct;
  * loan runs, so long as the total stays the approved amount.
  */
 
-const L = () => require('./loans');
+const ledger = require('./ledger');
 const ymd = (d) => (d instanceof Date
   ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   : String(d).slice(0, 10));
@@ -30,7 +30,7 @@ async function forLoan(c, loanId) {
  * yet disbursed: [{ amount, expectedOn }]. Disbursed ones stay as they are.
  */
 async function setTranches(c, loanId, tranches, { createdBy } = {}) {
-  const l = await L().lock(c, loanId);
+  const l = await ledger.lock(c, loanId);
   if (l.product_type !== 'TRANCHED') throw err('NOT_A_TRANCHED_LOAN', 409);
   if (!['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'IN_ARREARS'].includes(l.status)) {
     throw err(`CANNOT_EDIT_TRANCHES_IN_STATE: ${l.status}`, 409);

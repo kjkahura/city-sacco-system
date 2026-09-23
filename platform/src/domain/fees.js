@@ -2,6 +2,9 @@
 
 const acct = require('./accounting');
 const savings = require('./savings');
+const tax = require('./tax');
+const ledger = require('./ledger');
+const workflow = require('./workflow');
 const { err, round2 } = acct;
 
 /**
@@ -29,7 +32,6 @@ const ymd = (d) => (d instanceof Date
   : String(d).slice(0, 10));
 const today = () => new Date().toISOString().slice(0, 10);
 
-const L = () => require('./loans');
 
 async function productFees(c, productId, types = null) {
   const { rows } = await c.query(
@@ -117,7 +119,6 @@ async function disbursementFees(c, l, { amount, selected = [] }) {
   }
   // Each item carries the gross the member is charged (amount), the income
   // (net) and the tax, where the product taxes fees.
-  const tax = require('./tax');
   const items = [];
   const push = (base) => {
     const tx = tax.split(l, 'FEE', base.net, { taxable: base.taxable });
@@ -150,15 +151,14 @@ async function recordFee(c, l, { productFeeId = null, name, feeType, amount, val
   const date = valueDate ? ymd(valueDate) : today();
   const gl = { glIncome: glIncome || l.gl_fee_inc || l.gl_interest_inc, glReceivable: glReceivable || l.gl_fee_rec };
   // Tax on fees, where the product charges it: the member owes the gross.
-  const tax = require('./tax');
   const tx = tax.split(l, 'FEE', net, { taxable });
   const amt = tx.gross;
 
   let entryId = null;
   if (!settled) {
     await c.query('UPDATE loan_accounts SET fees_due = fees_due + $1, tax_charged = tax_charged + $3, updated_at = now() WHERE id = $2', [amt, l.id, tx.tax]);
-    if (L().isAccrual(l)) {
-      entryId = await L().post(c, l, {
+    if (ledger.isAccrual(l)) {
+      entryId = await ledger.post(c, l, {
         debits: [{ glCode: gl.glReceivable, amount: amt, memberId: l.member_id }],
         credits: tax.incomeCredits(l, tx, gl.glIncome, l.member_id),
         narration: `${name} ${l.account_no}`,
@@ -192,7 +192,7 @@ async function recordFee(c, l, { productFeeId = null, name, feeType, amount, val
  */
 async function placeUpfrontFees(c, l, items) {
   const total = round2(items.reduce((s, x) => s + x.amount, 0));
-  if (!(total > 0) || L().isDynamic(l)) return;
+  if (!(total > 0) || ledger.isDynamic(l)) return;
   const { rows: [first] } = await c.query(
     'SELECT id FROM loan_installments WHERE loan_id = $1 ORDER BY number LIMIT 1', [l.id]);
   if (!first) return;
@@ -255,7 +255,7 @@ async function applyLateFees(c, l, asOf) {
       const amt = feeAmount(fee, {
         principal: Number(l.principal), count: Number(l.term_months), installmentPrincipal: Number(inst.principal_due),
       });
-      const allowed = await require('./workflow').capAllows(c, l, amt);
+      const allowed = await workflow.capAllows(c, l, amt);
       if (!(allowed > 0)) continue;
       await recordFee(c, l, {
         productFeeId: fee.id, name: fee.name, feeType: 'LATE_REPAYMENT', amount: allowed, valueDate: asOf,
@@ -270,7 +270,7 @@ async function applyLateFees(c, l, asOf) {
 
 /** A predefined MANUAL fee, applied by a user. */
 async function applyManualFee(c, loanId, { fee: feeRef, amount = null, note, valueDate, createdBy }) {
-  const l = await L().lock(c, loanId);
+  const l = await ledger.lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   const { rows: [fee] } = await c.query(
     `SELECT * FROM loan_product_fees WHERE product_id = $1 AND is_active AND fee_type = 'MANUAL' AND (code = $2 OR id::text = $2)`,
@@ -285,7 +285,7 @@ async function applyManualFee(c, loanId, { fee: feeRef, amount = null, note, val
 
 /** A fee with any name and amount; only if the product allows it. */
 async function applyArbitraryFee(c, loanId, { name, amount, note, valueDate, createdBy }) {
-  const l = await L().lock(c, loanId);
+  const l = await ledger.lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   if (!l.allow_arbitrary_fees) throw err('PRODUCT_DOES_NOT_ALLOW_ARBITRARY_FEES', 409);
   if (!name || !(round2(amount) > 0)) throw err('FEE_NAME_AND_AMOUNT_REQUIRED', 400);
@@ -297,18 +297,17 @@ async function waive(c, feeId, { reason = '', createdBy } = {}) {
   const { rows: [f] } = await c.query('SELECT * FROM loan_fees WHERE id = $1 FOR UPDATE', [feeId]);
   if (!f) throw err('FEE_NOT_FOUND', 404);
   if (f.status !== 'DUE') throw err(`FEE_NOT_WAIVABLE: ${f.status}`, 409);
-  const l = await L().lock(c, f.loan_id);
+  const l = await ledger.lock(c, f.loan_id);
   const remaining = round2(f.amount - f.paid);
   if (!(remaining > 0)) throw err('FEE_ALREADY_PAID', 409);
 
   let entryId = null;
-  if (f.entry_id && L().isAccrual(l)) {
+  if (f.entry_id && ledger.isAccrual(l)) {
     // The original entry may have been partly paid down; reverse only what
     // is still open, as its own entry, so both sides stay traceable. The
     // tax share, if any, comes back out of the payable.
-    const tax = require('./tax');
     const sp = tax.splitPaid(l, 'FEE', remaining);
-    entryId = await L().post(c, l, {
+    entryId = await ledger.post(c, l, {
       debits: tax.incomeCredits(l, sp, l.gl_fee_inc || l.gl_interest_inc, l.member_id),
       credits: [{ glCode: l.gl_fee_rec, amount: remaining, memberId: l.member_id }],
       narration: `Fee waived ${l.account_no}: ${reason}`,

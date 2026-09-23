@@ -46,19 +46,23 @@ router.get('/register', requireAuth(), async (req, res, next) => {
 });
 
 router.post('/', ...tx(async (c, req, res) => {
-  res.status(201).json(await SH.open(c, req.body));
+  res.status(201);
+  return await SH.open(c, req.body);
 }, TELLER));
 
 router.post('/:id/purchases', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await SH.purchase(c, req.params.id, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await SH.purchase(c, req.params.id, { ...req.body, createdBy: actor });
 }, TELLER));
 
 router.post('/:id/transfers', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await SH.transfer(c, req.params.id, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await SH.transfer(c, req.params.id, { ...req.body, createdBy: actor });
 }, APPROVER));
 
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await SH.reversePurchase(c, req.params.reference, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await SH.reversePurchase(c, req.params.reference, { ...req.body, createdBy: actor });
 }, APPROVER));
 
 router.get('/:id/movements', requireAuth(), async (req, res, next) => {
@@ -107,7 +111,8 @@ dividends.get('/:year/allocations', requireAuth(), async (req, res, next) => {
 // each approved separately, because that is how an AGM decision actually
 // moves through a SACCO.
 dividends.post('/', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await SH.declare(c, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await SH.declare(c, { ...req.body, createdBy: actor });
 }, APPROVER));
 
 dividends.post('/:year/allocate', ...tx((c, req, _res, { actor }) =>

@@ -3,6 +3,9 @@
 const acct = require('./accounting');
 const savings = require('./savings');
 const S = require('./schedule');
+const ledger = require('./ledger');
+const fees = require('./fees');
+const { accrueInterest } = require('./interest');
 const { err, round2 } = acct;
 
 /**
@@ -26,7 +29,6 @@ const { err, round2 } = acct;
  *     more drawdowns, repayment continues.
  */
 
-const L = () => require('./loans');
 const { ymd, isoDate } = S;
 
 const isRevolving = (l) => l.product_type === 'REVOLVING';
@@ -38,18 +40,18 @@ function validUntil(l) {
 
 /** What the member may still draw. */
 function available(l) {
-  return round2(Math.max(0, Number(l.principal) - L().principalOutstanding(l)) + Number(l.credit_balance || 0));
+  return round2(Math.max(0, Number(l.principal) - ledger.principalOutstanding(l)) + Number(l.credit_balance || 0));
 }
 
 /** The billing dates are the product's schedule dates, rolling from the first drawdown. */
 function firstBillingDate(l, from) {
-  const inputs = L().scheduleInputs(l);
+  const inputs = ledger.scheduleInputs(l);
   const [d] = S.nominalDueDates({ start: from, count: 1, interval: inputs.interval, fixedDays: inputs.fixedDays,
     shortMonth: inputs.shortMonth, firstOffsetDays: inputs.firstOffsetDays });
   return isoDate(d);
 }
 function nextBillingDate(l, after) {
-  const inputs = L().scheduleInputs(l);
+  const inputs = ledger.scheduleInputs(l);
   const [d] = S.nominalDueDates({ start: after, count: 1, interval: inputs.interval, fixedDays: inputs.fixedDays, shortMonth: inputs.shortMonth });
   return isoDate(d);
 }
@@ -60,14 +62,14 @@ function nextBillingDate(l, after) {
  * says, the interest owed, and the fees due. Idempotent per date.
  */
 async function bill(c, loanId, { date, createdBy = 'EOD' } = {}) {
-  let l = await L().lock(c, loanId);
+  let l = await ledger.lock(c, loanId);
   if (!isRevolving(l) || !['ACTIVE', 'IN_ARREARS'].includes(l.status)) return null;
   if (!l.next_billing_on || ymd(l.next_billing_on) > date) return null;
   const billing = ymd(l.next_billing_on);
-  await L().accrueInterest(c, l.id, { valueDate: billing, createdBy });
-  await require('./fees').applyPaymentDueFees(c, l, billing);
-  l = await L().lock(c, l.id);
-  const b = L().balances(l);
+  await accrueInterest(c, l.id, { valueDate: billing, createdBy });
+  await fees.applyPaymentDueFees(c, l, billing);
+  l = await ledger.lock(c, l.id);
+  const b = ledger.balances(l);
 
   // Fees and interest not already carried by an earlier installment.
   const { rows: [carried] } = await c.query(
@@ -76,7 +78,7 @@ async function bill(c, loanId, { date, createdBy = 'EOD' } = {}) {
   const interestDue = round2(Math.max(0, b.interest - Number(carried.i)));
   const feeDue = round2(Math.max(0, b.fees - Number(carried.f)));
 
-  const value = Number(l.revolving_repayment_value ?? l.product_revolving_repayment_value ?? 0);
+  const value = ledger.effective(l).revolvingRepaymentValue;
   let principalDue;
   switch (l.revolving_repayment_method) {
     case 'PRINCIPAL_FLAT': principalDue = value; break;
@@ -89,7 +91,7 @@ async function bill(c, loanId, { date, createdBy = 'EOD' } = {}) {
   principalDue = round2(Math.min(principalDue, b.principal));
 
   const { rows: [n] } = await c.query('SELECT COALESCE(max(number), 0) + 1 AS n FROM loan_installments WHERE loan_id = $1', [l.id]);
-  const dueDate = await L().shiftOffClosedDays(c, billing);
+  const dueDate = await ledger.shiftOffClosedDays(c, billing);
   let installment = null;
   if (principalDue > 0 || interestDue > 0 || feeDue > 0) {
     const { rows } = await c.query(
@@ -122,7 +124,7 @@ async function billAll(c, { asOf = null } = {}) {
 
 /** The member tops up their credit balance ahead of a drawdown. */
 async function depositToCreditBalance(c, loanId, { amount, channelId = 'cash', valueDate, createdBy }) {
-  const l = await L().lock(c, loanId);
+  const l = await ledger.lock(c, loanId);
   if (!isRevolving(l)) throw err('NOT_A_REVOLVING_LOAN', 409);
   if (!l.credit_balance_enabled) throw err('CREDIT_BALANCE_NOT_ENABLED', 409);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
@@ -134,7 +136,7 @@ async function depositToCreditBalance(c, loanId, { amount, channelId = 'cash', v
   const ch = (await c.query('SELECT * FROM transaction_channels WHERE id = $1 AND is_active', [channelId])).rows[0];
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
   const date = valueDate ? ymd(valueDate) : isoDate(new Date());
-  const entryId = await L().post(c, l, {
+  const entryId = await ledger.post(c, l, {
     debits: [{ glCode: ch.gl_account_code, amount: amt, memberId: l.member_id }],
     credits: [{ glCode: l.gl_credit_balance, amount: amt, memberId: l.member_id }],
     narration: `Credit balance deposit ${l.account_no}`, sourceType: 'CREDIT_BALANCE_DEPOSIT', sourceId: l.id, channelId,

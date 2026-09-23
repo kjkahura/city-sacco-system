@@ -33,7 +33,6 @@ async function channel(c, id) {
   return rows[0];
 }
 
-/** Amount pledged as loan security and therefore not withdrawable. */
 /**
  * What a member's deposits are committed to: guarantor pledges on others'
  * loans, and funding pledged on approved loans not yet disbursed.
@@ -44,8 +43,23 @@ async function pledgedAmount(c, memberId) {
      FROM loan_guarantors WHERE member_id = $1 AND status = 'PLEDGED'`,
     [memberId]
   );
-  const locked = await require('./funding').lockedFunding(c, memberId);
+  const locked = await lockedFunding(c, memberId);
   return round2(Number(r.total) + locked);
+}
+
+/**
+ * Funding pledged from a member's funding accounts to approved loans not yet
+ * disbursed, where the product locks funds at approval. Kept here rather
+ * than in ./funding because savings sits below the loan modules.
+ */
+async function lockedFunding(c, memberId) {
+  const { rows: [r] } = await c.query(
+    `SELECT COALESCE(SUM(f.amount), 0) AS t
+     FROM loan_funding_sources f
+     JOIN loan_accounts l ON l.id = f.loan_id
+     JOIN loan_products p ON p.id = l.product_id
+     WHERE f.member_id = $1 AND f.status = 'PLEDGED' AND l.status = 'APPROVED' AND p.lock_funds_at_approval`, [memberId]);
+  return round2(r.t);
 }
 
 async function summary(c, accountId) {
@@ -211,4 +225,5 @@ async function open(c, { memberId, productId = 'SAV01', accountNo }) {
   return rows[0];
 }
 
-module.exports = { open, deposit, withdraw, transfer, summary, reverseTransaction, pledgedAmount, lock, record, ref };
+module.exports = {
+  lockedFunding, open, deposit, withdraw, transfer, summary, reverseTransaction, pledgedAmount, lock, record, ref };

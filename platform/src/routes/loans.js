@@ -18,6 +18,10 @@ const RV = require('../domain/revolving');
 const router = express.Router();
 
 /** Every handler runs inside one tenant transaction. */
+// The handler returns its result and the wrapper sends it after COMMIT. A
+// handler that wants 201 sets res.status(201) and returns; it never sends
+// the body itself, or the client could hear "created" for a transaction
+// that then fails to commit, or read before the row is visible.
 const tx = (handler, roles = []) => [
   requireAuth(...roles),
   async (req, res, next) => {
@@ -141,12 +145,14 @@ router.get('/:id/eligibility', ...read(async (c, req) => {
 
 router.post('/', ...tx(async (c, req, res, { actor }) => {
   const loan = await L.apply(c, { ...req.body, createdBy: actor });
-  res.status(201).json(loan);
+  res.status(201);
+  return loan;
 }, TELLER));
 
 router.post('/:id/guarantors', ...tx(async (c, req, res) => {
   const g = await L.addGuarantor(c, req.params.id, req.body);
-  res.status(201).json(g);
+  res.status(201);
+  return g;
 }, TELLER));
 
 // --- state ----------------------------------------------------------------
@@ -182,7 +188,8 @@ router.put('/:id/tranches', ...tx((c, req, _res, { actor }) => TR.setTranches(c,
 
 router.get('/:id/collateral', ...read((c, req) => SEC.forLoan(c, req.params.id)));
 router.post('/:id/collateral', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await SEC.addCollateral(c, req.params.id, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await SEC.addCollateral(c, req.params.id, { ...req.body, createdBy: actor });
 }, TELLER));
 router.post('/collateral/:collateralId/release', ...tx((c, req, _res, { actor }) =>
   SEC.releaseCollateral(c, req.params.collateralId, { ...req.body, createdBy: actor }), APPROVER));
@@ -192,12 +199,14 @@ router.get('/:id/funding', ...read(async (c, req) => {
   return l ? FU.fundingOf(c, l.id) : null;
 }));
 router.post('/:id/funding', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await FU.addFundingSource(c, req.params.id, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await FU.addFundingSource(c, req.params.id, { ...req.body, createdBy: actor });
 }, TELLER));
 router.delete('/funding/:fundingId', ...tx((c, req, _res, { actor }) => FU.removeFundingSource(c, req.params.fundingId, { createdBy: actor }), TELLER));
 
 router.post('/:id/credit-balance-deposits', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await RV.depositToCreditBalance(c, req.params.id, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await RV.depositToCreditBalance(c, req.params.id, { ...req.body, createdBy: actor });
 }, TELLER));
 router.post('/revolving/bill', ...tx((c, req) => RV.billAll(c, req.body), APPROVER));
 
@@ -207,7 +216,8 @@ router.get('/:id/fees', ...read((c, req) => F.forLoan(c, req.params.id)));
 router.post('/:id/fees', ...tx(async (c, req, res, { actor }) => {
   const body = { ...req.body, createdBy: actor };
   const out = body.fee ? await F.applyManualFee(c, req.params.id, body) : await F.applyArbitraryFee(c, req.params.id, body);
-  res.status(201).json(out);
+  res.status(201);
+  return out;
 }, TELLER));
 router.post('/fees/:feeId/waive', ...tx((c, req, _res, { actor }) =>
   F.waive(c, req.params.feeId, { ...req.body, createdBy: actor }), APPROVER));
@@ -215,11 +225,13 @@ router.post('/fees/:feeId/waive', ...tx((c, req, _res, { actor }) =>
 // --- money ----------------------------------------------------------------
 
 router.post('/:id/disbursements', ...tx(async (c, req, res, { actor, user }) => {
-  res.status(201).json(await L.disburse(c, req.params.id, { ...req.body, createdBy: actor, user }));
+  res.status(201);
+  return await L.disburse(c, req.params.id, { ...req.body, createdBy: actor, user });
 }, APPROVER));
 
 router.post('/:id/repayments', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await L.repay(c, req.params.id, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await L.repay(c, req.params.id, { ...req.body, createdBy: actor });
 }, TELLER));
 
 router.post('/:id/accrue-interest', ...tx(async (c, req, res, { actor }) => {
@@ -230,17 +242,20 @@ router.post('/:id/accrue-interest', ...tx(async (c, req, res, { actor }) => {
 // Restructuring closes the loan and opens a linked one; a management decision.
 for (const [path, kind] of [['reschedule', 'RESCHEDULE'], ['refinance', 'REFINANCE']]) {
   router.post(`/:id/${path}`, ...tx(async (c, req, res, { actor }) => {
-    res.status(201).json(await R.restructure(c, req.params.id, { ...req.body, kind, createdBy: actor }));
+    res.status(201);
+    return await R.restructure(c, req.params.id, { ...req.body, kind, createdBy: actor });
   }, APPROVER));
 }
 
 router.post('/:id/write-off', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await L.writeOff(c, req.params.id, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await L.writeOff(c, req.params.id, { ...req.body, createdBy: actor });
 }, APPROVER));
 
 // Corrections are reversals. There is no PUT or DELETE on a transaction.
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
-  res.status(201).json(await L.reverseTransaction(c, req.params.reference, { ...req.body, createdBy: actor }));
+  res.status(201);
+  return await L.reverseTransaction(c, req.params.reference, { ...req.body, createdBy: actor });
 }, APPROVER));
 
 router.get('/:id/penalties', requireAuth(), async (req, res, next) => {

@@ -21,8 +21,14 @@ const { err, round2 } = acct;
  * and re-pledged on the new one for the same amounts.
  */
 
-const L = () => require('./loans');
-const W = () => require('./workflow');
+const L = require('./ledger');
+const W = require('./workflow');
+const loans = require('./loans');
+const fees = require('./fees');
+const funding = require('./funding');
+const eligibility = require('./eligibility');
+const { accrueInterest } = require('./interest');
+const { buildSchedule } = require('./installments');
 
 const ymd = (d) => (d instanceof Date
   ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -39,20 +45,20 @@ async function restructure(c, loanId, {
   if (kind === 'REFINANCE' && !(extra > 0)) throw err('REFINANCE_NEEDS_A_TOP_UP', 400);
   if (kind === 'RESCHEDULE' && extra > 0) throw err('RESCHEDULE_TAKES_NO_TOP_UP', 400);
 
-  let old = await L().lock(c, loanId);
+  let old = await L.lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS', 'LOCKED'].includes(old.status)) throw err(`LOAN_NOT_RESTRUCTURABLE: ${old.status}`, 409);
   if (Number(old.credit_balance) > 0) throw err(`LOAN_HAS_A_CREDIT_BALANCE: ${old.credit_balance}`, 409);
-  if (await require('./funding').isFunded(c, old.id)) throw err('FUNDED_LOANS_CANNOT_BE_RESTRUCTURED_HERE', 409);
+  if (await funding.isFunded(c, old.id)) throw err('FUNDED_LOANS_CANNOT_BE_RESTRUCTURED_HERE', 409);
   const term = Number(termMonths);
   if (!(Number.isInteger(term) && term > 0)) throw err('INVALID_TERM', 400);
 
   // Interest owed is brought up to the date first, so the figure being
   // capitalised or written off is the real one.
-  if (L().isDynamic(old) && old.status !== 'LOCKED') {
-    await L().accrueInterest(c, old.id, { valueDate: date, createdBy });
-    old = await L().lock(c, old.id);
+  if (L.isDynamic(old) && old.status !== 'LOCKED') {
+    await accrueInterest(c, old.id, { valueDate: date, createdBy });
+    old = await L.lock(c, old.id);
   }
-  const b = L().balances(old);
+  const b = L.balances(old);
   const charges = round2(b.interest + b.fees + b.penalty);
   const newProductId = productId || old.product_id;
   const { rows: [np] } = await c.query('SELECT * FROM loan_products WHERE id = $1 AND is_active', [newProductId]);
@@ -68,7 +74,7 @@ async function restructure(c, loanId, {
   const debits = [];
   const credits = [];
   const mid = old.member_id;
-  const books = L().booksEntries(old) && np.accounting_method !== 'NONE';
+  const books = L.booksEntries(old) && np.accounting_method !== 'NONE';
   let channel = null;
   if (extra > 0) {
     channel = (await c.query('SELECT * FROM transaction_channels WHERE id = $1 AND is_active', [channelId])).rows[0];
@@ -79,19 +85,19 @@ async function restructure(c, loanId, {
     debits.push({ glCode: np.gl_portfolio, amount: round2(b.principal + capitalized + extra), memberId: mid });
     credits.push({ glCode: old.gl_portfolio, amount: b.principal, memberId: mid });
     if (extra > 0) credits.push({ glCode: channel.gl_account_code, amount: extra, memberId: mid });
-    const accrual = L().isAccrual(old);
+    const accrual = L.isAccrual(old);
     for (const [component, amount] of [['INTEREST', b.interest], ['FEE', b.fees], ['PENALTY', b.penalty]]) {
       if (!(amount > 0)) continue;
       if (capitalized > 0) {
         // Capitalised charges: under accrual they clear the receivable that
         // held them; under cash they are recognised as income now, since
         // they have become principal the member will repay.
-        credits.push({ glCode: accrual ? L().writeOffCredit(old, component) : L().paidCredit(old, component), amount, memberId: mid });
+        credits.push({ glCode: accrual ? L.writeOffCredit(old, component) : L.paidCredit(old, component), amount, memberId: mid });
       } else if (accrual) {
         // Written off: expense against the receivable. Under cash nothing
         // was ever recognised, so there is nothing to write off in the ledger.
         debits.push({ glCode: old.gl_writeoff_exp, amount, memberId: mid });
-        credits.push({ glCode: L().writeOffCredit(old, component), amount, memberId: mid });
+        credits.push({ glCode: L.writeOffCredit(old, component), amount, memberId: mid });
       }
     }
   }
@@ -111,10 +117,10 @@ async function restructure(c, loanId, {
      WHERE id = $7`,
     [b.principal, b.interest, b.fees, b.penalty, closedStatus, date, old.id]);
   await c.query("UPDATE loan_fees SET status = CASE WHEN status = 'DUE' THEN 'PAID' ELSE status END, paid = amount WHERE loan_id = $1 AND status = 'DUE'", [old.id]);
-  await W().history(c, old.id, { from: old.status, to: closedStatus, action: kind, actor: createdBy, note });
+  await W.history(c, old.id, { from: old.status, to: closedStatus, action: kind, actor: createdBy, note });
 
   // ---- open the new one ----------------------------------------------------
-  const created = await L().apply(c, {
+  const created = await loans.apply(c, {
     memberId: mid, productId: newProductId, principal: newPrincipal, termMonths: term,
     monthlyRate, purpose: `${kind === 'REFINANCE' ? 'Refinance' : 'Reschedule'} of ${old.account_no}`, notes: note, createdBy,
   });
@@ -123,16 +129,16 @@ async function restructure(c, loanId, {
        principal_disbursed = $4, disbursed_on = $2::date, accrued_through = $2::date, disbursed_by = $3, updated_at = now()
      WHERE id = $5`,
     [old.id, date, createdBy || 'SYSTEM', newPrincipal, created.id]);
-  await W().history(c, created.id, { from: created.status, to: 'ACTIVE', action: kind, actor: createdBy, note: `from ${old.account_no}` });
-  const fresh = await L().lock(c, created.id);
-  await L().buildSchedule(c, fresh);
+  await W.history(c, created.id, { from: created.status, to: 'ACTIVE', action: kind, actor: createdBy, note: `from ${old.account_no}` });
+  const fresh = await L.lock(c, created.id);
+  await buildSchedule(c, fresh);
   // The new product's payment-due fees, if fixed-term, land with the schedule.
-  await require('./fees').applyPaymentDueFees(c, fresh, L().isDynamic(fresh) ? date : '9999-12-31');
+  await fees.applyPaymentDueFees(c, fresh, L.isDynamic(fresh) ? date : '9999-12-31');
 
   // Guarantors follow.
   const { rows: gs } = await c.query(
     "SELECT member_id, pledged_amount FROM loan_guarantors WHERE loan_id = $1 AND status = 'PLEDGED'", [old.id]);
-  await L().releaseGuarantors(c, old.id);
+  await eligibility.releaseGuarantors(c, old.id);
   for (const g of gs) {
     await c.query('INSERT INTO loan_guarantors (loan_id, member_id, pledged_amount) VALUES ($1,$2,$3)', [created.id, g.member_id, g.pledged_amount]);
   }

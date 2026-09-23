@@ -86,13 +86,21 @@ src/
   domain/
     accounting.js      double-entry posting, reversal, trial balance
     close.js           financial years, year-end close, statutory reserve
-    loans.js           lifecycle, disbursement, accrual, allocation, guarantors,
-                       eligibility, account numbering
     schedule.js        the schedule engine: dates, rates, interest types, lines
                        (pure functions, no database)
+    ledger.js          the loan core: reading a loan with its product,
+                       balances, the override list, accounting rules
+    installments.js    drawing, previewing and redrawing schedules; spreading
+                       payments over installments
+    interest.js        accrual by product type and interest type, capitalising
+    eligibility.js     guarantors, cover, the rules checked at approval
+    controls.js        tenant lending controls, user approval and
+                       disbursement limits
+    loans.js           application, disbursement, repayment, write-off,
+                       reversal, account numbering
     fees.js            product fees of every type, applying, waiving, settling
-    workflow.js        states and undo, approval and disbursement limits,
-                       amendments by state, arrears, cap on charges, controls
+    workflow.js        states and undo, amendments by state, arrears, cap on
+                       charges
     restructure.js     reschedule and refinance
     tranches.js        tranched disbursement
     revolving.js       revolving credit: drawdowns, billing, credit balance
@@ -321,6 +329,55 @@ product type is frozen from creation: a SACCO that needs different
 arithmetic creates a new product. Every setting has a default that
 reproduces the behaviour before it existed, so an existing product is
 unchanged until somebody edits it.
+
+### What a loan may carry of its own
+
+Most settings belong to the product and are read from it every time. A
+short declared list, `OVERRIDES` in `src/domain/ledger.js`, names the ones a
+loan may hold its own value for, and says how each behaves:
+
+| Override | Loan column | Mode | Band on the product | Only for |
+|---|---|---|---|---|
+| `monthlyRate` | `monthly_rate` | SNAPSHOT | `rate_min`, `rate_max` | not INTEREST_FREE |
+| `firstDueOffsetDays` | `first_due_offset_days` | SNAPSHOT | `first_due_offset_min/max` | |
+| `penaltyRate` | `penalty_rate` | INHERIT | `penalty_rate_min/max` | |
+| `gracePeriods` | `grace_periods` | INHERIT | fewer than the installments | |
+| `amortizationPeriods` | `amortization_periods` | INHERIT | at least the installments | |
+| `arrearsToleranceDays` | `arrears_tolerance_days` | INHERIT | | |
+| `arrearsTolerancePercent` | `arrears_tolerance_percent` | INHERIT | | |
+| `revolvingRepaymentValue` | `revolving_repayment_value` | INHERIT | | REVOLVING |
+| `orgCommission` | `org_commission` | INHERIT | `org_commission_min/max` | funded products |
+
+SNAPSHOT values are copied from the product when the loan is opened and do
+not move after that. INHERIT values stay NULL on the loan unless someone
+sets them, and NULL means "use the product's value as it is now", so
+editing the product changes every loan that has not set its own. Clearing
+an INHERIT value hands it back to the product; a SNAPSHOT value cannot be
+cleared. Application and amendment validate against the same list, the
+loan read (`ledger.effective`) resolves from it, and set-based SQL such as
+the arrears and penalty jobs uses `ledger.overrideSql`, so the four cannot
+disagree. Adding an override is one entry in the list plus its column.
+
+### How the loan modules depend on each other
+
+Each module requires only modules below it, at the top of the file:
+
+    accounting, schedule
+    tax, savings, controls
+    ledger
+    eligibility, funding, tranches
+    securities
+    workflow
+    fees, penalties
+    installments
+    interest
+    revolving
+    loans
+    restructure
+
+`test/loan-structure.test.js` fails if a cycle or a require inside a function
+comes back. `loans.js` re-exports the lower modules' functions under their
+old names, so routes, the EOD job and older tests use one import.
 
 ### The configuration, setting by setting
 
