@@ -8,6 +8,9 @@ const funding = require('./funding');
 const workflow = require('./workflow');
 const provisioning = require('./provisioning');
 const PA = require('./productAccounting');
+const types = require('./productTypes');
+const { accrueInterest } = require('./interest');
+const { pageQuery } = require('../lib/page');
 const { err, round2 } = acct;
 const { lock, balances, isAccrual, interestAccrues, writeOffCredit, post, booksEntries } = ledger;
 
@@ -38,6 +41,15 @@ const { lock, balances, isAccrual, interestAccrues, writeOffCredit, post, booksE
  * Reversing a write-off restores the loan exactly as it was (state,
  * guarantors, collateral) and is refused while recoveries stand against it;
  * reversing a recovery puts the money back where it came from.
+ *
+ * A write-off is requested and approved by different people (maker-checker)
+ * unless the tenant turns that off (lending_controls.
+ * write_off_requires_approval); the approver's approval limit applies to
+ * the amount written off. It may be dated back, to no earlier than the last
+ * repayment or disbursement on the loan; interest on a loan that accrues on
+ * the actual balance is brought to that date first. Every write-off is in
+ * the register, with who asked, who approved, why, and what has been
+ * recovered since.
  */
 
 const WRITABLE = ['ACTIVE', 'IN_ARREARS', 'LOCKED'];
@@ -50,13 +62,37 @@ const ymd = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d)
 // The write-off
 // --------------------------------------------------------------------------
 
-async function writeOff(c, loanId, { narration, createdBy } = {}) {
-  const l = await lock(c, loanId);
+/**
+ * The date a write-off may carry: today by default; not in the future, not
+ * before disbursement, and not before a repayment or disbursement already
+ * on the loan (the write-off would then precede money that moved after it).
+ */
+async function writeOffDate(c, l, valueDate) {
+  const date = valueDate ? ymd(valueDate) : today();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw err('INVALID_VALUE_DATE', 400);
+  if (date > today()) throw err('WRITE_OFF_CANNOT_BE_DATED_IN_THE_FUTURE', 400);
+  if (l.disbursed_on && date < ymd(l.disbursed_on)) throw err(`WRITE_OFF_BEFORE_DISBURSEMENT: ${ymd(l.disbursed_on)}`, 400);
+  const { rows: [t] } = await c.query(
+    `SELECT max(value_date) AS d FROM transactions
+     WHERE loan_account_id = $1 AND kind IN ('LOAN_REPAYMENT', 'LOAN_DISBURSEMENT') AND reversed_by IS NULL`, [l.id]);
+  if (t?.d && date < ymd(t.d)) throw err(`WRITE_OFF_BEFORE_LAST_TRANSACTION: ${ymd(t.d)}`, 409);
+  return date;
+}
+
+async function writeOff(c, loanId, { narration, createdBy, valueDate } = {}) {
+  let l = await lock(c, loanId);
   if (!WRITABLE.includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   await workflow.assertMayWriteOff(c, l);
+  const date = await writeOffDate(c, l, valueDate);
+  // What is written off includes the interest earned to the date on a loan
+  // that accrues on the actual balance. Interest already accrued past a
+  // back date stays owed and is written off with the rest.
+  if (types.forLoan(l).bringsInterestToDate && l.status !== 'LOCKED') {
+    await accrueInterest(c, l.id, { valueDate: date, createdBy });
+    l = await lock(c, l.id);
+  }
   const b = balances(l);
   if (b.total <= 0) throw err('NOTHING_TO_WRITE_OFF', 409);
-  const date = today();
 
   // Each component is cleared against the account that holds it: principal
   // out of the portfolio, and under accrual the interest, fee and penalty
@@ -111,6 +147,157 @@ async function writeOff(c, loanId, { narration, createdBy } = {}) {
     },
     narration, createdBy,
   });
+}
+
+// --------------------------------------------------------------------------
+// Requests and approval
+// --------------------------------------------------------------------------
+
+async function pending(c, loanId) {
+  const { rows: [r] } = await c.query(
+    "SELECT * FROM loan_write_off_requests WHERE loan_id = $1 AND status = 'PENDING' FOR UPDATE", [loanId]);
+  return r || null;
+}
+
+async function audit(c, actor, action, id, after) {
+  await c.query(
+    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,$2,'loan_write_off_request',$3,$4)`,
+    [actor || 'SYSTEM', action, id, JSON.stringify(after)]);
+}
+
+/**
+ * Ask for a loan to be written off. The same checks as the write-off run
+ * now, so a request that could never be approved is refused at once. Where
+ * the tenant does not require approval the write-off happens here and the
+ * request is recorded as approved by the same user.
+ */
+async function requestWriteOff(c, loanId, { reason, narration, valueDate, createdBy, user = null } = {}) {
+  const why = String(reason ?? narration ?? '').trim();
+  if (!why) throw err('A_WRITE_OFF_NEEDS_A_REASON', 400);
+  const l = await lock(c, loanId);
+  if (!WRITABLE.includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
+  await workflow.assertMayWriteOff(c, l);
+  const date = await writeOffDate(c, l, valueDate);
+  const b = balances(l);
+  if (b.total <= 0) throw err('NOTHING_TO_WRITE_OFF', 409);
+  const open = await pending(c, l.id);
+  if (open) throw err(`WRITE_OFF_ALREADY_REQUESTED: by ${open.requested_by}`, 409);
+
+  const ctl = await workflow.controls(c);
+  const needsApproval = ctl.write_off_requires_approval !== false;
+  const { rows: [req] } = await c.query(
+    `INSERT INTO loan_write_off_requests (loan_id, reason, value_date, amount_at_request, requested_by)
+     VALUES ($1,$2,$3::date,$4,$5) RETURNING *`, [l.id, why, date, b.total, createdBy || 'SYSTEM']);
+  await audit(c, createdBy, 'LOAN_WRITE_OFF_REQUESTED', req.id, { loan: l.account_no, amount: b.total, valueDate: date, reason: why });
+  if (needsApproval) return { request: req, transaction: null };
+  return decide(c, l.id, { approve: true, createdBy, user, selfApproved: true });
+}
+
+/**
+ * Approve or reject the pending request. The approver may not be the one
+ * who asked, and the amount written off must be within their approval limit.
+ */
+async function decide(c, loanId, { approve, note = null, createdBy, user = null, selfApproved = false } = {}) {
+  const l = await lock(c, loanId);
+  const req = await pending(c, l.id);
+  if (!req) throw err('NO_PENDING_WRITE_OFF', 404);
+  if (!approve) {
+    const { rows: [out] } = await c.query(
+      `UPDATE loan_write_off_requests SET status = 'REJECTED', decided_by = $2, decided_at = now(), decision_note = $3
+       WHERE id = $1 RETURNING *`, [req.id, createdBy || 'SYSTEM', note]);
+    await audit(c, createdBy, 'LOAN_WRITE_OFF_REJECTED', req.id, { loan: l.account_no, note });
+    return { request: out, transaction: null };
+  }
+  if (!selfApproved && req.requested_by === (createdBy || 'SYSTEM')) {
+    throw err('WRITE_OFF_REQUESTER_CANNOT_APPROVE: a second person approves a write-off', 403);
+  }
+  const lim = await workflow.userLimits(c, user);
+  const amount = balances(l).total;
+  if (lim.approval !== null && amount > Number(lim.approval)) {
+    throw err(`ABOVE_YOUR_APPROVAL_LIMIT: limit ${Number(lim.approval)}, write-off ${amount}`, 403);
+  }
+  const tx = await writeOff(c, l.id, { narration: req.reason, valueDate: req.value_date, createdBy });
+  const { rows: [out] } = await c.query(
+    `UPDATE loan_write_off_requests SET status = 'APPROVED', decided_by = $2, decided_at = now(), decision_note = $3, transaction_id = $4
+     WHERE id = $1 RETURNING *`, [req.id, createdBy || 'SYSTEM', note || (selfApproved ? 'approval not required by the tenant' : null), tx.id]);
+  await audit(c, createdBy, 'LOAN_WRITE_OFF_APPROVED', req.id, { loan: l.account_no, amount: Number(tx.amount), transaction: tx.reference });
+  return { request: out, transaction: tx };
+}
+
+async function requestsFor(c, loanId) {
+  const { rows } = await c.query(
+    `SELECT r.* FROM loan_write_off_requests r JOIN loan_accounts l ON l.id = r.loan_id
+     WHERE l.id::text = $1 OR l.account_no = $1 ORDER BY r.requested_at DESC`, [loanId]);
+  return rows;
+}
+
+/** The approver's queue. */
+async function pendingRequests(c, source = {}) {
+  return pageQuery(c,
+    `SELECT r.*, l.account_no, l.branch_id, m.member_no, m.first_name, m.last_name
+     FROM loan_write_off_requests r JOIN loan_accounts l ON l.id = r.loan_id JOIN members m ON m.id = l.member_id
+     WHERE r.status = 'PENDING' ORDER BY r.requested_at`, [], source);
+}
+
+// --------------------------------------------------------------------------
+// The register
+// --------------------------------------------------------------------------
+
+/**
+ * Every written-off loan in a period (by write-off date), with what was
+ * written off by component, how much of it the allowance took, who asked
+ * and who approved and why, what has been recovered since (from guarantors
+ * among it) and what is still owed. Totals are for the whole period, not
+ * the page, and add the recoveries received in the period on loans written
+ * off at any time.
+ */
+async function register(c, { from = null, to = null, branchId = null, ...source } = {}) {
+  const params = [from || null, to || null, branchId || null];
+  const where = `l.status = 'CLOSED_WRITTEN_OFF'
+    AND ($1::date IS NULL OR l.written_off_on >= $1::date) AND ($2::date IS NULL OR l.written_off_on <= $2::date)
+    AND ($3::uuid IS NULL OR l.branch_id = $3::uuid)`;
+  const base = `
+    SELECT l.id, l.account_no, l.product_id, l.branch_id, m.member_no, m.first_name, m.last_name,
+           l.written_off_on, l.written_off_by, l.written_off_amount::float8 AS written_off_amount,
+           l.recovered::float8 AS recovered, (l.written_off_amount - l.recovered)::float8 AS outstanding,
+           COALESCE((t.allocation->>'principal')::float8, 0) AS principal,
+           COALESCE((t.allocation->>'interest')::float8, 0) AS interest,
+           COALESCE((t.allocation->>'fees')::float8, 0) AS fees,
+           COALESCE((t.allocation->>'penalty')::float8, 0) AS penalty,
+           COALESCE((t.allocation->>'allowanceUsed')::float8, 0) AS allowance_used,
+           t.reference AS write_off_reference,
+           r.reason, r.requested_by, r.decided_by AS approved_by,
+           (SELECT count(*)::int FROM loan_guarantors g WHERE g.loan_id = l.id AND g.status IN ('CALLED', 'RECOVERED')) AS guarantors_called,
+           (SELECT COALESCE(sum(g.recovered), 0)::float8 FROM loan_guarantors g WHERE g.loan_id = l.id) AS recovered_from_guarantors
+    FROM loan_accounts l
+    JOIN members m ON m.id = l.member_id
+    LEFT JOIN LATERAL (SELECT reference, allocation FROM transactions
+                       WHERE loan_account_id = l.id AND kind = 'LOAN_WRITE_OFF' AND reversed_by IS NULL
+                       ORDER BY created_at DESC LIMIT 1) t ON true
+    LEFT JOIN LATERAL (SELECT reason, requested_by, decided_by FROM loan_write_off_requests
+                       WHERE loan_id = l.id AND status = 'APPROVED' ORDER BY decided_at DESC LIMIT 1) r ON true
+    WHERE ${where}`;
+  const page = await pageQuery(c, `${base} ORDER BY l.written_off_on DESC, l.account_no`, params, source);
+  const { rows: [tot] } = await c.query(
+    `SELECT count(*)::int AS loans, COALESCE(sum(written_off_amount), 0)::float8 AS written_off,
+            COALESCE(sum(principal), 0)::float8 AS principal, COALESCE(sum(interest), 0)::float8 AS interest,
+            COALESCE(sum(fees), 0)::float8 AS fees, COALESCE(sum(penalty), 0)::float8 AS penalty,
+            COALESCE(sum(allowance_used), 0)::float8 AS allowance_used,
+            COALESCE(sum(recovered), 0)::float8 AS recovered, COALESCE(sum(outstanding), 0)::float8 AS outstanding
+     FROM (${base}) x`, params);
+  const { rows: [inPeriod] } = await c.query(
+    `SELECT COALESCE(sum(t.amount), 0)::float8 AS amount, count(*)::int AS n
+     FROM transactions t JOIN loan_accounts l ON l.id = t.loan_account_id
+     WHERE t.kind = 'LOAN_RECOVERY' AND t.reversed_by IS NULL
+       AND ($1::date IS NULL OR t.value_date >= $1::date) AND ($2::date IS NULL OR t.value_date <= $2::date)
+       AND ($3::uuid IS NULL OR l.branch_id = $3::uuid)`, params);
+  const r2 = (x) => round2(x);
+  return {
+    from, to, branchId,
+    ...page,
+    totals: Object.fromEntries(Object.entries(tot).map(([k, v]) => [k, k === 'loans' ? v : r2(v)])),
+    recoveriesInPeriod: { amount: r2(inPeriod.amount), count: inPeriod.n },
+  };
 }
 
 // --------------------------------------------------------------------------
@@ -298,4 +485,7 @@ async function reverse(c, tx, { narration = 'Reversal', createdBy } = {}) {
   throw err(`NOT_A_WRITE_OFF_TRANSACTION: ${tx.kind}`, 409);
 }
 
-module.exports = { writeOff, recover, recoverFromGuarantor, releaseCall, reverse, SOURCES };
+module.exports = {
+  writeOff, requestWriteOff, decide, requestsFor, pendingRequests, register,
+  recover, recoverFromGuarantor, releaseCall, reverse, SOURCES,
+};

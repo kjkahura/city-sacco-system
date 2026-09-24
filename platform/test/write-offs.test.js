@@ -13,6 +13,7 @@ const { pool } = require('../src/db/pool');
 const { withTenant, withTenantRead } = require('../src/db/tenantContext');
 const { migratePlatform, migrateAllTenants } = require('../src/db/migrate');
 const provision = require('../src/tenancy/provision');
+const { hashPassword } = require('../src/auth/passwords');
 const L = require('../src/domain/loans');
 const S = require('../src/domain/savings');
 const PV = require('../src/domain/provisioning');
@@ -37,10 +38,10 @@ const bal = (code) => Rd((c) => acct.balance(c, code));
 const plus = (n, from = new Date()) => new Date(from.getTime() + n * 86400000).toISOString().slice(0, 10);
 
 let server;
-let token;
-async function call(method, p, body) {
+const tokens = {};
+async function call(method, p, body, who = 'admin') {
   const headers = { 'content-type': 'application/json', 'x-tenant': SLUG };
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (tokens[who]) headers.authorization = `Bearer ${tokens[who]}`;
   const r = await fetch(`http://localhost:${PORT}${p}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
   let d = null; try { d = await r.json(); } catch {}
   return { status: r.status, body: d, reason: d?.errors?.[0]?.errorReason || '' };
@@ -76,7 +77,16 @@ const GL = { glPortfolio: '100-100', glInterestInc: '400-100', glFeeInc: '400-20
     await pool.query('DELETE FROM platform.tenants WHERE slug=$1', [SLUG]);
     await provision.provisionTenant({ slug: SLUG, name: 'Write-off SACCO', mfaRequiredRoles: [], adminEmail: 'admin@wotest.local', adminPassword: PASSWORD });
     await migrateAllTenants({});
-    token = (await call('POST', '/api/auth/login', { email: 'admin@wotest.local', password: PASSWORD })).body.accessToken;
+    const tenant = (await pool.query('SELECT * FROM platform.tenants WHERE slug=$1', [SLUG])).rows[0];
+    const hash = await hashPassword(PASSWORD);
+    for (const [who, limit] of [['checker', null], ['small', 1000]]) {
+      await pool.query(
+        `INSERT INTO platform.users (tenant_id, email, password_hash, full_name, role, approval_limit)
+         VALUES ($1,$2,$3,$2,'MANAGER',$4)`, [tenant.id, `${who}@wotest.local`, hash, limit]);
+    }
+    for (const who of ['admin', 'checker', 'small']) {
+      tokens[who] = (await call('POST', '/api/auth/login', { email: `${who}@wotest.local`, password: PASSWORD }, null)).body.accessToken;
+    }
     const p = await call('POST', '/api/loan-products', {
       id: 'WO01', name: 'Write-off product', ...GL, method: 'REDUCING', monthlyRate: 2, maxTerm: 24,
       enforceDepositMultiplier: false, enableCollateral: true,
@@ -121,14 +131,26 @@ const GL = { glPortfolio: '100-100', glInterestInc: '400-100', glFeeInc: '400-20
     const owed = await balancesOf(loanA.id);
     const expPre = await bal('500-310');
     const allowPre = await bal(PV.GL_ALLOWANCE);
-    const wo = await call('POST', `/api/loans/${loanA.id}/write-off`, { narration: 'absconded' });
-    check('written off', wo.status === 201 && wo.body.allocation.allowanceUsed === 12500, `${wo.status} ${wo.reason} ${JSON.stringify(wo.body?.allocation)}`);
+    const asked = await call('POST', `/api/loans/${loanA.id}/write-off`, { reason: 'absconded' });
+    check('a write-off is requested, not done', asked.status === 201 && asked.body.request.status === 'PENDING' && asked.body.transaction === null
+      && (await loanRow(loanA.id)).status !== 'CLOSED_WRITTEN_OFF', `${asked.status} ${asked.reason}`);
+    const queue = await call('GET', '/api/loans/write-off-requests');
+    check('it waits in the approvers\' queue', queue.status === 200 && queue.body.length === 1 && queue.body[0].account_no === loanA.account_no);
+    check('a second request on the same loan is refused', (await call('POST', `/api/loans/${loanA.id}/write-off`, { reason: 'again' })).status === 409);
+    let dec = await call('POST', `/api/loans/${loanA.id}/write-off/approve`, {});
+    check('the person who asked cannot approve it', dec.status === 403 && /WRITE_OFF_REQUESTER_CANNOT_APPROVE/.test(dec.reason), dec.reason);
+    dec = await call('POST', `/api/loans/${loanA.id}/write-off/approve`, {}, 'small');
+    check('an approver whose limit is below the amount cannot', dec.status === 403 && /ABOVE_YOUR_APPROVAL_LIMIT/.test(dec.reason), dec.reason);
+    const woRes = await call('POST', `/api/loans/${loanA.id}/write-off/approve`, {}, 'checker');
+    const wo = { status: woRes.status, reason: woRes.reason, body: woRes.body?.transaction };
+    check('a second manager approves it and it is written off', woRes.status === 201 && woRes.body.request.status === 'APPROVED'
+      && wo.body.allocation.allowanceUsed === 12500, `${woRes.status} ${woRes.reason} ${JSON.stringify(wo.body?.allocation)}`);
     check('the allowance took 12,500 of the principal', round((await bal(PV.GL_ALLOWANCE)) - allowPre) === 12500);
     check('and the expense the rest', round((await bal('500-310')) - expPre) === round(owed.total - 12500),
       `${round((await bal('500-310')) - expPre)} vs ${round(owed.total - 12500)}`);
     let row = await loanRow(loanA.id);
     check('the loan keeps what was written off, when and by whom', row.status === 'CLOSED_WRITTEN_OFF'
-      && Number(row.written_off_amount) === owed.total && row.written_off_by === 'admin@wotest.local' && Number(row.recovered) === 0);
+      && Number(row.written_off_amount) === owed.total && row.written_off_by === 'checker@wotest.local' && Number(row.recovered) === 0);
     let gs = await guarantors(loanA.id);
     check('both guarantors are called', gs.every((g) => g.status === 'CALLED'));
     check('the collateral is seized', (await Rd(async (c) => (await c.query('SELECT status FROM loan_collateral WHERE loan_id = $1', [loanA.id])).rows[0].status)) === 'SEIZED');
@@ -209,6 +231,58 @@ const GL = { glPortfolio: '100-100', glInterestInc: '400-100', glFeeInc: '400-20
     const hist = (await call('GET', `/api/loans/${loanA.id}/history`)).body.map((h) => h.action);
     check('the history shows the write-off and its undoing', hist.includes('WRITE_OFF') && hist.at(-1) === 'UNDO_WRITE_OFF', hist.join(','));
     await assertBalanced('reversals');
+
+    // ----------------------------------------------------------------------
+    section('rejection, back-dating and the register');
+    const m4 = await T((c) => newMember(c, 1000));
+    const loanC = await T(async (c) => {
+      const l = await L.apply(c, { memberId: m4.m.id, productId: 'WO01', principal: 8000, termMonths: 4, createdBy: 'officer' });
+      await L.changeState(c, l.id, 'APPROVE', { createdBy: 'manager' });
+      await L.disburse(c, l.id, { amount: 8000, channelId: 'bank', valueDate: plus(-60), createdBy: 'teller' });
+      await L.repay(c, l.id, { amount: 1000, channelId: 'cash', valueDate: plus(-20), createdBy: 'teller' });
+      return l;
+    });
+    r = await call('POST', `/api/loans/${loanC.id}/write-off`, {});
+    check('a write-off needs a reason', r.status === 400 && /A_WRITE_OFF_NEEDS_A_REASON/.test(r.reason), r.reason);
+    r = await call('POST', `/api/loans/${loanC.id}/write-off`, { reason: 'deceased', valueDate: plus(1) });
+    check('it cannot be dated in the future', r.status === 400, r.reason);
+    r = await call('POST', `/api/loans/${loanC.id}/write-off`, { reason: 'deceased', valueDate: plus(-30) });
+    check('nor before the last repayment on the loan', r.status === 409 && /WRITE_OFF_BEFORE_LAST_TRANSACTION/.test(r.reason), r.reason);
+    r = await call('POST', `/api/loans/${loanC.id}/write-off`, { reason: 'deceased', valueDate: plus(-10) });
+    check('dated back ten days, it is requested', r.status === 201, r.reason);
+    r = await call('POST', `/api/loans/${loanC.id}/write-off/reject`, { note: 'estate may pay' }, 'checker');
+    check('a request can be rejected, and the loan runs on', r.status === 200 && r.body.request.status === 'REJECTED'
+      && (await loanRow(loanC.id)).status !== 'CLOSED_WRITTEN_OFF', `${r.status} ${r.reason}`);
+    r = await call('POST', `/api/loans/${loanC.id}/write-off`, { reason: 'deceased', valueDate: plus(-10) });
+    const cDone = await call('POST', `/api/loans/${loanC.id}/write-off/approve`, {}, 'checker');
+    row = await loanRow(loanC.id);
+    const ymd = (d) => (d instanceof Date ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : String(d).slice(0, 10));
+    check('asked again and approved, it is written off on the date asked for',
+      cDone.status === 201 && ymd(row.written_off_on) === plus(-10) && ymd(cDone.body.transaction.value_date) === plus(-10),
+      `${cDone.status} ${cDone.reason} ${row.written_off_on}`);
+    const entryDate = await Rd(async (c) => (await c.query('SELECT booking_date FROM journal_entries WHERE id = $1', [cDone.body.transaction.entry_id])).rows[0].booking_date);
+    check('and booked on that date', ymd(entryDate) === plus(-10), String(entryDate));
+
+    await T((c) => c.query('UPDATE lending_controls SET write_off_requires_approval = false WHERE id = 1'));
+    const again = await call('POST', `/api/loans/${loanA.id}/write-off`, { reason: 'absconded, confirmed' });
+    check('where the tenant does not require approval, the request writes the loan off at once',
+      again.status === 201 && again.body.transaction?.kind === 'LOAN_WRITE_OFF' && again.body.request.status === 'APPROVED'
+      && again.body.request.decided_by === 'admin@wotest.local', `${again.status} ${again.reason}`);
+    await call('POST', `/api/loans/${loanA.id}/recoveries`, { amount: 500, channelId: 'cash' });
+
+    const reg = await call('GET', `/api/loans/write-offs?from=${plus(-30)}&to=${plus(0)}`);
+    const aRow = reg.body.items?.find((x) => x.account_no === loanA.account_no);
+    const cRow = reg.body.items?.find((x) => x.account_no === loanC.account_no);
+    check('the register lists both write-offs in the period', reg.status === 200 && reg.body.total === 2 && aRow && cRow, `${reg.status} ${reg.reason} ${reg.body?.total}`);
+    check('with who asked, who approved and why', cRow?.requested_by === 'admin@wotest.local' && cRow?.approved_by === 'checker@wotest.local' && cRow?.reason === 'deceased');
+    check('with the split, the allowance used and what has been recovered', aRow?.principal === 50000 && aRow?.recovered === 500
+      && aRow?.outstanding === round(aRow.written_off_amount - 500) && aRow?.allowance_used > 0, JSON.stringify(aRow));
+    check('and totals for the period', reg.body.totals.loans === 2 && reg.body.totals.written_off === round(aRow.written_off_amount + cRow.written_off_amount)
+      && reg.body.totals.recovered === 500, JSON.stringify(reg.body.totals));
+    check('recoveries received in the period count those reversed out: only standing ones', reg.body.recoveriesInPeriod.amount === 500, JSON.stringify(reg.body.recoveriesInPeriod));
+    const before = await call('GET', `/api/loans/write-offs?to=${plus(-11)}`);
+    check('a period before both write-offs is empty', before.body.total === 0 && before.body.totals.written_off === 0);
+    await assertBalanced('everything');
   } catch (e) {
     fail++; failures.push(`threw: ${e.stack}`);
     console.error(`\nFAILED: ${e.stack}`);

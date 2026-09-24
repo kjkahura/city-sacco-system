@@ -285,7 +285,8 @@ POST /api/loans/:id/approve            state machine, 409 on bad transition
 POST /api/loans/:id/disbursements      posts to GL, generates the schedule
 POST /api/loans/:id/repayments         allocation, posts to GL
 POST /api/loans/:id/accrue-interest
-POST /api/loans/:id/write-off          calls the guarantors, seizes collateral
+POST /api/loans/:id/write-off          request; /write-off/approve|reject
+GET  /api/loans/write-offs             the written-off register
 POST /api/loans/:id/recoveries         money recovered after a write-off
 POST /api/loans/:id/guarantors/:gid/recover|release-call
 POST /api/loans/transactions/:ref/reversal
@@ -633,7 +634,8 @@ not disburse. The loan records `approved_by` and `disbursed_by`.
 the tenant-wide controls from Mambu's "Internal Controls": maximum
 exposure per member (UNLIMITED, SUM_OF_LOANS, SUM_MINUS_DEPOSITS with an
 amount), one active loan per member, minimum days in arrears before a
-write-off, the window for undoing a closure, and the two-man rule. All off
+write-off, the window for undoing a closure, and the two-man rule, all off
+by default; and whether a write-off needs a second person's approval, on
 by default.
 
 A LOCKED loan accrues nothing and takes no repayment until unlocked. A lock
@@ -686,8 +688,31 @@ from the member portal.
 
 ### Write-offs and recoveries
 
-`POST /api/loans/:id/write-off` closes an ACTIVE, IN_ARREARS or LOCKED loan
-as CLOSED_WRITTEN_OFF. Each component is cleared against the account that
+A write-off is asked for and approved by different people:
+
+- `POST /api/loans/:id/write-off` with a `reason` and optionally a
+  `valueDate` records a request (a teller or loan officer may ask). The
+  checks a write-off runs are made at once (the loan is running and owes
+  something, the tenant's minimum days in arrears, the date), so a request
+  that could never be approved is refused at the door. One request per loan
+  may be pending; `GET /api/loans/write-off-requests` is the approvers'
+  queue and `GET /api/loans/:id/write-off` a loan's requests.
+- `POST /api/loans/:id/write-off/approve` (a manager) writes the loan off.
+  The person who asked may not approve, and the amount must be within the
+  approver's approval limit. `/write-off/reject` with a `note` declines it
+  and the loan runs on.
+- A tenant with a single manager may turn the second person off
+  (`writeOffRequiresApproval: false` in the lending controls). The request
+  is still recorded, approved by the same user, so the register reads the
+  same.
+
+A write-off may be dated back: not in the future, not before disbursement,
+and not before the last repayment or disbursement on the loan. Interest on a
+loan that accrues on the actual balance is brought to that date first;
+interest already accrued past a back date stays owed and is written off with
+the rest. The entry is booked on that date, so a closed period refuses it.
+
+Written off, the loan is closed as CLOSED_WRITTEN_OFF. Each component is cleared against the account that
 holds it: principal out of the portfolio, and under accrual the interest,
 fee and penalty receivables. The principal is written off against the loan
 loss allowance first, for the part of the allowance that stands for this
@@ -720,6 +745,14 @@ Reversing a recovery puts the money back where it came from and reopens the
 call. Reversing the write-off is refused while any recovery stands; once
 none does, the loan returns to the state it was in with its balances,
 guarantors and collateral, and the allowance gets its share back.
+
+`GET /api/loans/write-offs?from&to&branchId` is the register: every loan
+written off in the period (by write-off date), with the amount split into
+principal, interest, fees and penalties, the part the allowance took, who
+asked, who approved and why, what has been recovered since (from guarantors
+among it) and what is still owed. Totals cover the whole period, not the
+page, and add the recoveries received in the period on loans written off at
+any time. The console shows it under Reports as Written-off loans.
 
 
 

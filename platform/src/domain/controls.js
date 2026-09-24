@@ -6,7 +6,8 @@ const { err, round2 } = acct;
 /**
  * The tenant's lending controls (Mambu "Internal Controls"): exposure caps,
  * one active loan per member, the write-off and undo windows, the two-man
- * rule, and each user's approval and disbursement limits.
+ * rule, whether a write-off needs a second person's approval, and each
+ * user's approval and disbursement limits.
  *
  * Read by eligibility (exposure), by workflow (approval, undo windows,
  * write-off) and by disbursement. Depends on nothing but the database.
@@ -16,7 +17,7 @@ async function controls(c) {
   const { rows: [r] } = await c.query('SELECT * FROM lending_controls WHERE id = 1');
   return r || {
     max_exposure_mode: 'UNLIMITED', max_exposure_amount: null, one_active_loan_per_member: false,
-    min_arrears_days_before_writeoff: 0, max_days_undo_close: null, two_man_rule: false,
+    min_arrears_days_before_writeoff: 0, max_days_undo_close: null, two_man_rule: false, write_off_requires_approval: true,
   };
 }
 
@@ -25,6 +26,7 @@ const CONTROL_FIELDS = {
   oneActiveLoanPerMember: 'one_active_loan_per_member',
   minArrearsDaysBeforeWriteoff: 'min_arrears_days_before_writeoff',
   maxDaysUndoClose: 'max_days_undo_close', twoManRule: 'two_man_rule',
+  writeOffRequiresApproval: 'write_off_requires_approval',
 };
 
 async function updateControls(c, patch, { actor } = {}) {

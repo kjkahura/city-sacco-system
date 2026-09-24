@@ -512,7 +512,7 @@ const product = (id, body) => call('POST', '/api/loan-products', { id, name: id,
     const oneLoan = await call('POST', '/api/loans', { memberId: mW.id, productId: 'NL01', principal: 5000, termMonths: 3 });
     check('one active loan per member refuses a second application', oneLoan.status === 409 && /ALREADY_HAS_AN_ACTIVE_LOAN/.test(oneLoan.reason));
     await call('PATCH', '/api/loans/controls', { oneActiveLoanPerMember: false, minArrearsDaysBeforeWriteoff: 90 });
-    const wo = await call('POST', `/api/loans/${wf.id}/write-off`, {});
+    const wo = await call('POST', `/api/loans/${wf.id}/write-off`, { reason: 'test' });
     check('a write-off before the minimum days in arrears is refused', wo.status === 409 && /WRITE_OFF_REQUIRES_90_DAYS/.test(wo.reason));
     await call('PATCH', '/api/loans/controls', { minArrearsDaysBeforeWriteoff: 0 });
 
