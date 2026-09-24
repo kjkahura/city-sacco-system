@@ -181,7 +181,7 @@ function resolveOverrides(p, given = {}, { opening = false, term = null, current
 // in under its alias (product_penalty_rate and so on), from OVERRIDES.
 const PRODUCT_ONLY = [
   'method', 'gl_portfolio', 'gl_interest_inc', 'gl_fee_inc', 'gl_penalty_inc',
-  'gl_interest_rec', 'gl_fee_rec', 'gl_penalty_rec', 'gl_writeoff_exp',
+  'gl_interest_rec', 'gl_fee_rec', 'gl_penalty_rec', 'gl_writeoff_exp', 'gl_recoveries',
   'accounting_method', 'interest_accrual', 'interest_accrued_accounting', 'accrual_granularity', 'day_count', 'allocation_order',
   'enforce_deposit_multiplier', 'require_guarantor_cover', 'min_cover_percent',
   'prepayment_recalculation', 'accrue_late_interest',

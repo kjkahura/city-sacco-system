@@ -99,8 +99,10 @@ src/
     productTypes/      one strategy per product type (FIXED_TERM with
                        INTEREST_FREE, DYNAMIC_TERM, TRANCHED, REVOLVING)
                        and the dispatcher, index.js
-    loans.js           application, disbursement, repayment, write-off,
-                       reversal, account numbering
+    loans.js           application, disbursement, repayment, reversal,
+                       account numbering
+    writeOffs.js       write-off against the allowance, recoveries from the
+                       member, guarantors and collateral, and their reversal
     productAccounting.js  which GL mappings a product's settings require
     accruals.js        interest accrual postings: per account or aggregated,
                        daily or monthly
@@ -283,7 +285,9 @@ POST /api/loans/:id/approve            state machine, 409 on bad transition
 POST /api/loans/:id/disbursements      posts to GL, generates the schedule
 POST /api/loans/:id/repayments         allocation, posts to GL
 POST /api/loans/:id/accrue-interest
-POST /api/loans/:id/write-off          calls the guarantors
+POST /api/loans/:id/write-off          calls the guarantors, seizes collateral
+POST /api/loans/:id/recoveries         money recovered after a write-off
+POST /api/loans/:id/guarantors/:gid/recover|release-call
 POST /api/loans/transactions/:ref/reversal
 POST /api/loans/arrears/run
 GET  /api/loans/:id/schedule|balances|transactions|guarantors
@@ -304,7 +308,9 @@ claws it back out again.
 deposits against someone else's loan. The pledge is checked against their
 free balance at the time it is made, it reduces their withdrawable balance
 while it stands, it is released when the loan is repaid, and it is marked
-`CALLED` rather than released on write-off.
+`CALLED` rather than released on write-off. A called pledge keeps the
+guarantor's deposits committed until it is recovered from them or the call
+is released (see Write-offs and recoveries).
 
 **The eligibility rule** is `principal <= deposits * product.max_multiplier`,
 the "three times your savings" convention.
@@ -504,7 +510,7 @@ Each module requires only modules below it, at the top of the file:
     securities
     workflow
     fees, penalties
-    installments
+    installments, writeOffs
     interest
     revolving
     loans
@@ -678,7 +684,44 @@ disbursement or top-up fees on the new loan, paying the top-up into the
 member's savings account instead of through a channel, and a top-up request
 from the member portal.
 
-### Tranched loans
+### Write-offs and recoveries
+
+`POST /api/loans/:id/write-off` closes an ACTIVE, IN_ARREARS or LOCKED loan
+as CLOSED_WRITTEN_OFF. Each component is cleared against the account that
+holds it: principal out of the portfolio, and under accrual the interest,
+fee and penalty receivables. The principal is written off against the loan
+loss allowance first, for the part of the allowance that stands for this
+loan (its outstanding principal at its provisioning band's rate, capped by
+what the allowance holds), and Loan Write-off Expense takes the rest. The
+next provisioning run finds the loan gone and the allowance already lower
+by its share, so nothing is released and charged twice. While the bands have
+no rates, nothing is attributed and the expense takes it all.
+
+Guarantors are called and collateral is seized. The loan keeps
+`written_off_amount`, `written_off_on`, `written_off_by` and `recovered`.
+
+Money recovered afterwards is income when it arrives, credited to the
+product's Recoveries account (`gl_recoveries`, 400-400 by default), up to
+what was written off:
+
+- `POST /api/loans/:id/recoveries` with `amount`, `channelId` and `source`
+  (MEMBER, COLLATERAL with a `collateralId` of seized collateral, or OTHER).
+  Dr the channel, Cr Recoveries.
+- `POST /api/loans/:id/guarantors/:gid/recover` takes a called guarantor's
+  pledge (or part of it) from their deposits: Dr their savings, Cr
+  Recoveries. Only deposits beyond their other commitments and the
+  account's minimum balance can be taken; they need not be withdrawable.
+  A called pledge keeps the guarantor's deposits committed until it is
+  recovered in full (RECOVERED) or released.
+- `POST /api/loans/:id/guarantors/:gid/release-call` forgoes the rest of a
+  call and frees the deposits.
+
+Reversing a recovery puts the money back where it came from and reopens the
+call. Reversing the write-off is refused while any recovery stands; once
+none does, the loan returns to the state it was in with its balances,
+guarantors and collateral, and the allowance gets its share back.
+
+
 
 A TRANCHED product's loan is approved for one amount and paid out in parts
 (`loan_tranches`: amount and expected date, set at application or with

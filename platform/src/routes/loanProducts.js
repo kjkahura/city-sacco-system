@@ -87,7 +87,7 @@ const FIELDS = {
   requireGuarantorCover: 'require_guarantor_cover', minCoverPercent: 'min_cover_percent',
   glPortfolio: 'gl_portfolio', glInterestInc: 'gl_interest_inc', glFeeInc: 'gl_fee_inc',
   glPenaltyInc: 'gl_penalty_inc', glInterestRec: 'gl_interest_rec', glFeeRec: 'gl_fee_rec',
-  glPenaltyRec: 'gl_penalty_rec', glWriteoffExp: 'gl_writeoff_exp',
+  glPenaltyRec: 'gl_penalty_rec', glWriteoffExp: 'gl_writeoff_exp', glRecoveries: 'gl_recoveries',
   isActive: 'is_active',
   maxTranches: 'max_tranches',
   revolvingRepaymentMethod: 'revolving_repayment_method', revolvingRepaymentValue: 'revolving_repayment_value',
@@ -145,7 +145,7 @@ const publicProduct = (p) => ({
   gl: {
     portfolio: p.gl_portfolio, interestIncome: p.gl_interest_inc, feeIncome: p.gl_fee_inc,
     penaltyIncome: p.gl_penalty_inc, interestReceivable: p.gl_interest_rec,
-    feeReceivable: p.gl_fee_rec, penaltyReceivable: p.gl_penalty_rec, writeOffExpense: p.gl_writeoff_exp,
+    feeReceivable: p.gl_fee_rec, penaltyReceivable: p.gl_penalty_rec, writeOffExpense: p.gl_writeoff_exp, recoveries: p.gl_recoveries,
   },
   maxTranches: p.max_tranches,
   revolving: p.product_type === 'REVOLVING' ? {
