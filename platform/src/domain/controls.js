@@ -53,17 +53,19 @@ async function updateControls(c, patch, { actor } = {}) {
  * The tenant's exposure rules for one member: the sum of their running
  * loans (less deposits, if the mode says so) against the cap, and the
  * one-active-loan rule. `loanId` is the application under review, which is
- * not itself counted.
+ * not itself counted, and `refinancing` the running loan a top-up
+ * application will settle, which is not counted either: the application's
+ * principal already includes what it owes.
  */
-async function exposure(c, { memberId, loanId = null, requested = 0 }) {
+async function exposure(c, { memberId, loanId = null, refinancing = null, requested = 0 }) {
   const ctl = await controls(c);
   const reasons = [];
   const rules = {};
   const { rows: [x] } = await c.query(
     `SELECT COALESCE(SUM(principal_disbursed + principal_capitalized - principal_paid), 0) AS outstanding,
             COUNT(*)::int AS active
-     FROM loan_accounts WHERE member_id = $1 AND status IN ('ACTIVE','IN_ARREARS','LOCKED') AND ($2::uuid IS NULL OR id <> $2)`,
-    [memberId, loanId]);
+     FROM loan_accounts WHERE member_id = $1 AND status IN ('ACTIVE','IN_ARREARS','LOCKED') AND NOT (id = ANY($2::uuid[]))`,
+    [memberId, [loanId, refinancing].filter(Boolean)]);
   const outstanding = round2(x.outstanding);
   let deposits = 0;
   if (ctl.max_exposure_mode === 'SUM_MINUS_DEPOSITS') {

@@ -91,6 +91,23 @@ async function assertMayWriteOff(c, l) {
 // Transitions
 // --------------------------------------------------------------------------
 
+/**
+ * A top-up application is approved only while the loan it refinances is
+ * still running and the approved principal still leaves something to pay
+ * the member once that loan is settled.
+ */
+async function assertTopUpStands(c, application) {
+  const old = await ledger.lock(c, application.refinance_of);
+  if (!['ACTIVE', 'IN_ARREARS', 'LOCKED'].includes(old.status)) {
+    throw err(`REFINANCED_LOAN_NOT_RUNNING: ${old.account_no} is ${old.status}`, 409);
+  }
+  const s = ledger.settlement(old, application.refinance_arrears || 'CAPITALIZE');
+  if (!(Number(application.principal) > s.amount)) {
+    throw err(`NO_TOP_UP_LEFT: principal ${Number(application.principal)}, settlement of ${old.account_no} ${s.amount}`, 409);
+  }
+  return { old, settlement: s };
+}
+
 async function transition(c, loanId, action, { createdBy, note = null, user = null, reason = null } = {}) {
   const name = ALIASES[String(action).toUpperCase()] || String(action).toUpperCase();
   const t = ACTIONS[name];
@@ -108,6 +125,7 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     // may record one for any amount; approving it is the credit decision.
     await eligibility.enforceEligibility(c, l);
     await assertMayApprove(c, l, { user });
+    if (l.refinance_of) await assertTopUpStands(c, l);
     await tranches.assertPlanned(c, l);
     await funding.assertFundedForApproval(c, l);
     set('approved_on', new Date().toISOString().slice(0, 10));
@@ -405,6 +423,7 @@ async function enforceControls(c, { asOf = null } = {}) {
 }
 
 module.exports = {
+  assertTopUpStands,
   ACTIONS, ALIASES, OPEN, RUNNING, transition, history, historyOf, previousState,
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMayWriteOff,
   amend, TERM_FIELDS, NARRATIVE_FIELDS,

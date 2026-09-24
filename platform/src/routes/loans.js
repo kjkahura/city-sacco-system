@@ -76,8 +76,11 @@ router.get('/', requireAuth(), async (req, res, next) => {
 
 router.get('/:id', ...read(async (c, req) => {
   const { rows } = await c.query(
-    `SELECT l.*, m.member_no, m.first_name, m.last_name
+    `SELECT l.*, m.member_no, m.first_name, m.last_name,
+            r.account_no AS refinances_account_no, pl.account_no AS parent_account_no
      FROM loan_accounts l JOIN members m ON m.id = l.member_id
+     LEFT JOIN loan_accounts r ON r.id = l.refinance_of
+     LEFT JOIN loan_accounts pl ON pl.id = l.parent_loan_id
      WHERE l.id::text = $1 OR l.account_no = $1`, [req.params.id]);
   if (!rows.length) return null;
   return { ...rows[0], balances: L.balances(rows[0]) };
@@ -226,6 +229,9 @@ router.post('/fees/:feeId/waive', ...tx((c, req, _res, { actor }) =>
 
 router.post('/:id/disbursements', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
+  const { rows: [a] } = await c.query(
+    'SELECT refinance_of FROM loan_accounts WHERE id::text = $1 OR account_no = $1', [req.params.id]);
+  if (a?.refinance_of) return R.disburseRefinance(c, req.params.id, { ...req.body, createdBy: actor, user });
   return await L.disburse(c, req.params.id, { ...req.body, createdBy: actor, user });
 }, APPROVER));
 
@@ -239,13 +245,21 @@ router.post('/:id/accrue-interest', ...tx(async (c, req, res, { actor }) => {
   res.status(out ? 201 : 200).json(out || { accrued: 0 });
 }, APPROVER));
 
-// Restructuring closes the loan and opens a linked one; a management decision.
-for (const [path, kind] of [['reschedule', 'RESCHEDULE'], ['refinance', 'REFINANCE']]) {
-  router.post(`/:id/${path}`, ...tx(async (c, req, res, { actor }) => {
-    res.status(201);
-    return await R.restructure(c, req.params.id, { ...req.body, kind, createdBy: actor });
-  }, APPROVER));
-}
+// A reschedule closes the loan and opens a linked one at once: a management
+// decision, and no new money leaves.
+router.post('/:id/reschedule', ...tx(async (c, req, res, { actor }) => {
+  res.status(201);
+  return await R.restructure(c, req.params.id, { ...req.body, kind: 'RESCHEDULE', createdBy: actor });
+}, APPROVER));
+
+// A top-up (refinance) is an application like any other: recorded here,
+// approved by someone with the authority, paid out by /disbursements on the
+// application, which settles the running loan first.
+router.post('/:id/refinance', ...tx(async (c, req, res, { actor }) => {
+  res.status(201);
+  return await R.requestRefinance(c, req.params.id, { ...req.body, createdBy: actor });
+}, TELLER));
+router.get('/:id/refinance-quote', ...read((c, req) => R.quote(c, req.params.id)));
 
 router.post('/:id/write-off', ...tx(async (c, req, res, { actor }) => {
   res.status(201);

@@ -110,7 +110,8 @@ src/
     fees.js            product fees of every type, applying, waiving, settling
     workflow.js        states and undo, amendments by state, arrears, cap on
                        charges
-    restructure.js     reschedule and refinance
+    restructure.js     reschedule, and top-ups as applications: request,
+                       quote, and the payout that settles the old loan
     tranches.js        tranched disbursement
     revolving.js       revolving credit billing and credit balance deposits
     securities.js      collateral assets alongside guarantors
@@ -633,15 +634,49 @@ A LOCKED loan accrues nothing and takes no repayment until unlocked. A lock
 for the charge cap lifts only once the charges are paid or the loan is out
 of arrears; a manual lock lifts when a manager says so.
 
-### Reschedule and refinance
+### Reschedule and refinance (top-up)
 
-`POST /api/loans/:id/reschedule` and `/refinance` close the loan and open
-a new one under it (`parent_loan_id`), with new installments, optionally a
-new rate or product, and for a refinance a top-up paid out through a
-channel. Interest, fees and penalties owed are CAPITALIZED onto the new
+`POST /api/loans/:id/reschedule` closes the loan and opens a new one under it
+(`parent_loan_id`) at once, with new installments and optionally a new rate
+or product. It is a management decision on a loan in difficulty and no new
+money leaves.
+
+A top-up is new money, so it goes through the application life cycle:
+
+1. `POST /api/loans/:id/refinance` with `topUp` (what the member asks to
+   receive) or `principal` (the gross new loan), `termMonths` and
+   optionally `productId`, `arrears` and the product's overrides. It opens
+   an application with `refinance_of` pointing at the running loan. Its
+   principal is what settling that loan costs now plus the top-up. The
+   old loan keeps running, and only one top-up per loan may be in flight.
+   A teller may record the request.
+2. `POST /api/loans/:appId/approve` is the ordinary approval. Eligibility
+   is judged on the gross principal: the deposit multiplier, guarantor
+   cover (the old loan's pledges and collateral count, since they move
+   across, and guarantors may be added to the application for the extra),
+   the tenant's exposure controls (the old loan's balance is inside the new
+   principal, so it is not counted twice, and one-active-loan does not
+   block it) and the approver's limit. Approval is refused if the old loan
+   is no longer running or settling it would leave nothing to pay out.
+3. `POST /api/loans/:appId/disbursements` brings interest on the old loan
+   to the day, settles it and pays the rest: top-up = approved principal
+   minus settlement. The approved amount is the member's new loan; if the
+   member repaid something in between, the top-up is larger by that much.
+   The disbursing user's limit and the two-man rule apply to the top-up paid
+   out. `GET /api/loans/:appId/refinance-quote` shows the figures first.
+
+In both cases interest, fees and penalties owed are CAPITALIZED onto the new
 principal or WRITTEN_OFF. The principal moves portfolio to portfolio in one
-entry, no cash; guarantors' pledges move with it. Both accounts carry the
-step in their history.
+entry with no cash; a top-up leaves through the channel. Guarantors'
+pledges and pledged collateral move to the new loan. Both accounts carry the
+step in their history, and the old one is CLOSED_RESCHEDULED or
+CLOSED_REFINANCED.
+
+Not done yet for top-ups: qualification rules on the product (a minimum
+share repaid, a minimum number of installments, no top-up in arrears),
+disbursement or top-up fees on the new loan, paying the top-up into the
+member's savings account instead of through a channel, and a top-up request
+from the member portal.
 
 ### Tranched loans
 
@@ -1329,6 +1364,10 @@ official forms are not.
    liability. The totals agree; the split is one account coarser.
 9. **Funded loan products cannot change accounting method**, because the
    interest split with funders would have to be unwound per funder.
+10. **Top-ups have no product rules or fees yet.** A minimum share repaid
+    or installments paid before a top-up, a block while in arrears, fees on
+    the new loan, payout into savings and a portal request are not built.
+    A reschedule is still one step with no approval.
 
 ## Before real member data
 

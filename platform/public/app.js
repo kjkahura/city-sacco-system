@@ -417,8 +417,8 @@ const LOAN_ACTIONS = {
   PARTIAL_APPLICATION: [['request-approval', 'Request approval'], ['amend', 'Amend terms'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
   PENDING_APPROVAL: [['approve', 'Approve'], ['set-incomplete', 'Send back'], ['amend', 'Amend terms'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
   APPROVED: [['disburse', 'Disburse'], ['undo-approve', 'Undo approval'], ['withdraw', 'Withdraw'], ['notes', 'Notes']],
-  ACTIVE: [['repay', 'Post repayment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Refinance'], ['write-off', 'Write off'], ['notes', 'Notes']],
-  IN_ARREARS: [['repay', 'Post repayment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Refinance'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  ACTIVE: [['repay', 'Post repayment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  IN_ARREARS: [['repay', 'Post repayment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
   LOCKED: [['unlock', 'Unlock'], ['reschedule', 'Reschedule'], ['write-off', 'Write off'], ['notes', 'Notes']],
   CLOSED_REJECTED: [['undo-reject', 'Undo rejection']],
   CLOSED_WITHDRAWN: [['undo-withdraw', 'Undo withdrawal']],
@@ -457,7 +457,8 @@ async function loanDetail(row) {
     <h1>${esc(l.account_no)} <span class="badge ${BAD_STATES.includes(l.status) ? 'bad' : ''}">${esc(l.status)}</span>
       ${l.locked_reason ? `<span class="badge warn">locked: ${esc(l.locked_reason)}</span>` : ''}</h1>
     <p class="hint">${esc(l.first_name)} ${esc(l.last_name)} · ${esc(l.member_no)} · product ${esc(l.product_id)} · ${esc(l.product_type || '')}
-      ${l.purpose ? ` · ${esc(l.purpose)}` : ''}${l.parent_loan_id ? ' · restructured from an earlier loan' : ''}</p>
+      ${l.purpose ? ` · ${esc(l.purpose)}` : ''}${l.parent_account_no ? ` · replaces ${esc(l.parent_account_no)}` : ''}</p>
+    ${l.refinance_of && !l.parent_loan_id ? `<p class="notice" id="top-up-quote">Top-up of ${esc(l.refinances_account_no)}: on disbursement this loan settles it and pays the rest to the member.</p>` : ''}
     ${l.notes ? `<p class="hint">${esc(l.notes)}</p>` : ''}
     <div class="toolbar">${actions.map(([a, label]) =>
     `<button data-action="${a}" class="${['approve', 'disburse', 'repay', 'request-approval'].includes(a) ? '' : 'secondary'}">${label}</button>`).join('')}</div>
@@ -582,7 +583,16 @@ async function loanDetail(row) {
       if (!d) return;
       res = await api('PATCH', `/api/loans/${id}`, { notes: d.notes });
     }
-    if (a === 'disburse') {
+    if (a === 'disburse' && l.refinance_of) {
+      const q = await api('GET', `/api/loans/${id}/refinance-quote`);
+      if (!q.ok) return toast(q.error, true);
+      const d = await ask([
+        { label: `Settles ${q.body.refinances.accountNo} (${money(q.body.settlement)}); top-up paid out now ${money(q.body.topUp)}. Channel`, name: 'channelId', value: 'bank' },
+      ], 'Disburse top-up');
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/disbursements`, { channelId: d.channelId });
+      if (res.ok) { toast(`Top-up of ${money(res.body.topUp)} paid; ${res.body.oldLoan.accountNo} closed`); return loanDetail(row); }
+    } else if (a === 'disburse') {
       const d = await ask([
         { label: 'Amount', name: 'amount', type: 'number', step: '0.01', value: l.principal },
         { label: 'Channel', name: 'channelId', value: 'bank' },
@@ -651,15 +661,18 @@ async function loanDetail(row) {
       const d = await ask([
         { label: 'New number of installments', name: 'termMonths', type: 'number', value: l.term_months },
         { label: 'Product (blank keeps the same)', name: 'productId', value: '', required: false },
-        ...(a === 'refinance' ? [{ label: 'Top-up paid to the member', name: 'topUp', type: 'number', step: '0.01' },
-          { label: 'Channel', name: 'channelId', value: 'bank' }] : []),
+        ...(a === 'refinance' ? [{ label: 'Top-up the member asks for', name: 'topUp', type: 'number', step: '0.01' }] : []),
         { label: 'Interest, fees and penalties owed', name: 'arrears', options: ['CAPITALIZE', 'WRITE_OFF'], value: 'CAPITALIZE' },
         { label: 'Note', name: 'note', required: false },
-      ], a === 'refinance' ? 'Refinance loan' : 'Reschedule loan');
+      ], a === 'refinance' ? 'Top-up application' : 'Reschedule loan');
       if (!d) return;
       res = await api('POST', `/api/loans/${id}/${a}`, {
         termMonths: Number(d.termMonths), productId: d.productId || undefined, arrears: d.arrears, note: d.note,
-        ...(a === 'refinance' ? { topUp: Number(d.topUp), channelId: d.channelId } : {}) });
+        ...(a === 'refinance' ? { topUp: Number(d.topUp) } : {}) });
+      if (res.ok && a === 'refinance') {
+        toast(`Application ${res.body.application.account_no} for ${money(res.body.application.principal)} awaits approval`);
+        return loanDetail({ account_no: res.body.application.account_no });
+      }
       if (res.ok) { toast(`New loan ${res.body.newLoan.account_no} opened`); return loanDetail({ account_no: res.body.newLoan.account_no }); }
     }
     if (a === 'write-off') {
