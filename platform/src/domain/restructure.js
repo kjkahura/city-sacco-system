@@ -29,6 +29,7 @@ const funding = require('./funding');
 const eligibility = require('./eligibility');
 const { accrueInterest } = require('./interest');
 const { buildSchedule } = require('./installments');
+const types = require('./productTypes');
 
 const ymd = (d) => (d instanceof Date
   ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -54,7 +55,7 @@ async function restructure(c, loanId, {
 
   // Interest owed is brought up to the date first, so the figure being
   // capitalised or written off is the real one.
-  if (L.isDynamic(old) && old.status !== 'LOCKED') {
+  if (types.forLoan(old).bringsInterestToDate && old.status !== 'LOCKED') {
     await accrueInterest(c, old.id, { valueDate: date, createdBy });
     old = await L.lock(c, old.id);
   }
@@ -142,7 +143,7 @@ async function restructure(c, loanId, {
   const fresh = await L.lock(c, created.id);
   await buildSchedule(c, fresh);
   // The new product's payment-due fees, if fixed-term, land with the schedule.
-  await fees.applyPaymentDueFees(c, fresh, L.isDynamic(fresh) ? date : '9999-12-31');
+  await fees.applyPaymentDueFees(c, fresh, types.forLoan(fresh).paymentDueHorizon(date));
 
   // Guarantors follow.
   const { rows: gs } = await c.query(

@@ -5,6 +5,7 @@ const savings = require('./savings');
 const tax = require('./tax');
 const ledger = require('./ledger');
 const workflow = require('./workflow');
+const types = require('./productTypes');
 const { err, round2 } = acct;
 
 /**
@@ -192,7 +193,7 @@ async function recordFee(c, l, { productFeeId = null, name, feeType, amount, val
  */
 async function placeUpfrontFees(c, l, items) {
   const total = round2(items.reduce((s, x) => s + x.amount, 0));
-  if (!(total > 0) || ledger.isDynamic(l)) return;
+  if (!(total > 0) || !types.forLoan(l).upfrontFeesOnSchedule) return;
   const { rows: [first] } = await c.query(
     'SELECT id FROM loan_installments WHERE loan_id = $1 ORDER BY number LIMIT 1', [l.id]);
   if (!first) return;

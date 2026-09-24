@@ -1,0 +1,78 @@
+'use strict';
+
+const acct = require('../accounting');
+const S = require('../schedule');
+const ledger = require('../ledger');
+const { fixedTerm } = require('./fixedTerm');
+const { round2 } = acct;
+const { ymd, interestBetween } = S;
+
+/**
+ * DYNAMIC_TERM: interest on the actual balance for the actual days.
+ *
+ * The schedule drawn at disbursement is the expectation if every
+ * installment is paid on its date. Interest is brought to the payment date
+ * before a repayment is allocated, a payment settles what has fallen due
+ * and the rest is a prepayment, and the future installments are redrawn
+ * from the new balance (the product's prepayment recalculation). Payment-
+ * due fees are applied on their dates by the EOD job; upfront fees are due
+ * at once, outside the schedule. Past the last due date interest keeps
+ * accruing only if the product accrues late interest. CAPITALIZED interest
+ * folds into principal on each due date.
+ *
+ * The strategy contract is documented in ./index.js.
+ */
+
+const dynamicTerm = {
+  ...fixedTerm,
+  type: 'DYNAMIC_TERM',
+  basis: 'ACTUAL_BALANCE',
+
+  // ---- schedule ------------------------------------------------------------
+  /** Redraw on a prepayment when the product says so, or when forced (a later tranche). */
+  redrawsOnPrepayment: (l, { force = false } = {}) => force
+    || Boolean(l.prepayment_recalculation && l.prepayment_recalculation !== 'NONE'),
+  upfrontFeesOnSchedule: false,
+  paymentDueFeesByCalendar: true,
+  paymentDueHorizon: (date) => date,
+
+  // ---- disbursement ----------------------------------------------------------
+  appliesInterestAtDisbursement: () => false,
+
+  // ---- repayment -------------------------------------------------------------
+  bringsInterestToDate: true,
+  /** Interest and payment-due fees up to the payment date, so a prepayment pays what it has actually earned. */
+  async beforeRepayment(c, l, { asOf, createdBy }, ops) {
+    await ops.accrueInterest(c, l.id, { valueDate: asOf, createdBy });
+    await ops.fees.applyPaymentDueFees(c, l, asOf);
+    return ops.lock(c, l.id);
+  },
+  installmentScope: (asOf) => ({ dueBy: asOf }),
+  /** Redraw the future from the new balance once principal or interest moved. */
+  async afterRepayment(c, fresh, { asOf, principal, interest }, ops) {
+    if (!(principal > 0 || interest > 0)) return null;
+    return ops.reschedule(c, fresh, asOf);
+  },
+  redrawsOnReversal: true,
+
+  // ---- interest --------------------------------------------------------------
+  accrues: (l) => Number(l.monthly_rate) > 0,
+  /** Stop at maturity unless the product accrues late interest; penalties take over from there. */
+  accrualWindow(l, fromIso, date, installments) {
+    if (l.accrue_late_interest || !installments.length) return date;
+    const maturity = ymd(installments[installments.length - 1].nominal_due);
+    if (fromIso >= maturity) return null;
+    return date > maturity ? maturity : date;
+  },
+  /** Outstanding principal, plus unpaid interest when interest earns interest (compound, or simple on principal and interest). */
+  accrualBase(l) {
+    const unpaidInterest = Math.max(0, round2(l.interest_accrued - l.interest_paid));
+    const t = ledger.terms(l);
+    const onInterestToo = t.interestType === 'COMPOUND' || (t.interestType === 'SIMPLE' && l.simple_base === 'PRINCIPAL_AND_INTEREST');
+    return round2(ledger.principalOutstanding(l) + (onInterestToo ? unpaidInterest : 0));
+  },
+  dailyAccrual: (l, t, { base, fromIso, date }) => interestBetween(base, t, fromIso, date),
+  capitalizes: (l) => l.interest_type === 'CAPITALIZED',
+};
+
+module.exports = { dynamicTerm };

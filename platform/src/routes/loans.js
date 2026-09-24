@@ -286,7 +286,7 @@ router.post('/fees/run', ...tx(async (c, req) => {
   let due = 0, late = 0;
   for (const r of rows) {
     const l = await L.lock(c, r.id);
-    if (L.isDynamic(l)) due += await F.applyPaymentDueFees(c, l, asOf);
+    if (L.productType(l).paymentDueFeesByCalendar) due += await F.applyPaymentDueFees(c, l, asOf);
     late += await F.applyLateFees(c, l, asOf);
   }
   return { loans: rows.length, paymentDueApplied: due, lateFeesApplied: late };

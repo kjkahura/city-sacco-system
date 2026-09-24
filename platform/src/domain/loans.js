@@ -14,16 +14,23 @@ const workflow = require('./workflow');
 const fees = require('./fees');
 const installments = require('./installments');
 const interest = require('./interest');
-const revolving = require('./revolving');
+const types = require('./productTypes');
 const PA = require('./productAccounting');
 const { err, round2 } = acct;
 const { ymd, isoDate } = S;
 const {
   OVERRIDES, resolveOverrides, within,
-  lock, balances, isDynamic, isRevolving, isTranched, isAccrual, interestAccrues, booksEntries, post, creditsFor, writeOffCredit,
+  lock, balances, isAccrual, interestAccrues, booksEntries, post, creditsFor, writeOffCredit,
 } = ledger;
 const { buildSchedule, reschedule, applyToInstallments } = installments;
 const { accrueInterest } = interest;
+
+/**
+ * What a product type's hooks may call back into: the lifecycle operations
+ * that live above ./productTypes. Passed rather than required, so the type
+ * files stay low in the layer graph.
+ */
+const ops = { lock, buildSchedule, reschedule, accrueInterest, fees };
 
 /**
  * The money movements of a loan's life: opening the application,
@@ -158,7 +165,7 @@ async function apply(c, params) {
     [createdBy || 'SYSTEM', rows[0].id, JSON.stringify(rows[0])]
   );
   // The pieces an application may arrive with. Each may also be added later.
-  if (p.product_type === 'TRANCHED') {
+  if (types.forLoan(p).plansTranches) {
     if (Array.isArray(plannedTranches) && plannedTranches.length) await tranches.setTranches(c, rows[0].id, plannedTranches, { createdBy });
   } else if (plannedTranches) throw err('ONLY_A_TRANCHED_PRODUCT_TAKES_TRANCHES', 400);
   for (const f of fundingSources || []) await funding.addFundingSource(c, rows[0].id, { ...f, createdBy });
@@ -201,32 +208,15 @@ async function postUnlinked(c, l, entry, { cash, funded = null, extra = [] }) {
  */
 async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narration, createdBy, user = null, fees: selectedFees = [], tranche = null, branchId: tellerBranch = null } = {}) {
   const l = await lock(c, loanId);
+  const type = types.forLoan(l);
   const first = l.status === 'APPROVED';
-  const again = !first && ['ACTIVE', 'IN_ARREARS'].includes(l.status) && (isTranched(l) || isRevolving(l));
+  const again = !first && ['ACTIVE', 'IN_ARREARS'].includes(l.status) && type.disbursesAgain;
   if (!first && !again) throw err(`LOAN_NOT_APPROVED: ${l.status}`, 409);
   const date = valueDate ? ymd(valueDate) : isoDate(new Date());
 
-  // What may be paid out now.
-  let plannedTranche = null;
-  let amt;
-  if (isTranched(l)) {
-    plannedTranche = await tranches.nextPlanned(c, l.id);
-    if (!plannedTranche) throw err('NO_TRANCHE_LEFT_TO_DISBURSE', 409);
-    if (tranche && Number(tranche) !== plannedTranche.number) throw err(`NEXT_TRANCHE_IS_${plannedTranche.number}`, 409);
-    amt = round2(amount ?? plannedTranche.amount);
-    const remaining = round2(Number(l.principal) - Number(l.principal_disbursed));
-    if (amt > remaining) throw err(`TRANCHE_EXCEEDS_REMAINING_PRINCIPAL: ${remaining}`, 400);
-  } else if (isRevolving(l)) {
-    amt = round2(amount);
-    if (!(amt > 0)) throw err('INVALID_DISBURSEMENT_AMOUNT');
-    const until = revolving.validUntil(l);
-    if (until && date > until) throw err(`CREDIT_LIMIT_EXPIRED_ON_${until}`, 409);
-    const avail = revolving.available(l);
-    if (amt > avail) throw err(`EXCEEDS_AVAILABLE_CREDIT: available ${avail}`, 409);
-  } else {
-    amt = round2(amount ?? l.principal);
-    if (!(amt > 0)) throw err('INVALID_DISBURSEMENT_AMOUNT');
-  }
+  // What may be paid out now: the product type says (the principal, the
+  // next tranche, or a drawdown within the available limit).
+  const { amount: amt, tranche: plannedTranche } = await type.disbursementAmount(c, l, { amount, tranche, date });
   await workflow.assertMayDisburse(c, l, { actor: createdBy, amount: amt, user });
 
   const { rows: [ch] } = await c.query(
@@ -247,7 +237,7 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
 
   // A revolving drawdown uses the member's credit balance first: their own
   // money back to them, no portfolio movement for that part.
-  const fromCredit = isRevolving(l) ? round2(Math.min(Number(l.credit_balance || 0), amt)) : 0;
+  const fromCredit = type.fromCreditBalance(l, amt);
   const fromLoan = round2(amt - fromCredit);
 
   // A funded loan's principal is not the SACCO's: it leaves the funders'
@@ -290,24 +280,11 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
   }
   const fresh = { ...l, ...rows[0], _selectedFees: selectedFees };
 
-  let sched = null;
-  if (isRevolving(l)) {
-    // No schedule up front: installments are generated on billing dates.
-    if (!rows[0].next_billing_on) {
-      await c.query('UPDATE loan_accounts SET next_billing_on = $2::date WHERE id = $1', [l.id, revolving.firstBillingDate(fresh, date)]);
-    }
-  } else if (first) {
-    sched = await buildSchedule(c, fresh);
-    await fees.placeUpfrontFees(c, fresh, plan.items.filter((x) => x.feeType === 'DISBURSEMENT_UPFRONT'));
-    await fees.applyPaymentDueFees(c, fresh, isDynamic(l) ? date : '9999-12-31');
-  } else {
-    // A later tranche: interest is brought to today on the old balance and
-    // the future installments are redrawn over the new one.
-    await accrueInterest(c, l.id, { valueDate: date, createdBy });
-    await reschedule(c, await lock(c, l.id), date, { force: true });
-  }
+  // The schedule, or its absence, is the product type's: drawn now, redrawn
+  // for a later tranche, or none until the first billing date.
+  const sched = await type.afterDisbursement(c, { l, fresh, first, date, plan, createdBy }, ops);
 
-  if (sched && l.interest_posting === 'ON_DISBURSEMENT' && !isDynamic(l) && sched.totals.interest > 0) {
+  if (sched && type.appliesInterestAtDisbursement(l) && sched.totals.interest > 0) {
     // The whole term's interest is applied on day one.
     const maturity = sched.installments[sched.installments.length - 1].nominalDue;
     const tx = tax.split(l, 'INTEREST', sched.totals.interest);
@@ -340,7 +317,7 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
       funded: funded ? funded.debits.map((d) => ({ glCode: d.glCode, amount: d.amount })) : undefined,
     },
   });
-  if (plannedTranche) await tranches.markDisbursed(c, plannedTranche.id, { amount: amt, date, transactionId: record.id });
+  await type.recordDisbursement(c, { tranche: plannedTranche, amount: amt, date, record });
   return record;
 }
 
@@ -355,6 +332,7 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
  */
 async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy, branchId: tellerBranch = null } = {}) {
   let l = await lock(c, loanId);
+  const type = types.forLoan(l);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   let left = round2(amount);
   if (!(left > 0)) throw err('INVALID_REPAYMENT_AMOUNT');
@@ -367,11 +345,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   // on a dynamic loan pays the interest it has actually earned (Mambu's
   // "apply interest on prepayments"); a capitalising product folds it into
   // principal at the same moment.
-  if (isDynamic(l)) {
-    await accrueInterest(c, l.id, { valueDate: asOf, createdBy });
-    await fees.applyPaymentDueFees(c, l, asOf);
-    l = await lock(c, l.id);
-  }
+  l = await type.beforeRepayment(c, l, { asOf, createdBy }, ops);
 
   const b = balances(l);
   const due = { PENALTY: b.penalty, FEE: b.fees, INTEREST: b.interest, PRINCIPAL: b.principal };
@@ -386,7 +360,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   const { PENALTY: penalty, FEE: feesPaid, INTEREST: interest, PRINCIPAL: principal } = paid;
   const surplus = round2(left);
   const total = round2(penalty + feesPaid + interest + principal + surplus);
-  const finalPayment = round2(b.principal - principal) <= 0 && !isRevolving(l);
+  const finalPayment = round2(b.principal - principal) <= 0 && type.closesWhenPaid;
 
   // Where each component's money goes. On a funded loan the principal and
   // the funders' share of the interest go back to the funders' accounts;
@@ -416,7 +390,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   const surplusCredits = [];
   let toCreditBalance = 0;
   if (surplus > 0) {
-    if (isRevolving(l) && l.credit_balance_enabled) {
+    if (type.surplusToCreditBalance(l)) {
       if (l.max_credit_balance !== null && round2(l.credit_balance) + surplus > Number(l.max_credit_balance)) {
         throw err(`OVERPAYMENT_EXCEEDS_MAX_CREDIT_BALANCE: ${l.max_credit_balance}`, 409);
       }
@@ -469,19 +443,18 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
        WHERE id = $4`, [surplus, surplusAccount.legs.allocation.odFees, surplusAccount.legs.allocation.odInterest, surplusAccount.id]);
   }
 
-  const dynamic = isDynamic(l);
   // A fixed-term loan's payment settles its installments in order, however
   // early it comes. A dynamic loan's payment settles what has fallen due and
   // anything beyond that is a prepayment: it reduces the balance, and the
   // schedule for what remains is redrawn from that balance. A revolving
   // loan's installments only exist once due, so all of them take a share.
-  await applyToInstallments(c, l.id, { principal, interest, fees: feesPaid }, dynamic && !isRevolving(l) ? { dueBy: asOf } : {});
+  await applyToInstallments(c, l.id, { principal, interest, fees: feesPaid }, type.installmentScope(asOf));
   await fees.settle(c, l.id, feesPaid);
 
   const fresh = await lock(c, l.id);
   const after = balances(fresh);
   let rescheduled = null;
-  if (after.total <= 0 && !isRevolving(l)) {
+  if (after.total <= 0 && type.closesWhenPaid) {
     await c.query("UPDATE loan_accounts SET status = 'CLOSED_REPAID', closed_on = $2::date, updated_at = now() WHERE id = $1", [l.id, asOf]);
     await workflow.history(c, l.id, { from: fresh.status, to: 'CLOSED_REPAID', action: 'PAID_OFF', actor: createdBy });
     await eligibility.releaseGuarantors(c, l.id);
@@ -489,7 +462,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   } else if (fresh.status === 'IN_ARREARS') {
     await workflow.refreshArrears(c, fresh, asOf);
   }
-  if (dynamic && (principal > 0 || interest > 0)) rescheduled = await reschedule(c, fresh, asOf);
+  rescheduled = await type.afterRepayment(c, fresh, { asOf, principal, interest }, ops);
 
   return savings.record(c, {
     reference: savings.ref('LR'), kind: 'LOAN_REPAYMENT', memberId: l.member_id,
@@ -595,8 +568,8 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
     // goes back to the schedule it was disbursed with and is redrawn from
     // the balance as it now stands.
     const restored = await lock(c, tx.loan_account_id);
-    const dynamic = isDynamic(restored) && !isRevolving(restored);
-    if (dynamic) await buildSchedule(c, restored);
+    const type = types.forLoan(restored);
+    if (type.redrawsOnReversal) await buildSchedule(c, restored);
     await c.query(
       `UPDATE loan_installments SET principal_paid = 0, interest_paid = 0, fee_paid = 0,
          status = CASE WHEN status = 'GRACE' THEN 'GRACE' ELSE 'PENDING' END
@@ -614,9 +587,9 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
     const today = isoDate(new Date());
     await applyToInstallments(c, tx.loan_account_id, {
       principal: Number(remaining[0].p), interest: Number(remaining[0].i), fees: Number(remaining[0].f),
-    }, dynamic ? { dueBy: today } : {});
+    }, type.installmentScope(today));
     await fees.resettle(c, tx.loan_account_id, Number(remaining[0].f));
-    if (dynamic) await reschedule(c, await lock(c, tx.loan_account_id), today);
+    if (type.redrawsOnReversal) await reschedule(c, await lock(c, tx.loan_account_id), today);
   } else if (tx.kind === 'LOAN_DISBURSEMENT') {
     const { rows: [cur] } = await c.query('SELECT * FROM loan_accounts WHERE id = $1 FOR UPDATE', [tx.loan_account_id]);
     if (round2(cur.principal_disbursed) !== round2(tx.amount) || Number(cur.principal_paid) > 0) {
@@ -667,6 +640,8 @@ module.exports = {
 
   // Re-exported so existing callers keep one import.
   ...ledger,
+  isDynamic: types.isDynamic, isRevolving: types.isRevolving, isTranched: types.isTranched, isInterestFree: types.isInterestFree,
+  productType: types.forLoan,
   dayCount: S.dayCount, addMonths: S.addMonths, annuityPayment: S.annuityPayment,
   buildSchedule, previewSchedule: installments.previewSchedule, reschedule,
   maturityDate: installments.maturityDate, applyToInstallments,

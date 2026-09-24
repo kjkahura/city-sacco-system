@@ -18,6 +18,7 @@ const { migratePlatform, migrateAllTenants } = require('../src/db/migrate');
 const provision = require('../src/tenancy/provision');
 const L = require('../src/domain/loans');
 const ledger = require('../src/domain/ledger');
+const types = require('../src/domain/productTypes');
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -44,20 +45,42 @@ async function call(method, p, body) {
   return { status: r.status, body: d, reason: d?.errors?.[0]?.errorReason };
 }
 
-/** The require graph of src/domain: lazy requires and cycles. */
-function requireGraph(dir) {
+/**
+ * The require graph of src/domain and its subfolders: lazy requires and
+ * cycles. A node is the path from src/domain without .js, a folder's
+ * index.js being the folder ('productTypes', 'productTypes/revolving').
+ */
+function requireGraph(root) {
   const g = {};
   const lazy = [];
-  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.js'))) {
-    const name = f.replace(/\.js$/, '');
-    g[name] = new Set();
-    fs.readFileSync(path.join(dir, f), 'utf8').split('\n').forEach((line, i) => {
-      for (const m of line.matchAll(/require\('\.\/([a-zA-Z]+)'\)/g)) {
-        g[name].add(m[1]);
-        if (/^\s/.test(line) || /=>\s*require/.test(line)) lazy.push(`${f}:${i + 1}`);
-      }
-    });
-  }
+  const node = (abs) => {
+    const rel = path.relative(root, abs).replace(/\\/g, '/').replace(/\.js$/, '');
+    return rel.endsWith('/index') ? rel.slice(0, -6) : rel;
+  };
+  const resolve = (from, spec) => {
+    const abs = path.resolve(path.dirname(from), spec);
+    if (fs.existsSync(`${abs}.js`)) return `${abs}.js`;
+    if (fs.existsSync(path.join(abs, 'index.js'))) return path.join(abs, 'index.js');
+    return null;
+  };
+  const walk = (dir) => {
+    for (const f of fs.readdirSync(dir)) {
+      const abs = path.join(dir, f);
+      if (fs.statSync(abs).isDirectory()) { walk(abs); continue; }
+      if (!f.endsWith('.js')) continue;
+      const name = node(abs);
+      g[name] = new Set();
+      fs.readFileSync(abs, 'utf8').split('\n').forEach((line, i) => {
+        for (const m of line.matchAll(/require\('(\.\.?\/[a-zA-Z/.]+)'\)/g)) {
+          const target = resolve(abs, m[1]);
+          if (!target || !target.startsWith(root)) continue;
+          g[name].add(node(target));
+          if (/^\s/.test(line) || /=>\s*require/.test(line)) lazy.push(`${name}.js:${i + 1}`);
+        }
+      });
+    }
+  };
+  walk(root);
   const cycles = [];
   const state = {};
   const stack = [];
@@ -86,6 +109,7 @@ const eff = (id) => T(async (c) => ledger.effective(await ledger.lock(c, id)));
     check('no domain module requires another from inside a function', lazy.length === 0, lazy.join(', '));
     check('the domain require graph has no cycles', cycles.length === 0, cycles.join(' | '));
     const below = ['accounting', 'schedule', 'tax'];
+    check('the graph includes the strategy folder', Boolean(g.productTypes && g['productTypes/revolving']), Object.keys(g).join(','));
     check('ledger stands only on accounting, schedule and tax', [...g.ledger].every((m) => below.includes(m)), [...g.ledger].join(','));
     check('nothing below loans requires loans', Object.entries(g).every(([n, deps]) => n === 'restructure' || !deps.has('loans')),
       Object.entries(g).filter(([n, d]) => n !== 'restructure' && d.has('loans')).map(([n]) => n).join(','));
@@ -98,6 +122,54 @@ const eff = (id) => T(async (c) => ledger.effective(await ledger.lock(c, id)));
       'fillPattern', 'nextAccountNo', 'OPEN_APPLICATION'];
     const missing = exported.filter((k) => L[k] === undefined);
     check('loans still exports every name it exported before the split', missing.length === 0, missing.join(','));
+
+    // ----------------------------------------------------------------------
+    section('product types as strategies');
+    const typeFiles = Object.keys(g).filter((n) => n.startsWith('productTypes'));
+    const allowed = ['accounting', 'schedule', 'ledger', 'tranches'];
+    const strays = typeFiles.flatMap((n) => [...g[n]].filter((m) => !m.startsWith('productTypes') && !allowed.includes(m)).map((m) => `${n}->${m}`));
+    check('the strategy files stand only on accounting, schedule, ledger and tranches', strays.length === 0, strays.join(','));
+    check('and nothing they stand on requires them back',
+      allowed.every((m) => ![...g[m]].some((d) => d.startsWith('productTypes'))));
+    const offered = require('../src/routes/loanProducts').ENUMS.product_type;
+    check('every product type a product may have has a strategy, and every strategy is offered',
+      offered.every((t) => types.BY_TYPE[t]) && types.TYPES.every((t) => offered.includes(t)),
+      `offered ${offered} / strategies ${types.TYPES}`);
+    const HOOKS = ['type', 'basis', 'schedulesUpfront', 'redrawsOnPrepayment', 'upfrontFeesOnSchedule', 'paymentDueFeesByCalendar',
+      'paymentDueHorizon', 'plansTranches', 'disbursesAgain', 'disbursementAmount', 'fromCreditBalance', 'afterDisbursement',
+      'recordDisbursement', 'appliesInterestAtDisbursement', 'bringsInterestToDate', 'beforeRepayment', 'closesWhenPaid',
+      'surplusToCreditBalance', 'installmentScope', 'afterRepayment', 'redrawsOnReversal', 'accrues', 'accrualWindow',
+      'accrualBase', 'dailyAccrual', 'capitalizes'];
+    const gaps = Object.entries(types.BY_TYPE).flatMap(([t, s]) => HOOKS.filter((h) => s[h] === undefined).map((h) => `${t}.${h}`));
+    check('every strategy fills every hook of the contract', gaps.length === 0, gaps.join(','));
+    check('each strategy is named for its type', Object.entries(types.BY_TYPE).every(([t, s]) => s.type === t));
+    check('an unknown type is refused, not treated as fixed term', (() => { try { types.forLoan({ product_type: 'NOPE' }); return false; } catch (e) { return /UNKNOWN_PRODUCT_TYPE/.test(e.message); } })());
+    const src = (f) => fs.readFileSync(path.join(__dirname, '..', 'src', f), 'utf8');
+    const lifecycle = ['domain/loans.js', 'domain/interest.js', 'domain/installments.js', 'domain/fees.js', 'domain/restructure.js', 'ops/eod.js'];
+    const TYPE_TEST = /\b(isDynamic|isRevolving|isTranched|isInterestFree)\s*\(|product_type\s*[!=]==|['"](DYNAMIC_TERM|TRANCHED|REVOLVING|INTEREST_FREE)['"]/;
+    const testing = lifecycle.filter((f) => src(f).split('\n').some((line) => !/^\s*(\/\/|\*)/.test(line) && TYPE_TEST.test(line)));
+    check('disbursement, repayment, accrual, fees, restructure and EOD ask the strategy instead of testing the type',
+      testing.length === 0, testing.join(','));
+
+    // The behaviour the dispatch must keep.
+    const base = { monthly_rate: 2, interest_posting: 'ON_REPAYMENT', principal: 1000, credit_balance: 0 };
+    const inst = [{ nominal_due: '2026-02-01', due_date: '2026-02-01' }];
+    const at = (t, extra = {}) => types.forLoan({ ...base, product_type: t, ...extra });
+    check('a dynamic loan without late interest stops accruing at maturity',
+      at('DYNAMIC_TERM').accrualWindow({ ...base, accrue_late_interest: false }, '2026-01-15', '2026-03-01', inst) === '2026-02-01');
+    check('a revolving loan keeps accruing past its last billed installment (it is not a maturity)',
+      at('REVOLVING').accrualWindow({ ...base, accrue_late_interest: false }, '2026-02-15', '2026-03-01', inst) === '2026-03-01');
+    check('only fixed-term interest is applied at disbursement',
+      at('FIXED_TERM').appliesInterestAtDisbursement({ interest_posting: 'ON_DISBURSEMENT' })
+      && !at('DYNAMIC_TERM').appliesInterestAtDisbursement({ interest_posting: 'ON_DISBURSEMENT' }));
+    check('an interest-free loan never accrues', !at('INTEREST_FREE').accrues({ ...base, product_type: 'INTEREST_FREE' }));
+    check('a revolving loan stays open at a zero balance; the others close',
+      !at('REVOLVING').closesWhenPaid && ['FIXED_TERM', 'DYNAMIC_TERM', 'TRANCHED', 'INTEREST_FREE'].every((t) => at(t).closesWhenPaid));
+    check('only tranched and revolving loans disburse again',
+      Object.entries(types.BY_TYPE).every(([t, s]) => s.disbursesAgain === ['TRANCHED', 'REVOLVING'].includes(t)));
+    check('the predicates read the strategy',
+      types.isDynamic({ product_type: 'TRANCHED' }) && !types.isDynamic({ product_type: 'FIXED_TERM' })
+      && types.isInterestFree({ product_type: 'FIXED_TERM', monthly_rate: 0 }) && types.isInterestFree({ product_type: 'INTEREST_FREE', monthly_rate: 0 }));
 
     // ----------------------------------------------------------------------
     section('setup');

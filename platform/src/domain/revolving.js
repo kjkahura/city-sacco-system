@@ -6,6 +6,9 @@ const S = require('./schedule');
 const ledger = require('./ledger');
 const fees = require('./fees');
 const { accrueInterest } = require('./interest');
+const types = require('./productTypes');
+const { validUntil, available, firstBillingDate, nextBillingDate } = require('./productTypes/revolving');
+const { isRevolving } = types;
 const { err, round2 } = acct;
 
 /**
@@ -31,30 +34,8 @@ const { err, round2 } = acct;
 
 const { ymd, isoDate } = S;
 
-const isRevolving = (l) => l.product_type === 'REVOLVING';
-
-function validUntil(l) {
-  const start = l.disbursed_on || l.approved_on;
-  return start ? isoDate(S.addMonths(ymd(start), Number(l.term_months))) : null;
-}
-
-/** What the member may still draw. */
-function available(l) {
-  return round2(Math.max(0, Number(l.principal) - ledger.principalOutstanding(l)) + Number(l.credit_balance || 0));
-}
-
-/** The billing dates are the product's schedule dates, rolling from the first drawdown. */
-function firstBillingDate(l, from) {
-  const inputs = ledger.scheduleInputs(l);
-  const [d] = S.nominalDueDates({ start: from, count: 1, interval: inputs.interval, fixedDays: inputs.fixedDays,
-    shortMonth: inputs.shortMonth, firstOffsetDays: inputs.firstOffsetDays });
-  return isoDate(d);
-}
-function nextBillingDate(l, after) {
-  const inputs = ledger.scheduleInputs(l);
-  const [d] = S.nominalDueDates({ start: after, count: 1, interval: inputs.interval, fixedDays: inputs.fixedDays, shortMonth: inputs.shortMonth });
-  return isoDate(d);
-}
+// What makes a loan revolving (drawdown limits, billing dates) is the
+// REVOLVING strategy in ./productTypes/revolving; this module is billing.
 
 /**
  * Generate the installment for a billing date: interest is brought up to
