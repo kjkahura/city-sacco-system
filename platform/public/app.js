@@ -1137,15 +1137,17 @@ const PRODUCT_FIELDS = (p = {}) => [
   { label: 'Cap base', name: 'chargeCapBase', options: ['OUTSTANDING_PRINCIPAL', 'ORIGINAL_PRINCIPAL'], value: p.chargeCapBase || 'OUTSTANDING_PRINCIPAL' },
   { label: 'Cap mode', name: 'chargeCapMode', options: ['HARD', 'SOFT'], value: p.chargeCapMode || 'HARD' },
   opt({ label: 'Lock after days in arrears (blank: never)', name: 'autoLockArrearsDays', type: 'number', value: p.autoLockArrearsDays ?? '' }),
-  { label: 'Accounting', name: 'accountingMethod', options: ['ACCRUAL', 'CASH', 'NONE'], value: p.accountingMethod || 'ACCRUAL' },
-  { label: 'Interest accrual', name: 'interestAccrual', options: ['DAILY', 'MONTHLY', 'NONE'], value: p.interestAccrual || 'DAILY' },
+  { label: 'Accounting (fixed once loans exist; use Change accounting method)', name: 'accountingMethod', options: ['ACCRUAL', 'CASH', 'NONE'], value: p.accountingMethod || 'ACCRUAL' },
+  { label: 'Accrued interest reaches the ledger (ACCRUAL only)', name: 'interestAccruedAccounting', options: ['DAILY', 'MONTHLY', 'NONE'], value: p.interestAccruedAccounting || 'DAILY' },
+  { label: 'Accrual entries', name: 'accrualGranularity', options: ['PER_ACCOUNT', 'AGGREGATED'], value: p.accrualGranularity || 'PER_ACCOUNT' },
+  { label: 'Interest added to what is owed', name: 'interestAccrual', options: ['DAILY', 'MONTHLY', 'NONE'], value: p.interestAccrual || 'DAILY' },
   { label: 'Day count', name: 'dayCount', options: ['THIRTY_360', 'ACTUAL_365', 'ACTUAL_360', 'ACTUAL_ACTUAL'], value: p.dayCount || 'THIRTY_360' },
 ];
 
 const PRODUCT_ENUM_FIELDS = ['category', 'idMode', 'initialState', 'productType', 'method', 'interestType', 'simpleBase', 'interestPosting',
   'rateFrequency', 'prepaymentRecalculation', 'repaymentIntervalUnit', 'shortMonthHandling', 'graceType', 'rounding',
   'arrearsCountFrom', 'arrearsNonWorkingDays', 'penaltyBasis', 'chargeCapBase', 'chargeCapMode', 'accountingMethod', 'interestAccrual', 'dayCount',
-  'taxMethod', 'funderAllocation'];
+  'taxMethod', 'funderAllocation', 'interestAccruedAccounting', 'accrualGranularity'];
 const PRODUCT_NUM_FIELDS = ['monthlyRate', 'rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm', 'maxTerm',
   'repaymentIntervalCount', 'firstDueOffsetDays', 'gracePeriods', 'amortizationPeriods', 'processingFee', 'maxMultiplier',
   'arrearsToleranceDays', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'penaltyRate', 'penaltyToleranceDays',
@@ -1172,7 +1174,12 @@ function productBody(d) {
     out.fixedDaysOfMonth = d.fixedDaysOfMonth.trim() ? d.fixedDaysOfMonth.split(',').map((x) => Number(x.trim())).filter(Boolean) : null;
   }
   if (d.revolvingRepaymentMethod !== undefined) out.revolvingRepaymentMethod = d.revolvingRepaymentMethod || null;
-  for (const k of ['glCreditBalance', 'glTaxPayable']) if (d[k] !== undefined) out[k] = d[k] || null;
+  // Mappings go only where the settings use them: a product refuses an
+  // account it would never post to.
+  const linked = out.accountingMethod !== 'NONE';
+  if (d.glCreditBalance !== undefined) out.glCreditBalance = linked && out.creditBalanceEnabled ? d.glCreditBalance || null : null;
+  if (d.glTaxPayable !== undefined) out.glTaxPayable = linked && (out.taxOnInterest || out.taxOnFees || out.taxOnPenalties) ? d.glTaxPayable || null : null;
+  if (out.accountingMethod && out.accountingMethod !== 'ACCRUAL') out.interestAccruedAccounting = 'NONE';
   if (out.productType === 'INTEREST_FREE') out.monthlyRate = 0;
   return out;
 }
@@ -1189,6 +1196,7 @@ const FEE_FIELDS = (f = {}) => [
   { label: 'Required', name: 'required', options: ['true', 'false'], value: String(f.required ?? true) },
   opt({ label: 'Fee income GL (blank: product default)', name: 'glIncome', value: f.glIncome || '' }),
   opt({ label: 'Fee receivable GL (blank: product default)', name: 'glReceivable', value: f.glReceivable || '' }),
+  opt({ label: 'Fee write-off GL (blank: product default)', name: 'glWriteOff', value: f.glWriteOff || '' }),
   { label: 'Active', name: 'isActive', options: ['true', 'false'], value: String(f.isActive ?? true) },
 ];
 function feeBody(d) {
@@ -1197,7 +1205,7 @@ function feeBody(d) {
     code: d.code ? d.code.toUpperCase() : undefined, name: d.name, feeType: d.feeType, calculation: d.calculation,
     amount: num(d.amount), percent: num(d.percent), minAmount: num(d.minAmount), maxAmount: num(d.maxAmount),
     required: d.required === 'true', isActive: d.isActive === 'true',
-    glIncome: d.glIncome || null, glReceivable: d.glReceivable || null,
+    glIncome: d.glIncome || null, glReceivable: d.glReceivable || null, glWriteOff: d.glWriteOff || null,
   };
 }
 
@@ -1212,7 +1220,7 @@ async function productDetail(p0) {
   view().innerHTML = `
     <button class="secondary" id="back">← Products</button>
     <div class="toolbar"><h1>${esc(p.id)} · ${esc(p.name)}</h1><span class="spacer"></span>
-      <button id="p-edit" class="secondary">Edit settings</button><button id="p-fee">Add fee</button></div>
+      <button id="p-edit" class="secondary">Edit settings</button><button id="p-method" class="secondary">Change accounting method</button><button id="p-fee">Add fee</button></div>
     <div class="grid">
       ${card('Interest', `<dl class="kv">
         <dt>Type</dt><dd>${esc(words[p.productType] || p.productType)}</dd>
@@ -1237,7 +1245,8 @@ async function productDetail(p0) {
         <dt>Cap on charges</dt><dd>${p.chargeCapPercent === null ? 'none set' : `${p.chargeCapPercent}% of ${esc(p.chargeCapBase)}, ${esc(p.chargeCapMode)}`}</dd>
         <dt>Auto lock</dt><dd>${p.autoLockArrearsDays === null ? 'never' : `after ${p.autoLockArrearsDays} days in arrears`}</dd>
         <dt>Eligibility</dt><dd>${p.maxMultiplier}× deposits${p.enforceDepositMultiplier ? '' : ' (not enforced)'}${p.requireGuarantorCover ? `, ${p.minCoverPercent}% cover` : ''}</dd>
-        <dt>Accounting</dt><dd>${esc(p.accountingMethod)}${p.accountingMethod !== 'NONE' ? ` · portfolio ${esc(p.gl.portfolio)} · interest ${esc(p.gl.interestIncome)}` : ''}</dd>
+        <dt>Accounting</dt><dd>${esc(p.accountingMethod)}${p.accountingMethod === 'ACCRUAL' ? ` · accrued interest to the ledger ${esc(p.interestAccruedAccounting)}, ${esc(p.accrualGranularity.toLowerCase().replace('_', ' '))}` : ''}</dd>
+        <dt>GL rules</dt><dd>${p.accountingRules.length ? p.accountingRules.map((r) => `${esc(r.resource)} ${esc(r.glCode || '(default)')}`).join(' · ') : 'none: not linked to accounting'}</dd>
         <dt>Allocation</dt><dd>${p.allocationOrder.join(' → ')}</dd>
         <dt>Securities</dt><dd>${[p.securities.guarantors ? 'guarantors' : null, p.securities.collateral ? 'collateral' : null].filter(Boolean).join(', ') || 'none'}</dd>
         <dt>Tax</dt><dd>${p.tax.ratePercent === null ? 'none' : `${p.tax.ratePercent}% ${p.tax.method.toLowerCase()} on ${[p.tax.onInterest ? 'interest' : null, p.tax.onFees ? 'fees' : null, p.tax.onPenalties ? 'penalties' : null].filter(Boolean).join(', ') || 'nothing'}`}</dd>
@@ -1264,6 +1273,7 @@ async function productDetail(p0) {
     toast(res.ok ? `${p.id} saved` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) productDetail(p);
   });
+  $('#p-method').addEventListener('click', () => changeMethod('loan-products', p, productDetail));
   $('#p-fee').addEventListener('click', async () => {
     const d = await ask(FEE_FIELDS(), `New fee on ${p.id}`);
     if (!d) return;
@@ -1317,11 +1327,243 @@ async function productsView() {
       { label: 'Fee income GL account', name: 'glFeeInc', value: '400-200' },
     ], 'New loan product');
     if (!d) return;
-    const res = await api('POST', '/api/loan-products', {
-      id: d.id, ...productBody(d), glPortfolio: d.glPortfolio, glInterestInc: d.glInterestInc, glFeeInc: d.glFeeInc,
-    });
+    const body = { id: d.id, ...productBody(d) };
+    if (body.accountingMethod !== 'NONE') Object.assign(body, { glPortfolio: d.glPortfolio, glInterestInc: d.glInterestInc, glFeeInc: d.glFeeInc });
+    const res = await api('POST', '/api/loan-products', body);
     toast(res.ok ? `${res.body.id} created` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) productsView();
+  });
+  depositProductsSection();
+}
+
+// A product's accounting method changes through its own action, after the
+// previous month is closed; the open balances are converted and the change
+// is recorded with its reason.
+async function changeMethod(kind, p, reload) {
+  const d = await ask([
+    { label: 'New accounting method', name: 'accountingMethod', options: ['ACCRUAL', 'CASH', 'NONE'], value: p.accountingMethod },
+    { label: 'Accrued interest reaches the ledger (ACCRUAL only)', name: 'interestAccruedAccounting', options: ['DAILY', 'MONTHLY', 'NONE'], value: p.interestAccruedAccounting || 'NONE' },
+    { label: 'Reason (kept with the change)', name: 'reason' },
+  ], `Change the accounting method of ${p.id}`);
+  if (!d) return;
+  const res = await api('POST', `/api/${kind}/${p.id}/accounting-method`, {
+    accountingMethod: d.accountingMethod, interestAccruedAccounting: d.accountingMethod === 'ACCRUAL' ? d.interestAccruedAccounting : 'NONE', reason: d.reason,
+  });
+  toast(res.ok ? `${p.id} is now ${d.accountingMethod}; ${res.body.accounts} account(s) converted` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
+  if (res.ok) reload(p);
+}
+
+// --------------------------------------------------------------------------
+// Deposit products
+// --------------------------------------------------------------------------
+
+const DEPOSIT_FIELDS = (p = {}) => [
+  { label: 'Name', name: 'name', value: p.name || '' },
+  { label: 'Withdrawable', name: 'withdrawable', options: ['true', 'false'], value: String(p.withdrawable ?? true) },
+  { label: 'Minimum balance', name: 'minBalance', type: 'number', step: '0.01', value: p.minBalance ?? 0 },
+  { label: 'Pays interest into the account', name: 'interestPaidIntoAccount', options: ['false', 'true'], value: String(p.interest?.paidIntoAccount ?? false) },
+  { label: 'Annual rate, percent', name: 'annualRate', type: 'number', step: '0.0001', value: p.interest?.annualRate ?? 0 },
+  { label: 'Interest on', name: 'interestCalcBalance', options: ['END_OF_DAY', 'MINIMUM'], value: p.interest?.calcBalance || 'END_OF_DAY' },
+  { label: 'Day count', name: 'interestDayCount', options: ['ACTUAL_365', 'ACTUAL_360', 'THIRTY_360'], value: p.interest?.dayCount || 'ACTUAL_365' },
+  { label: 'Applied', name: 'interestApplication', options: ['MONTHLY', 'QUARTERLY', 'SEMI_ANNUAL', 'ANNUAL'], value: p.interest?.application || 'MONTHLY' },
+  opt({ label: 'Minimum balance to earn interest', name: 'minBalanceForInterest', type: 'number', step: '0.01', value: p.interest?.minBalanceForInterest ?? '' }),
+  { label: 'Allow a negative rate', name: 'allowNegativeRate', options: ['false', 'true'], value: String(p.interest?.allowNegativeRate ?? false) },
+  opt({ label: 'Withholding tax, percent (blank: none)', name: 'withholdingTaxPercent', type: 'number', step: '0.001', value: p.interest?.withholdingTaxPercent ?? '' }),
+  { label: 'Allow overdrafts', name: 'allowOverdraft', options: ['false', 'true'], value: String(p.overdraft?.allowed ?? false) },
+  opt({ label: 'Maximum overdraft limit', name: 'maxOverdraftLimit', type: 'number', step: '0.01', value: p.overdraft?.maxLimit ?? '' }),
+  { label: 'Overdraft annual rate, percent', name: 'overdraftAnnualRate', type: 'number', step: '0.0001', value: p.overdraft?.annualRate ?? 0 },
+  { label: 'Allow technical overdrafts (charges past zero)', name: 'allowTechnicalOverdraft', options: ['false', 'true'], value: String(p.overdraft?.technicalAllowed ?? false) },
+  { label: 'Accounting (fixed once accounts exist; use Change accounting method)', name: 'accountingMethod', options: ['CASH', 'ACCRUAL', 'NONE'], value: p.accountingMethod || 'CASH' },
+  { label: 'Accrued interest reaches the ledger (ACCRUAL only)', name: 'interestAccruedAccounting', options: ['NONE', 'DAILY', 'MONTHLY'], value: p.interestAccruedAccounting || 'NONE' },
+  { label: 'Accrual entries', name: 'accrualGranularity', options: ['PER_ACCOUNT', 'AGGREGATED'], value: p.accrualGranularity || 'PER_ACCOUNT' },
+  opt({ label: 'GL: Savings Control', name: 'glSavingsControl', value: p.gl?.savingsControl || '200-100' }),
+  opt({ label: 'GL: Fee Income', name: 'glFeeIncome', value: p.gl?.feeIncome || '400-200' }),
+  opt({ label: 'GL: Interest Expense', name: 'glInterestExpense', value: p.gl?.interestExpense || '500-100' }),
+  opt({ label: 'GL: Interest Payable (accrual)', name: 'glInterestPayable', value: p.gl?.interestPayable || '200-110' }),
+  opt({ label: 'GL: Withholding Tax Payable', name: 'glTaxPayable', value: p.gl?.taxPayable || '200-330' }),
+  opt({ label: 'GL: Negative Interest Income', name: 'glNegativeInterestIncome', value: p.gl?.negativeInterestIncome || '400-310' }),
+  opt({ label: 'GL: Negative Interest Receivable (accrual)', name: 'glNegativeInterestReceivable', value: p.gl?.negativeInterestReceivable || '100-330' }),
+  opt({ label: 'GL: Overdraft Portfolio', name: 'glOverdraftPortfolio', value: p.gl?.overdraftPortfolio || '100-400' }),
+  opt({ label: 'GL: Overdraft Write-off', name: 'glOverdraftWriteOff', value: p.gl?.overdraftWriteOff || '500-320' }),
+  opt({ label: 'GL: Overdraft Interest Income', name: 'glOverdraftInterestIncome', value: p.gl?.overdraftInterestIncome || '400-300' }),
+  opt({ label: 'GL: Overdraft Interest Receivable (accrual)', name: 'glOverdraftInterestReceivable', value: p.gl?.overdraftInterestReceivable || '100-410' }),
+];
+
+// Build the body, then ask the server which mappings those settings use and
+// send only those: a product refuses an account it would never post to.
+async function depositBody(d) {
+  const num = (v) => (v === '' || v === undefined ? null : Number(v));
+  const out = {
+    name: d.name, withdrawable: d.withdrawable === 'true', minBalance: num(d.minBalance) ?? 0,
+    interestPaidIntoAccount: d.interestPaidIntoAccount === 'true', annualRate: num(d.annualRate) ?? 0,
+    interestCalcBalance: d.interestCalcBalance, interestDayCount: d.interestDayCount, interestApplication: d.interestApplication,
+    minBalanceForInterest: num(d.minBalanceForInterest), allowNegativeRate: d.allowNegativeRate === 'true',
+    withholdingTaxPercent: num(d.withholdingTaxPercent), allowOverdraft: d.allowOverdraft === 'true',
+    maxOverdraftLimit: num(d.maxOverdraftLimit), overdraftAnnualRate: num(d.overdraftAnnualRate) ?? 0,
+    allowTechnicalOverdraft: d.allowTechnicalOverdraft === 'true', accountingMethod: d.accountingMethod,
+    interestAccruedAccounting: d.accountingMethod === 'ACCRUAL' ? d.interestAccruedAccounting : 'NONE', accrualGranularity: d.accrualGranularity,
+  };
+  const r = await api('POST', '/api/deposit-products/accounting-rules', out);
+  const byColumn = {
+    gl_liability: 'glSavingsControl', gl_fee_inc: 'glFeeIncome', gl_interest_exp: 'glInterestExpense', gl_interest_payable: 'glInterestPayable',
+    gl_tax_payable: 'glTaxPayable', gl_neg_interest_inc: 'glNegativeInterestIncome', gl_neg_interest_rec: 'glNegativeInterestReceivable',
+    gl_od_portfolio: 'glOverdraftPortfolio', gl_od_writeoff: 'glOverdraftWriteOff', gl_od_interest_inc: 'glOverdraftInterestIncome',
+    gl_od_interest_rec: 'glOverdraftInterestReceivable',
+  };
+  for (const rule of (r.ok ? r.body : [])) {
+    const k = byColumn[rule.column];
+    if (k) out[k] = rule.used ? d[k] || null : null;
+  }
+  return out;
+}
+
+async function depositProductDetail(p0) {
+  const r = await api('GET', `/api/deposit-products/${p0.id}`);
+  if (!r.ok) throw new Error(r.error);
+  const p = r.body;
+  view().innerHTML = `
+    <button class="secondary" id="back">← Products</button>
+    <div class="toolbar"><h1>${esc(p.id)} · ${esc(p.name)}</h1><span class="spacer"></span>
+      <button id="d-edit" class="secondary">Edit settings</button><button id="d-method" class="secondary">Change accounting method</button><button id="d-fee">Add fee</button></div>
+    <div class="grid">
+      ${card('Interest', `<dl class="kv">
+        <dt>Paid</dt><dd>${p.interest.paidIntoAccount ? `${p.interest.annualRate}% a year on the ${esc(p.interest.calcBalance.toLowerCase().replace(/_/g, ' '))} balance, ${esc(p.interest.dayCount)}, applied ${esc(p.interest.application.toLowerCase().replace('_', ' '))}` : 'no interest'}</dd>
+        <dt>Threshold</dt><dd>${p.interest.minBalanceForInterest ?? 'none'}</dd>
+        <dt>Withholding tax</dt><dd>${p.interest.withholdingTaxPercent === null ? 'not set' : `${p.interest.withholdingTaxPercent}%`}</dd>
+      </dl>`)}
+      ${card('Overdraft', `<dl class="kv">
+        <dt>Authorised</dt><dd>${p.overdraft.allowed ? `up to ${p.overdraft.maxLimit ?? 'any amount'} at ${p.overdraft.annualRate}% a year` : 'no'}</dd>
+        <dt>Technical</dt><dd>${p.overdraft.technicalAllowed ? 'charges may take the balance below zero' : 'no'}</dd>
+      </dl>`)}
+      ${card('Accounting', `<dl class="kv">
+        <dt>Method</dt><dd>${esc(p.accountingMethod)}${p.accountingMethod === 'ACCRUAL' ? ` · accrued interest to the ledger ${esc(p.interestAccruedAccounting)}, ${esc(p.accrualGranularity.toLowerCase().replace('_', ' '))}` : ''}</dd>
+        <dt>GL rules</dt><dd>${p.accountingRules.length ? p.accountingRules.map((x) => `${esc(x.resource)} ${esc(x.glCode)}`).join(' · ') : 'none: not linked to accounting'}</dd>
+        <dt>Accounts</dt><dd>${p.accounts}</dd>
+      </dl>`)}
+    </div>
+    ${card('Fees', table([
+    { label: 'Code', key: 'code' }, { label: 'Fee', key: 'name' }, { label: 'When', key: 'trigger' },
+    { label: 'Amount', num: true, value: (f) => (f.amount === null ? 'set when charged' : money(f.amount)) },
+    { label: 'Income GL', value: (f) => f.glIncome || 'product default' },
+  ], p.fees, { empty: 'No fees defined.' }))}`;
+  $('#back').addEventListener('click', productsView);
+  $('#d-edit').addEventListener('click', async () => {
+    const d = await ask(DEPOSIT_FIELDS(p), `Edit ${p.id}`);
+    if (!d) return;
+    const body = await depositBody(d);
+    if (p.accounts > 0) { delete body.accountingMethod; delete body.interestAccruedAccounting; }
+    const res = await api('PATCH', `/api/deposit-products/${p.id}`, body);
+    toast(res.ok ? `${p.id} saved` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
+    if (res.ok) depositProductDetail(p);
+  });
+  $('#d-method').addEventListener('click', () => changeMethod('deposit-products', p, depositProductDetail));
+  $('#d-fee').addEventListener('click', async () => {
+    const d = await ask([
+      { label: 'Code', name: 'code' }, { label: 'Name', name: 'name' },
+      { label: 'When', name: 'trigger', options: ['MANUAL', 'MONTHLY'], value: 'MANUAL' },
+      opt({ label: 'Amount', name: 'amount', type: 'number', step: '0.01', value: '' }),
+      opt({ label: 'Income GL (blank: product default)', name: 'glIncome', value: '' }),
+    ], `New fee on ${p.id}`);
+    if (!d) return;
+    const res = await api('POST', `/api/deposit-products/${p.id}/fees`, {
+      code: d.code.toUpperCase(), name: d.name, trigger: d.trigger, amount: d.amount === '' ? null : Number(d.amount), glIncome: d.glIncome || null,
+    });
+    toast(res.ok ? `Fee ${res.body.code} added` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
+    if (res.ok) depositProductDetail(p);
+  });
+}
+
+async function depositProductsSection() {
+  const r = await api('GET', '/api/deposit-products');
+  if (!r.ok) return;
+  const holder = document.createElement('section');
+  holder.innerHTML = `
+    <div class="toolbar"><h1>Deposit products</h1><span class="spacer"></span><button id="d-new">New deposit product</button></div>
+    ${table([
+    { label: 'Id', key: 'id' }, { label: 'Name', key: 'name' },
+    { label: 'Interest', value: (p) => (p.interest.paidIntoAccount ? `${p.interest.annualRate}% ${p.interest.application.toLowerCase()}` : 'none') },
+    { label: 'Overdraft', value: (p) => (p.overdraft.allowed ? `to ${p.overdraft.maxLimit ?? 'any'}` : p.overdraft.technicalAllowed ? 'technical only' : 'no') },
+    { label: 'Accounting', value: (p) => `${p.accountingMethod}${p.accountingMethod === 'ACCRUAL' ? ` · ${p.interestAccruedAccounting}` : ''}` },
+    { label: 'Accounts', num: true, key: 'accounts' },
+  ], r.body, { onRow: true, empty: 'No deposit products' })}`;
+  view().appendChild(holder);
+  holder.querySelectorAll('tr[data-row]').forEach((tr) => tr.addEventListener('click', () => depositProductDetail(r.body[Number(tr.dataset.row)])));
+  $('#d-new').addEventListener('click', async () => {
+    const d = await ask([{ label: 'Id (2 to 16 letters, digits or underscore)', name: 'id' }, ...DEPOSIT_FIELDS()], 'New deposit product');
+    if (!d) return;
+    const res = await api('POST', '/api/deposit-products', { id: d.id, ...(await depositBody(d)) });
+    toast(res.ok ? `${res.body.id} created` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
+    if (res.ok) productsView();
+  });
+}
+
+// --------------------------------------------------------------------------
+// Accounting: branches, inter-branch rules, closures
+// --------------------------------------------------------------------------
+
+async function accountingView() {
+  const [br, rules, closures, settings] = await Promise.all([
+    api('GET', '/api/branches'), api('GET', '/api/accounting/inter-branch-rules'),
+    api('GET', '/api/accounting/closures'), api('GET', '/api/accounting/settings'),
+  ]);
+  if (!br.ok) throw new Error(br.error);
+  const code = (id) => (br.body.find((b) => b.id === id) || {}).code || 'every branch';
+  const s = settings.body || {};
+  view().innerHTML = `
+    <div class="toolbar"><h1>Accounting</h1></div>
+    <p class="hint">Closures refuse anything dated on or before them, for the whole book or one branch.
+      An entry whose lines fall in two branches is squared through the inter-branch account named by the rule for that pair, or the default rule.</p>
+    <div class="grid">
+      ${card('Branches', `${table([
+    { label: 'Code', key: 'code' }, { label: 'Name', key: 'name' }, { label: 'Members', num: true, key: 'members' },
+    { label: 'Closed through', value: (b) => (b.closed_through ? String(b.closed_through).slice(0, 10) : 'open') },
+  ], br.body, { empty: 'No branches yet' })}<button id="b-new" class="secondary">Add branch</button>`)}
+      ${card('Inter-branch rules', `${table([
+    { label: 'Rule', key: 'id' }, { label: 'Between', value: (r) => (r.branch_a ? `${r.branch_a_code} and ${r.branch_b_code}` : 'any two branches (default)') },
+    { label: 'GL account', key: 'gl_code' },
+  ], rules.body || [], { empty: 'No rule: an entry across branches will be refused' })}<button id="r-default" class="secondary">Set default rule</button>`)}
+      ${card('Closures', `${table([
+    { label: 'Closed through', value: (k) => String(k.closed_through).slice(0, 10) }, { label: 'Scope', value: (k) => code(k.branch_id) },
+    { label: 'How', value: (k) => (k.automatic ? 'automatic' : 'by hand') }, { label: 'By', key: 'created_by' },
+  ], closures.body || [], { empty: 'The books are open' })}
+        <p class="hint">Automatic closures: ${s.auto_closure_enabled ? `every ${s.auto_closure_interval_days} day(s)` : 'off'}.</p>
+        <button id="k-new" class="secondary">Close the books</button> <button id="k-auto" class="secondary">Automatic closures</button>`)}
+    </div>`;
+  $('#b-new').addEventListener('click', async () => {
+    const d = await ask([{ label: 'Code', name: 'code' }, { label: 'Name', name: 'name' }, opt({ label: 'Town', name: 'town', value: '' })], 'New branch');
+    if (!d) return;
+    const res = await api('POST', '/api/branches', { code: d.code.toUpperCase(), name: d.name, town: d.town || null });
+    toast(res.ok ? `Branch ${res.body.code} added` : res.error, !res.ok);
+    if (res.ok) accountingView();
+  });
+  $('#r-default').addEventListener('click', async () => {
+    const d = await ask([{ label: 'Inter-branch GL account', name: 'glCode', value: '290-100' }], 'Default inter-branch rule');
+    if (!d) return;
+    const named = (rules.body || []).filter((x) => x.branch_a).map((x) => ({ id: x.id, branchA: x.branch_a, branchB: x.branch_b, glCode: x.gl_code }));
+    const res = await api('PUT', '/api/accounting/inter-branch-rules', { rules: [{ id: 'DEFAULT', glCode: d.glCode }, ...named] });
+    toast(res.ok ? 'Rules saved' : res.error, !res.ok);
+    if (res.ok) accountingView();
+  });
+  $('#k-new').addEventListener('click', async () => {
+    const d = await ask([
+      { label: 'Close through (a past date)', name: 'closedThrough', type: 'date' },
+      { label: 'Branch', name: 'branchId', options: ['', ...br.body.map((b) => b.code)], value: '' },
+      opt({ label: 'Notes', name: 'notes', value: '' }),
+    ], 'Close the books');
+    if (!d) return;
+    const res = await api('POST', '/api/accounting/closures', { closedThrough: d.closedThrough, branchId: d.branchId || null, notes: d.notes || null });
+    toast(res.ok ? `Closed through ${d.closedThrough}` : res.error, !res.ok);
+    if (res.ok) accountingView();
+  });
+  $('#k-auto').addEventListener('click', async () => {
+    const d = await ask([
+      { label: 'Automatic closures', name: 'on', options: ['false', 'true'], value: String(!!s.auto_closure_enabled) },
+      opt({ label: 'Every N days', name: 'days', type: 'number', value: s.auto_closure_interval_days ?? '' }),
+    ], 'Automatic closures');
+    if (!d) return;
+    const res = await api('PUT', '/api/accounting/settings', { autoClosureEnabled: d.on === 'true', autoClosureIntervalDays: d.days === '' ? null : Number(d.days) });
+    toast(res.ok ? 'Saved' : res.error, !res.ok);
+    if (res.ok) accountingView();
   });
 }
 
@@ -1333,4 +1575,5 @@ const VIEWS = {
   reports: reportsView,
   finance: financeView,
   returns: returnsView,
+  accounting: accountingView,
 };

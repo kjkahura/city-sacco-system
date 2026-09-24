@@ -348,6 +348,56 @@ async function settle(c, loanId, amount) {
   }
 }
 
+/** Outstanding fees in the order settle() pays them, with each fee's own GL accounts. */
+async function outstanding(c, l) {
+  const { rows } = await c.query(
+    `SELECT f.*, pf.gl_income, pf.gl_receivable, pf.gl_writeoff, COALESCE(pf.taxable, true) AS taxable
+     FROM loan_fees f LEFT JOIN loan_product_fees pf ON pf.id = f.product_fee_id
+     WHERE f.loan_id = $1 AND f.status = 'DUE' ORDER BY f.applied_on, f.created_at`, [l.id]);
+  return rows;
+}
+
+/**
+ * The credit lines for `amount` paid towards fees: under accrual each fee's
+ * receivable, under cash each fee's income (and tax payable where the fee is
+ * taxed). Anything not matched to a fee row goes to the product's accounts.
+ */
+async function settlementCredits(c, l, amount) {
+  let left = round2(amount);
+  if (!(left > 0)) return [];
+  const out = [];
+  for (const f of await outstanding(c, l)) {
+    if (left <= 0) break;
+    const take = round2(Math.min(left, f.amount - f.paid));
+    if (!(take > 0)) continue;
+    left = round2(left - take);
+    if (ledger.isAccrual(l)) {
+      out.push({ glCode: f.gl_receivable || l.gl_fee_rec, amount: take, memberId: l.member_id });
+    } else {
+      const sp = tax.splitPaid(l, 'FEE', take, { taxable: f.taxable });
+      out.push(...tax.incomeCredits(l, sp, f.gl_income || l.gl_fee_inc || l.gl_interest_inc, l.member_id));
+    }
+  }
+  if (left > 0) out.push(...ledger.creditsFor(l, 'FEE', left, l.member_id));
+  return out;
+}
+
+/** What writing off `total` of fees clears, fee by fee: its receivable and its write-off account. */
+async function writeOffLines(c, l, total) {
+  let left = round2(total);
+  if (!(left > 0)) return [];
+  const out = [];
+  for (const f of await outstanding(c, l)) {
+    if (left <= 0) break;
+    const take = round2(Math.min(left, f.amount - f.paid));
+    if (!(take > 0)) continue;
+    left = round2(left - take);
+    out.push({ amount: take, glReceivable: f.gl_receivable || l.gl_fee_rec, glWriteOff: f.gl_writeoff || l.gl_writeoff_exp });
+  }
+  if (left > 0) out.push({ amount: left, glReceivable: l.gl_fee_rec, glWriteOff: l.gl_writeoff_exp });
+  return out;
+}
+
 /** After a reversal: forget who paid what and reallocate the surviving total. */
 async function resettle(c, loanId, totalPaid) {
   await c.query(
@@ -376,6 +426,7 @@ async function forLoan(c, loanId) {
 }
 
 module.exports = {
+  settlementCredits, writeOffLines, outstanding,
   productFees, feeAmount, scheduledFees, disbursementFees, recordFee, placeUpfrontFees,
   applyPaymentDueFees, applyLateFees, applyManualFee, applyArbitraryFee, waive, settle, resettle,
   undoDisbursementFees, forLoan,

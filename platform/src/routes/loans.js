@@ -252,6 +252,9 @@ router.post('/:id/write-off', ...tx(async (c, req, res, { actor }) => {
   return await L.writeOff(c, req.params.id, { ...req.body, createdBy: actor });
 }, APPROVER));
 
+router.post('/:id/branch', ...tx((c, req, _res, { actor }) =>
+  require('../domain/branches').moveAccount(c, { kind: 'LOAN', accountId: req.params.id, branchId: req.body?.branchId, createdBy: actor }), APPROVER));
+
 // Corrections are reversals. There is no PUT or DELETE on a transaction.
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
   res.status(201);

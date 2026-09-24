@@ -16,41 +16,107 @@
 const err = (code, status = 400) => Object.assign(new Error(code), { status });
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
+const NIL = '00000000-0000-0000-0000-000000000000';
+const CLOSING_SOURCES = ['YEAR_END_CLOSE', 'STATUTORY_RESERVE'];
+
+/**
+ * The latest accounting closure covering a branch (its own or tenant-wide).
+ * The database enforces the same rule (013); this is here to refuse early,
+ * with a readable message, before anything is written.
+ */
+async function closedThrough(c, branchId) {
+  const { rows: [r] } = await c.query('SELECT closed_through_for($1::uuid) AS d', [branchId || null]);
+  return r.d ? isoDay(r.d) : null;
+}
+
+const isoDay = (d) => (d instanceof Date
+  ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  : String(d).slice(0, 10));
+
+async function assertOpen(c, date, branchIds) {
+  for (const b of new Set(branchIds.map((x) => x || null))) {
+    const through = await closedThrough(c, b);
+    if (through && date <= through) {
+      throw err(`JOURNAL_ENTRY_BEFORE_CLOSURE: ${date} is on or before the accounting closure of ${through}`, 409);
+    }
+  }
+}
+
+/** The GL account that carries balances between two branches. */
+async function interBranchAccount(c, a, b) {
+  const { rows } = await c.query(
+    `SELECT gl_code, branch_a FROM inter_branch_rules
+     WHERE (branch_a = $1 AND branch_b = $2) OR (branch_a = $2 AND branch_b = $1) OR branch_a IS NULL
+     ORDER BY branch_a IS NULL LIMIT 1`, [a || null, b || null]);
+  if (!rows.length) throw err('NO_INTER_BRANCH_GL_ACCOUNT: an entry across branches needs an inter-branch rule (a default rule covers every pair)', 409);
+  return rows[0].gl_code;
+}
+
+/**
+ * An entry must balance in every branch, not only in total. Lines in a
+ * branch other than the entry's own are squared against the entry's branch
+ * through the inter-branch account for that pair: the other branch gets the
+ * balancing line, the entry's branch the mirror of it.
+ */
+async function balanceBranches(c, lines, home) {
+  const net = new Map();
+  for (const l of lines) {
+    const k = l.branchId || null;
+    net.set(k, round2((net.get(k) || 0) + (l.direction === 'DEBIT' ? 1 : -1) * Number(l.amount)));
+  }
+  if (net.size < 2) return lines;
+  const out = [...lines];
+  for (const [b, n] of net) {
+    if (b === (home || null) || n === 0) continue;
+    const gl = await interBranchAccount(c, home, b);
+    const amt = Math.abs(n);
+    out.push({ glCode: gl, amount: amt, branchId: b, direction: n > 0 ? 'CREDIT' : 'DEBIT', interBranch: true });
+    out.push({ glCode: gl, amount: amt, branchId: home || null, direction: n > 0 ? 'DEBIT' : 'CREDIT', interBranch: true });
+  }
+  return out;
+}
+
 /**
  * @param {import('pg').PoolClient} c  open client with search_path on a tenant
  * @param {object} p
- * @param {Array<{glCode:string, amount:number, memberId?:string}>} p.debits
- * @param {Array<{glCode:string, amount:number, memberId?:string}>} p.credits
+ * @param {Array<{glCode:string, amount:number, memberId?:string, branchId?:string}>} p.debits
+ * @param {Array<{glCode:string, amount:number, memberId?:string, branchId?:string}>} p.credits
+ * @param {string} [p.branchId]  the entry's branch; lines without their own take it
  */
 async function post(c, {
   debits = [], credits = [], bookingDate = null, narration = '',
   sourceType = null, sourceId = null, channelId = null,
-  currencyCode = 'KES', createdBy = 'SYSTEM', reversalOf = null,
+  currencyCode = 'KES', createdBy = 'SYSTEM', reversalOf = null, branchId = null,
 }) {
   const dr = round2(debits.reduce((s, d) => s + Number(d.amount || 0), 0));
   const cr = round2(credits.reduce((s, x) => s + Number(x.amount || 0), 0));
   if (dr <= 0 && cr <= 0) throw err('JOURNAL_ENTRY_EMPTY');
   if (dr !== cr) throw err(`JOURNAL_ENTRY_UNBALANCED: debits ${dr}, credits ${cr}`);
 
+  let lines = [...debits.map((d) => ({ ...d, direction: 'DEBIT' })),
+               ...credits.map((x) => ({ ...x, direction: 'CREDIT' }))]
+    .filter((l) => Number(l.amount) > 0)
+    .map((l) => ({ ...l, branchId: l.branchId === undefined ? branchId : l.branchId }));
+  lines = await balanceBranches(c, lines, branchId);
+
+  const date = bookingDate ? isoDay(bookingDate) : isoDay(new Date());
+  if (!CLOSING_SOURCES.includes(sourceType)) await assertOpen(c, date, lines.map((l) => l.branchId));
+
   const { rows: [entry] } = await c.query(
     `INSERT INTO journal_entries
-       (booking_date, currency_code, narration, source_type, source_id, channel_id, created_by, reversal_of)
-     VALUES (COALESCE($1::date, current_date), $2, $3, $4, $5, $6, $7, $8)
+       (booking_date, currency_code, narration, source_type, source_id, channel_id, created_by, reversal_of, branch_id)
+     VALUES (COALESCE($1::date, current_date), $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING id, booking_date`,
-    [bookingDate, currencyCode, narration, sourceType, sourceId, channelId, createdBy, reversalOf]
+    [bookingDate, currencyCode, narration, sourceType, sourceId, channelId, createdBy, reversalOf, branchId || null]
   );
-
-  const lines = [...debits.map((d) => ({ ...d, direction: 'DEBIT' })),
-                 ...credits.map((x) => ({ ...x, direction: 'CREDIT' }))]
-    .filter((l) => Number(l.amount) > 0);
 
   let n = 0;
   for (const l of lines) {
     n += 1;
     await c.query(
-      `INSERT INTO journal_lines (entry_id, gl_code, direction, amount, member_id, line_no)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [entry.id, l.glCode, l.direction, round2(l.amount), l.memberId || null, n]
+      `INSERT INTO journal_lines (entry_id, gl_code, direction, amount, member_id, line_no, branch_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [entry.id, l.glCode, l.direction, round2(l.amount), l.memberId || null, n, l.branchId || null]
     );
   }
   return { entryId: entry.id, amount: dr, lineCount: n };
@@ -63,7 +129,7 @@ async function post(c, {
  */
 async function reverse(c, entryId, narration = 'Reversal', createdBy = 'SYSTEM', { bookingDate } = {}) {
   const { rows: original } = await c.query(
-    'SELECT gl_code, direction, amount, member_id FROM journal_lines WHERE entry_id = $1 ORDER BY line_no',
+    'SELECT gl_code, direction, amount, member_id, branch_id FROM journal_lines WHERE entry_id = $1 ORDER BY line_no',
     [entryId]
   );
   if (!original.length) throw err('JOURNAL_ENTRY_NOT_FOUND', 404);
@@ -74,7 +140,7 @@ async function reverse(c, entryId, narration = 'Reversal', createdBy = 'SYSTEM',
   // see the reversal but not what it reversed, and report the difference as
   // real trading.
   const { rows: [head] } = await c.query(
-    'SELECT source_type, source_id, booking_date FROM journal_entries WHERE id = $1', [entryId]);
+    'SELECT source_type, source_id, booking_date, branch_id FROM journal_entries WHERE id = $1', [entryId]);
 
   // A reversal is dated with the entry it reverses unless the caller says
   // otherwise. Letting it default to today moves money between accounting
@@ -89,10 +155,13 @@ async function reverse(c, entryId, narration = 'Reversal', createdBy = 'SYSTEM',
   if (already) throw err('JOURNAL_ENTRY_ALREADY_REVERSED', 409);
 
   return post(c, {
+    // Every line keeps its branch, inter-branch lines included, so the
+    // mirror balances per branch without new balancing lines.
     debits: original.filter((l) => l.direction === 'CREDIT')
-      .map((l) => ({ glCode: l.gl_code, amount: l.amount, memberId: l.member_id })),
+      .map((l) => ({ glCode: l.gl_code, amount: l.amount, memberId: l.member_id, branchId: l.branch_id })),
     credits: original.filter((l) => l.direction === 'DEBIT')
-      .map((l) => ({ glCode: l.gl_code, amount: l.amount, memberId: l.member_id })),
+      .map((l) => ({ glCode: l.gl_code, amount: l.amount, memberId: l.member_id, branchId: l.branch_id })),
+    branchId: head?.branch_id || null,
     narration, createdBy, reversalOf: entryId,
     sourceType: head?.source_type || null, sourceId: head?.source_id || null,
     bookingDate: bookingDate || head?.booking_date || null,
@@ -197,13 +266,27 @@ async function verifyRollup(c, { from = null, to = null } = {}) {
  * a trial balance whose totals only add up the fifty rows you happen to be
  * looking at is worse than useless: it would say the book is unbalanced.
  */
-async function trialBalance(c, { from = null, to = null, offset = 0, limit = null } = {}) {
+/**
+ * Movement per account for one branch, from the per-branch rollup (013).
+ * `$3` is the branch; lines posted without one are the nil uuid.
+ */
+const MOVEMENT_SQL_BRANCH = `
+  SELECT b.gl_code, SUM(b.debit) AS debit, SUM(b.credit) AS credit
+  FROM gl_branch_daily_balances b
+  WHERE ($1::date IS NULL OR b.booking_date >= $1::date)
+    AND ($2::date IS NULL OR b.booking_date <= $2::date)
+    AND b.branch_key = $3::uuid
+  GROUP BY b.gl_code`;
+
+async function trialBalance(c, { from = null, to = null, offset = 0, limit = null, branchId = null } = {}) {
+  const movement = branchId ? MOVEMENT_SQL_BRANCH : MOVEMENT_SQL;
+  const params = branchId ? [from, to, branchId === 'NONE' ? NIL : branchId] : [from, to];
   const sql = `
     SELECT g.code, g.name, g.type,
            COALESCE(m.debit, 0) AS debit,
            COALESCE(m.credit, 0) AS credit
     FROM gl_accounts g
-    JOIN (${MOVEMENT_SQL}) m ON m.gl_code = g.code
+    JOIN (${movement}) m ON m.gl_code = g.code
     WHERE COALESCE(m.debit, 0) + COALESCE(m.credit, 0) > 0
     ORDER BY g.code`;
 
@@ -211,17 +294,19 @@ async function trialBalance(c, { from = null, to = null, offset = 0, limit = nul
     `SELECT COALESCE(SUM(debit),0) AS debit, COALESCE(SUM(credit),0) AS credit,
             count(*)::int AS accounts
      FROM (${sql}) s`,
-    [from, to]
+    params
   );
   const totals = { debit: round2(t.debit), credit: round2(t.credit) };
 
   const take = limit === null ? null : Math.max(1, Number(limit));
+  const n = params.length;
   const { rows } = take === null
-    ? await c.query(sql, [from, to])
-    : await c.query(`${sql} LIMIT $3 OFFSET $4`, [from, to, take, Math.max(0, Number(offset) || 0)]);
+    ? await c.query(sql, params)
+    : await c.query(`${sql} LIMIT $${n + 1} OFFSET $${n + 2}`, [...params, take, Math.max(0, Number(offset) || 0)]);
 
   return {
     period: { from, to },
+    branchId: branchId || null,
     rows: rows.map((r) => ({ ...r, balance: round2(r.debit - r.credit) })),
     page: { offset: Number(offset) || 0, limit: take, total: t.accounts },
     totals,
@@ -249,6 +334,6 @@ async function balances(c, { from = null, to = null } = {}) {
 }
 
 module.exports = {
-  post, reverse, balance, balances, trialBalance, verifyRollup, round2, err,
+  post, reverse, balance, balances, trialBalance, verifyRollup, round2, err, closedThrough, isoDay,
   MOVEMENT_SQL, MOVEMENT_SQL_TRADING, MOVEMENT_SQL_FROM_LINES,
 };

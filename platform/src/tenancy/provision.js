@@ -58,6 +58,17 @@ const SEED_GL = [
   ['500-200', 'Operating Expenses',          'EXPENSE',   'EXPENSE'],
   ['500-300', 'Loan Loss Provision',         'EXPENSE',   'EXPENSE'],
   ['500-310', 'Loan Write-off Expense',      'EXPENSE',   'EXPENSE'],
+  ['100-330', 'Negative Interest Receivable', 'ASSET',    'OTHER_ASSET'],
+  ['100-400', 'Overdraft Portfolio',         'ASSET',     'LOAN_PORTFOLIO'],
+  ['100-410', 'Overdraft Interest Receivable', 'ASSET',   'OTHER_ASSET'],
+  ['200-110', 'Interest Payable on Deposits', 'LIABILITY', 'SHORT_TERM_LIABILITY'],
+  ['200-330', 'Withholding Tax Payable',     'LIABILITY', 'SHORT_TERM_LIABILITY'],
+  ['290-100', 'Inter-branch Clearing',       'LIABILITY', 'OTHER_LIABILITY'],
+  ['290-900', 'Suspense: Products Without Accounting', 'LIABILITY', 'OTHER_LIABILITY'],
+  ['300-900', 'Accounting Method Conversions', 'EQUITY',  'INSTITUTIONAL_CAPITAL'],
+  ['400-300', 'Overdraft Interest Income',   'INCOME',    'INCOME'],
+  ['400-310', 'Negative Interest Income',    'INCOME',    'INCOME'],
+  ['500-320', 'Overdraft Write-off Expense', 'EXPENSE',   'EXPENSE'],
 ];
 
 const SEED_CHANNELS = [
@@ -132,8 +143,8 @@ async function provisionTenant({
         );
       }
       await c.query(
-        `INSERT INTO savings_products (id, name, annual_rate, gl_liability, gl_interest_exp)
-         VALUES ('SAV01','Ordinary Savings',4.000,'200-100','500-100') ON CONFLICT DO NOTHING`
+        `INSERT INTO savings_products (id, name, annual_rate, gl_liability, gl_interest_exp, gl_fee_inc)
+         VALUES ('SAV01','Ordinary Savings',4.000,'200-100','500-100','400-200') ON CONFLICT DO NOTHING`
       );
       await c.query(
         `INSERT INTO loan_products (id, name, method, monthly_rate, max_term, processing_fee, gl_portfolio, gl_interest_inc, gl_fee_inc)

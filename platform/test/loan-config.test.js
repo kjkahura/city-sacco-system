@@ -430,15 +430,21 @@ const product = (id, body) => call('POST', '/api/loan-products', { id, name: id,
 
     // ----------------------------------------------------------------------
     section('a product not linked to accounting');
-    const none = await product('NOACC', { accountingMethod: 'NONE', monthlyRate: 1, maxTerm: 12, glPortfolio: undefined, glInterestInc: undefined });
+    const noMap = await product('NOAC0', { accountingMethod: 'NONE', monthlyRate: 1, maxTerm: 12, glPortfolio: undefined, glInterestInc: undefined });
+    check('a mapping sent for a product not linked to accounting is refused', noMap.status === 400 && /NOT_REQUIRED_ACCOUNTING_RULE: feeIncome/.test(noMap.source || ''), noMap.source);
+    const none = await product('NOACC', { accountingMethod: 'NONE', monthlyRate: 1, maxTerm: 12, glPortfolio: undefined, glInterestInc: undefined, glFeeInc: undefined });
     check('needs no GL accounts', none.status === 201 && none.body.accountingMethod === 'NONE', `${none.status} ${none.source || none.reason || ''}`);
-    const linesBefore = await Rd(async (c) => (await c.query('SELECT count(*)::int AS n FROM journal_lines')).rows[0].n);
+    const loanGls = ['100-100', '100-300', '100-310', '100-320', '400-100', '400-200'];
+    const onLoanGls = () => Rd(async (c) => (await c.query('SELECT count(*)::int AS n FROM journal_lines WHERE gl_code = ANY($1)', [loanGls])).rows[0].n);
+    const linesBefore = await onLoanGls();
+    const suspenseBefore = await bal('290-900');
     const { m: mN } = await T((c) => newMember(c));
     const nlo = await T((c) => disbursedLoan(c, mN.id, 'NOACC', 50000, 5, '2026-01-12'));
     await accrue(nlo.id, '2026-02-12');
     await repay(nlo.id, 10500, '2026-02-12');
-    const linesAfter = await Rd(async (c) => (await c.query('SELECT count(*)::int AS n FROM journal_lines')).rows[0].n);
-    check('disbursement, accrual and repayment wrote no journal lines', linesAfter === linesBefore, `${linesBefore} -> ${linesAfter}`);
+    const linesAfter = await onLoanGls();
+    check('disbursement, accrual and repayment touched none of the loan accounts', linesAfter === linesBefore, `${linesBefore} -> ${linesAfter}`);
+    check('the cash moved against suspense: 50,000 out, 10,500 back', (await bal('290-900')) - suspenseBefore === 39500, String((await bal('290-900')) - suspenseBefore));
     check('but the loan keeps its balances', (await balancesOf(nlo.id)).principal === 40000 && (await balancesOf(nlo.id)).interest === 0);
     await assertBalanced('unlinked product');
 

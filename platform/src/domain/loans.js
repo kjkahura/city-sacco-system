@@ -15,11 +15,12 @@ const fees = require('./fees');
 const installments = require('./installments');
 const interest = require('./interest');
 const revolving = require('./revolving');
+const PA = require('./productAccounting');
 const { err, round2 } = acct;
 const { ymd, isoDate } = S;
 const {
   OVERRIDES, resolveOverrides, within,
-  lock, balances, isDynamic, isRevolving, isTranched, isAccrual, booksEntries, post, creditsFor, writeOffCredit,
+  lock, balances, isDynamic, isRevolving, isTranched, isAccrual, interestAccrues, booksEntries, post, creditsFor, writeOffCredit,
 } = ledger;
 const { buildSchedule, reschedule, applyToInstallments } = installments;
 const { accrueInterest } = interest;
@@ -116,7 +117,7 @@ async function nextAccountNo(c, p) {
  */
 async function apply(c, params) {
   const { memberId, productId = 'NL01', principal, termMonths, purpose, notes, accountNo, createdBy,
-    tranches: plannedTranches = null, fundingSources = null, collateral = null } = params;
+    tranches: plannedTranches = null, fundingSources = null, collateral = null, branchId = undefined } = params;
   const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1 AND is_active', [productId]);
   if (!p) throw err('UNKNOWN_LOAN_PRODUCT', 404);
 
@@ -136,7 +137,10 @@ async function apply(c, params) {
 
   const no = accountNo || await nextAccountNo(c, p);
   const status = p.initial_state || 'PENDING_APPROVAL';
+  // The loan sits in its member's branch unless told otherwise.
+  const { rows: [mem] } = await c.query('SELECT branch_id FROM members WHERE id = $1', [memberId]);
   const cols = {
+    branch_id: branchId === undefined ? mem?.branch_id || null : branchId,
     account_no: no, member_id: memberId, product_id: productId, principal: amount, term_months: term,
     product_type: p.product_type || 'FIXED_TERM', status, purpose: purpose || null, notes: notes || null,
     ...own,
@@ -168,13 +172,34 @@ async function changeState(c, loanId, action, opts = {}) {
 }
 
 /**
+ * A product not linked to accounting still moves real money: the channel's
+ * leg is posted and its other side is the tenant's suspense account (a
+ * funded loan's funders' side is real too, and posted). Nothing touches the
+ * loan's own accounts.
+ */
+async function postUnlinked(c, l, entry, { cash, funded = null, extra = [] }) {
+  if (!(cash && cash.amount > 0)) return null;
+  const cashIsCredit = entry.credits.includes(cash);
+  const other = [...(funded ? funded.debits || funded.credits || [] : []), ...extra];
+  const otherTotal = round2(other.reduce((t, x) => t + Number(x.amount), 0));
+  const gap = round2(cash.amount - otherTotal);
+  const suspense = await PA.suspense(c);
+  const suspenseLeg = gap !== 0 ? [{ glCode: suspense, amount: Math.abs(gap), memberId: l.member_id, branchId: l.branch_id }] : [];
+  const sameSide = gap > 0;
+  const debits = cashIsCredit ? [...other, ...(sameSide ? suspenseLeg : [])] : [cash, ...(sameSide ? [] : suspenseLeg)];
+  const credits = cashIsCredit ? [cash, ...(sameSide ? [] : suspenseLeg)] : [...other, ...(sameSide ? suspenseLeg : [])];
+  const e = await acct.post(c, { ...entry, debits, credits, branchId: l.branch_id || null });
+  return e.entryId;
+}
+
+/**
  * Disburse an approved loan. Fees the product defines for disbursement are
  * settled here: deducted fees come out of what the member receives,
  * capitalised fees are added to what they repay, upfront fees become due.
  * The schedule is drawn on the resulting principal. Under ON_DISBURSEMENT
  * posting the schedule's whole interest is applied at once.
  */
-async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narration, createdBy, user = null, fees: selectedFees = [], tranche = null } = {}) {
+async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narration, createdBy, user = null, fees: selectedFees = [], tranche = null, branchId: tellerBranch = null } = {}) {
   const l = await lock(c, loanId);
   const first = l.status === 'APPROVED';
   const again = !first && ['ACTIVE', 'IN_ARREARS'].includes(l.status) && (isTranched(l) || isRevolving(l));
@@ -233,16 +258,17 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
   else if (fromLoan > 0) debits.push({ glCode: l.gl_portfolio, amount: fromLoan, memberId: l.member_id });
   if (plan.capitalized > 0) debits.push({ glCode: l.gl_portfolio, amount: plan.capitalized, memberId: l.member_id });
   if (fromCredit > 0) debits.push({ glCode: l.gl_credit_balance, amount: fromCredit, memberId: l.member_id });
-  const credits = [{ glCode: ch.gl_account_code, amount: paidOut, memberId: l.member_id }];
+  const credits = [{ glCode: ch.gl_account_code, amount: paidOut, memberId: l.member_id, branchId: tellerBranch || l.branch_id }];
   for (const f of plan.items.filter((x) => x.feeType === 'DISBURSEMENT_DEDUCTED' || x.feeType === 'DISBURSEMENT_CAPITALIZED')) {
     credits.push(...tax.incomeCredits(l, { income: f.net, tax: f.tax }, f.glIncome, l.member_id));
   }
-  const entryId = await post(c, l, {
+  const entry = {
     debits, credits,
     narration: narration || `Disbursement ${l.account_no}${plannedTranche ? ` tranche ${plannedTranche.number}` : ''}`,
     sourceType: 'LOAN_DISBURSEMENT', sourceId: l.id, channelId,
     bookingDate: date, createdBy,
-  });
+  };
+  const entryId = booksEntries(l) ? await post(c, l, entry) : await postUnlinked(c, l, entry, { cash: credits[0], funded });
 
   const { rows } = await c.query(
     `UPDATE loan_accounts
@@ -289,7 +315,7 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
       'UPDATE loan_accounts SET interest_accrued = interest_accrued + $1, tax_charged = tax_charged + $4, accrued_through = $2::date WHERE id = $3',
       [tx.gross, maturity, l.id, tx.tax]);
     let ie = null;
-    if (isAccrual(l)) {
+    if (interestAccrues(l)) {
       ie = await post(c, l, {
         debits: [{ glCode: l.gl_interest_rec, amount: tx.gross, memberId: l.member_id }],
         credits: tax.incomeCredits(l, tx, l.gl_interest_inc, l.member_id),
@@ -327,7 +353,7 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
  * under accrual, the receivable that was debited when it was applied; under
  * cash, income. See paidCredit().
  */
-async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy } = {}) {
+async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy, branchId: tellerBranch = null } = {}) {
   let l = await lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   let left = round2(amount);
@@ -365,22 +391,29 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   // Where each component's money goes. On a funded loan the principal and
   // the funders' share of the interest go back to the funders' accounts;
   // the organisation keeps its commission, fees and penalties.
+  // Fees are credited fee by fee, each to its own receivable (or income,
+  // under cash), in the order fees.settle will mark them paid.
   const credits = [];
   let distributed = null;
+  const feeCredits = await fees.settlementCredits(c, l, feesPaid);
   if (await funding.isFunded(c, l.id)) {
     distributed = await funding.distribute(c, l, { principal, interest, date: asOf, createdBy, finalPayment });
     credits.push(...distributed.credits);
     credits.push(...creditsFor(l, 'INTEREST', distributed.orgInterest, l.member_id));
-    credits.push(...creditsFor(l, 'FEE', feesPaid, l.member_id));
+    credits.push(...feeCredits);
     credits.push(...creditsFor(l, 'PENALTY', penalty, l.member_id));
   } else {
-    for (const component of order) credits.push(...creditsFor(l, component, paid[component], l.member_id));
+    for (const component of order) {
+      if (component === 'FEE') credits.push(...feeCredits);
+      else credits.push(...creditsFor(l, component, paid[component], l.member_id));
+    }
   }
 
   // A surplus is the member's money: on a revolving loan with a credit
   // balance it stays on the loan for the next drawdown; otherwise it goes to
   // their savings rather than sitting as an unexplained credit.
   let surplusAccount = null;
+  const surplusCredits = [];
   let toCreditBalance = 0;
   if (surplus > 0) {
     if (isRevolving(l) && l.credit_balance_enabled) {
@@ -391,33 +424,35 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
       credits.push({ glCode: l.gl_credit_balance, amount: surplus, memberId: l.member_id });
     } else {
       const { rows } = await c.query(
-        `SELECT a.id, p.gl_liability FROM savings_accounts a
+        `SELECT a.id FROM savings_accounts a
          JOIN savings_products p ON p.id = a.product_id
          WHERE a.member_id = $1 AND a.status = 'ACTIVE' AND NOT p.is_funding_account ORDER BY a.opened_on LIMIT 1`,
         [l.member_id]
       );
       if (!rows.length) throw err('OVERPAYMENT_WITH_NO_SAVINGS_ACCOUNT_TO_RECEIVE_IT', 409);
-      surplusAccount = rows[0];
-      credits.push({ glCode: surplusAccount.gl_liability, amount: surplus, memberId: l.member_id });
+      // The surplus lands in savings as a deposit would: it clears any
+      // overdraft first, and follows the deposit product's own accounting.
+      surplusAccount = await savings.lock(c, rows[0].id);
+      surplusAccount.legs = savings.inLegs(surplusAccount, surplus);
+      surplusCredits.push(...(savings.books(surplusAccount) ? surplusAccount.legs.credits
+        : [{ glCode: await PA.suspense(c), amount: surplus, memberId: l.member_id, branchId: surplusAccount.branch_id }]));
+      if (booksEntries(l)) credits.push(...surplusCredits);
     }
   }
 
-  // Under NONE the loan still needs the cash to land somewhere: the channel
-  // and the savings surplus are booked, the loan side is not.
+  // Under NONE the loan's own accounts are not touched, but the cash is
+  // real: the channel is booked against suspense, and the funders' and the
+  // savings surplus legs are booked as they are.
+  const cashLeg = { glCode: ch.gl_account_code, amount: total, memberId: l.member_id, branchId: tellerBranch || l.branch_id };
+  const repayEntry = {
+    debits: [cashLeg], credits: credits.filter((x) => x.amount > 0),
+    narration: narration || `Repayment ${l.account_no}`,
+    sourceType: 'LOAN_REPAYMENT', sourceId: l.id, channelId,
+    bookingDate: asOf, createdBy,
+  };
   const entryId = booksEntries(l)
-    ? await post(c, l, {
-      debits: [{ glCode: ch.gl_account_code, amount: total, memberId: l.member_id }],
-      credits: credits.filter((x) => x.amount > 0),
-      narration: narration || `Repayment ${l.account_no}`,
-      sourceType: 'LOAN_REPAYMENT', sourceId: l.id, channelId,
-      bookingDate: asOf, createdBy,
-    })
-    : (surplus > 0 && surplusAccount ? (await acct.post(c, {
-      debits: [{ glCode: ch.gl_account_code, amount: surplus, memberId: l.member_id }],
-      credits: [{ glCode: surplusAccount.gl_liability, amount: surplus, memberId: l.member_id }],
-      narration: `Repayment surplus ${l.account_no}`, sourceType: 'LOAN_REPAYMENT', sourceId: l.id, channelId,
-      bookingDate: asOf, createdBy,
-    })).entryId : null);
+    ? await post(c, l, repayEntry)
+    : await postUnlinked(c, l, repayEntry, { cash: cashLeg, extra: [...(distributed ? distributed.credits : []), ...surplusCredits] });
 
   await c.query(
     `UPDATE loan_accounts SET
@@ -429,8 +464,9 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     [penalty, feesPaid, interest, principal, l.id, toCreditBalance]
   );
   if (surplusAccount) {
-    await c.query('UPDATE savings_accounts SET balance = balance + $1 WHERE id = $2',
-      [surplus, surplusAccount.id]);
+    await c.query(
+      `UPDATE savings_accounts SET balance = balance + $1, od_fees_due = od_fees_due - $2, od_interest_due = od_interest_due - $3
+       WHERE id = $4`, [surplus, surplusAccount.legs.allocation.odFees, surplusAccount.legs.allocation.odInterest, surplusAccount.id]);
   }
 
   const dynamic = isDynamic(l);
@@ -481,15 +517,23 @@ async function writeOff(c, loanId, { narration, createdBy } = {}) {
   // three were never recognised, so only the principal is booked.
   const funded = await funding.isFunded(c, l.id);
   // A funded loan's principal was never on the SACCO's books.
+  // Each fee is written off against its own receivable and, where the fee
+  // names one, its own write-off account.
   const credits = funded ? [] : [{ glCode: writeOffCredit(l, 'PRINCIPAL'), amount: b.principal, memberId: l.member_id }];
+  const debits = [];
   if (isAccrual(l)) {
-    for (const [component, amount] of [['INTEREST', b.interest], ['FEE', b.fees], ['PENALTY', b.penalty]]) {
-      if (amount > 0) credits.push({ glCode: writeOffCredit(l, component), amount, memberId: l.member_id });
+    if (interestAccrues(l) && b.interest > 0) credits.push({ glCode: writeOffCredit(l, 'INTEREST'), amount: b.interest, memberId: l.member_id });
+    if (b.penalty > 0) credits.push({ glCode: writeOffCredit(l, 'PENALTY'), amount: b.penalty, memberId: l.member_id });
+    for (const f of await fees.writeOffLines(c, l, b.fees)) {
+      credits.push({ glCode: f.glReceivable, amount: f.amount, memberId: l.member_id });
+      if (f.glWriteOff !== l.gl_writeoff_exp) debits.push({ glCode: f.glWriteOff, amount: f.amount, memberId: l.member_id });
     }
   }
   const booked = round2(credits.reduce((s2, x) => s2 + x.amount, 0));
+  const ownDebits = round2(debits.reduce((s2, x) => s2 + x.amount, 0));
+  if (round2(booked - ownDebits) > 0) debits.push({ glCode: l.gl_writeoff_exp, amount: round2(booked - ownDebits), memberId: l.member_id });
   const entryId = booked > 0 ? await post(c, l, {
-    debits: [{ glCode: l.gl_writeoff_exp, amount: booked, memberId: l.member_id }],
+    debits,
     credits: credits.filter((x) => x.amount > 0),
     narration: narration || `Write off ${l.account_no}`,
     sourceType: 'LOAN_WRITE_OFF', sourceId: l.id, createdBy,

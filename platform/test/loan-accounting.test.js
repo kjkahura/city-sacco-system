@@ -290,7 +290,7 @@ async function disbursedLoan(c, memberId, productId, principal, term, on = today
     const badGl = await call('POST', '/api/loan-products', {
       id: 'BAD1', name: 'Bad GL', glPortfolio: '400-100', glInterestInc: '400-100' });
     check('a portfolio account that is not an asset is refused',
-      badGl.status === 400 && /gl_portfolio: 400-100 is INCOME/.test(badGl.err?.errorSource || ''),
+      badGl.status === 400 && /gl_portfolio\) 400-100 is INCOME/.test(badGl.err?.errorSource || ''),
       `${badGl.status} ${badGl.err?.errorSource}`);
     const badEnum = await call('POST', '/api/loan-products', {
       id: 'BAD2', name: 'Bad enum', glPortfolio: '100-100', glInterestInc: '400-100', dayCount: 'ACTUAL_364' });

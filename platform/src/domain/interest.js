@@ -6,10 +6,11 @@ const savings = require('./savings');
 const tax = require('./tax');
 const funding = require('./funding');
 const workflow = require('./workflow');
+const accruals = require('./accruals');
 const { round2 } = acct;
 const { ymd, isoDate, toUTC, interestBetween } = S;
 const {
-  lock, principalOutstanding, terms, isDynamic, isInterestFree, isAccrual, post, isMonthEnd,
+  lock, principalOutstanding, terms, isDynamic, isInterestFree, isAccrual, interestAccrues, booksEntries, post, isMonthEnd,
 } = require('./ledger');
 const { scheduledOutstanding, scheduledInterestThrough } = require('./installments');
 
@@ -121,20 +122,23 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   let recorded = null;
   if (amt > 0) {
     let entryId = null;
-    if (isAccrual(l) && !capitalizing) {
+    if (booksEntries(l) && interestAccrues(l) && !capitalizing) {
       // On a funded loan only the organisation's commission is its income;
       // the funders' share reaches them when the member pays.
       const funded = await funding.isFunded(c, l.id);
       const own = funded ? funding.interestShares(l, tx.income).org : tx.income;
       const ownTax = funded ? round2(tx.tax * (tx.income > 0 ? own / tx.income : 0)) : tx.tax;
-      if (own + ownTax > 0) {
-        entryId = await post(c, l, {
-          debits: [{ glCode: l.gl_interest_rec, amount: round2(own + ownTax), memberId: l.member_id }],
-          credits: tax.incomeCredits(l, { income: own, tax: ownTax }, l.gl_interest_inc, l.member_id),
-          narration: `Interest accrual ${l.account_no} ${fromIso} to ${date}`,
-          sourceType: 'LOAN_INTEREST_ACCRUAL', sourceId: l.id, bookingDate: date, createdBy,
-        });
-      }
+      // When the entry reaches the ledger is the product's GL accrual method
+      // and granularity (./accruals): at once per loan, at the day's end per
+      // product and branch, or at the month's end.
+      entryId = await accruals.record(c, {
+        kind: 'LOAN', product: { ...l, id: l.product_id }, accountId: l.id, memberId: l.member_id, branchId: l.branch_id,
+        date, createdBy, narration: `Interest accrual ${l.account_no} ${fromIso} to ${date}`,
+        lines: [
+          { component: 'INTEREST', debitGl: l.gl_interest_rec, creditGl: l.gl_interest_inc, amount: round2(own) },
+          { component: 'INTEREST_TAX', debitGl: l.gl_interest_rec, creditGl: l.gl_tax_payable, amount: round2(ownTax) },
+        ],
+      });
     }
     recorded = await savings.record(c, {
       reference: savings.ref('LI'), kind: 'LOAN_INTEREST_ACCRUAL', memberId: l.member_id,

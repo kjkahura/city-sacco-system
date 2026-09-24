@@ -77,6 +77,32 @@ router.post('/:id/transfers', ...tx(async (c, req, res, { actor }) => {
   return await S.transfer(c, req.params.id, { ...req.body, createdBy: actor });
 }, TELLER));
 
+router.post('/:id/fees', ...tx(async (c, req, res, { actor }) => {
+  res.status(201);
+  return await S.applyFee(c, req.params.id, { ...req.body, createdBy: actor });
+}, TELLER));
+
+router.put('/:id/overdraft', ...tx((c, req, _res, { actor }) =>
+  S.setOverdraftLimit(c, req.params.id, { limit: req.body?.limit, createdBy: actor }), APPROVER));
+
+router.post('/:id/overdraft/write-off', ...tx(async (c, req, res, { actor }) => {
+  res.status(201);
+  return await S.writeOffOverdraft(c, req.params.id, { ...req.body, createdBy: actor });
+}, APPROVER));
+
+// Bring interest up to a date, and apply it when that date is an
+// application date (or when told to). The end of day does both for every
+// account; this is for one.
+router.post('/:id/interest', ...tx(async (c, req, _res, { actor }) => {
+  const date = req.body?.date || new Date().toISOString().slice(0, 10);
+  const accrued = await S.accrueInterest(c, req.params.id, { date, createdBy: actor });
+  const applied = req.body?.apply ? await S.applyInterest(c, req.params.id, { date, createdBy: actor }) : [];
+  return { accrued, applied };
+}, APPROVER));
+
+router.post('/:id/branch', ...tx((c, req, _res, { actor }) =>
+  require('../domain/branches').moveAccount(c, { kind: 'SAVINGS', accountId: req.params.id, branchId: req.body?.branchId, createdBy: actor }), APPROVER));
+
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await S.reverseTransaction(c, req.params.reference, { ...req.body, createdBy: actor });
@@ -95,7 +121,7 @@ accounting.get('/trial-balance', requireAuth(...LEDGER_READER), async (req, res,
     // accounts is long.
     const { offset, limit } = pageParams(req.query);
     res.json(await withTenantRead(req.tenant.schema_name, (c) => acct.trialBalance(c, {
-      from: req.query.from || null, to: req.query.to || null, offset, limit,
+      from: req.query.from || null, to: req.query.to || null, offset, limit, branchId: req.query.branchId || null,
     })));
   } catch (e) { next(e); }
 });
