@@ -182,7 +182,7 @@ function resolveOverrides(p, given = {}, { opening = false, term = null, current
 const PRODUCT_ONLY = [
   'method', 'gl_portfolio', 'gl_interest_inc', 'gl_fee_inc', 'gl_penalty_inc',
   'gl_interest_rec', 'gl_fee_rec', 'gl_penalty_rec', 'gl_writeoff_exp',
-  'accounting_method', 'interest_accrual', 'day_count', 'allocation_order',
+  'accounting_method', 'interest_accrual', 'interest_accrued_accounting', 'accrual_granularity', 'day_count', 'allocation_order',
   'enforce_deposit_multiplier', 'require_guarantor_cover', 'min_cover_percent',
   'prepayment_recalculation', 'accrue_late_interest',
   'processing_fee', 'max_multiplier',
@@ -310,11 +310,19 @@ async function shiftOffClosedDays(c, iso) {
 const isAccrual = (l) => l.accounting_method !== 'CASH' && l.accounting_method !== 'NONE';
 const booksEntries = (l) => l.accounting_method !== 'NONE';
 
+/**
+ * Whether accrued interest reaches the ledger before it is paid: accrual
+ * accounting with a GL accrual method (DAILY or MONTHLY). Under accrual with
+ * the method NONE, fees and penalties still go through their receivables
+ * but interest is recognised when paid, as under cash.
+ */
+const interestAccrues = (l) => isAccrual(l) && (l.interest_accrued_accounting || 'DAILY') !== 'NONE';
+
 /** GL account credited when a component is paid. */
 function paidCredit(l, component) {
   switch (component) {
     case 'PRINCIPAL': return l.gl_portfolio;
-    case 'INTEREST':  return isAccrual(l) ? l.gl_interest_rec : l.gl_interest_inc;
+    case 'INTEREST':  return interestAccrues(l) ? l.gl_interest_rec : l.gl_interest_inc;
     case 'FEE':       return isAccrual(l) ? l.gl_fee_rec : (l.gl_fee_inc || l.gl_interest_inc);
     case 'PENALTY':   return isAccrual(l) ? l.gl_penalty_rec : (l.gl_penalty_inc || l.gl_interest_inc);
     default: throw err(`UNKNOWN_COMPONENT: ${component}`);
@@ -328,7 +336,8 @@ function paidCredit(l, component) {
  */
 function creditsFor(l, component, amount, memberId) {
   if (!(amount > 0)) return [];
-  if (isAccrual(l)) return [{ glCode: paidCredit(l, component), amount, memberId }];
+  const viaReceivable = component === 'INTEREST' ? interestAccrues(l) : isAccrual(l);
+  if (viaReceivable || component === 'PRINCIPAL') return [{ glCode: paidCredit(l, component), amount, memberId }];
   const s = tax.splitPaid(l, component, amount);
   return tax.incomeCredits(l, s, paidCredit(l, component), memberId);
 }
@@ -350,7 +359,7 @@ function writeOffCredit(l, component) {
  */
 async function post(c, l, entry) {
   if (!booksEntries(l)) return null;
-  const e = await acct.post(c, entry);
+  const e = await acct.post(c, { branchId: l.branch_id || null, ...entry });
   return e.entryId;
 }
 
@@ -372,6 +381,6 @@ module.exports = {
   OVERRIDES, effective, overrideSql, resolveOverrides, within,
   PRODUCT_COLUMNS, lock, principalOutstanding, balances, terms,
   isDynamic, isRevolving, isTranched, isInterestFree, scheduleInputs, shiftOffClosedDays,
-  isAccrual, booksEntries, paidCredit, creditsFor, writeOffCredit, post,
+  isAccrual, booksEntries, interestAccrues, paidCredit, creditsFor, writeOffCredit, post,
   interestFor, isMonthEnd,
 };

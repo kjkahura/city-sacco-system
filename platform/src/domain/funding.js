@@ -28,7 +28,9 @@ const { err, round2 } = acct;
 
 async function fundingOf(c, loanId) {
   const { rows } = await c.query(
-    `SELECT f.*, a.account_no, a.balance, p.gl_liability, m.member_no, m.first_name, m.last_name
+    `SELECT f.*, a.account_no, a.balance, a.branch_id AS account_branch,
+            CASE WHEN p.accounting_method = 'NONE' THEN (SELECT gl_suspense FROM accounting_settings WHERE only_row) ELSE p.gl_liability END AS gl_liability,
+            m.member_no, m.first_name, m.last_name
      FROM loan_funding_sources f
      JOIN savings_accounts a ON a.id = f.savings_account_id
      JOIN savings_products p ON p.id = a.product_id
@@ -138,7 +140,7 @@ async function fund(c, l, { amount, date, createdBy }) {
     if (Number(a.balance) < part) throw err(`FUNDER_${f.account_no}_HAS_INSUFFICIENT_BALANCE`, 409);
     await c.query('UPDATE savings_accounts SET balance = balance - $1 WHERE id = $2', [part, f.savings_account_id]);
     await c.query("UPDATE loan_funding_sources SET status = 'FUNDED', funded_at = now() WHERE id = $1", [f.id]);
-    debits.push({ glCode: f.gl_liability, amount: part, memberId: f.member_id });
+    debits.push({ glCode: f.gl_liability, amount: part, memberId: f.member_id, branchId: f.account_branch });
     await savings.record(c, {
       reference: savings.ref('LFD'), kind: 'LOAN_FUNDED', memberId: f.member_id, savingsAccountId: f.savings_account_id,
       loanAccountId: l.id, amount: -part, valueDate: date, allocation: { fundingId: f.id, share: round4(share) }, createdBy,
@@ -196,7 +198,7 @@ async function distribute(c, l, { principal, interest, date, createdBy, finalPay
       await c.query(
         `UPDATE loan_funding_sources SET principal_returned = principal_returned + $1, interest_returned = interest_returned + $2,
            status = CASE WHEN principal_returned + $1 >= amount THEN 'REPAID' ELSE status END WHERE id = $3`, [p, iAmt, f.id]);
-      credits.push({ glCode: f.gl_liability, amount: back, memberId: f.member_id });
+      credits.push({ glCode: f.gl_liability, amount: back, memberId: f.member_id, branchId: f.account_branch });
       await savings.record(c, {
         reference: savings.ref('LRF'), kind: 'LOAN_REPAID_TO_FUNDER', memberId: f.member_id, savingsAccountId: f.savings_account_id,
         loanAccountId: l.id, amount: back, valueDate: date, allocation: { fundingId: f.id, principal: p, interest: iAmt }, createdBy,

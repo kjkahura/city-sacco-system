@@ -4,6 +4,7 @@ const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const { apiError, badRequest, notFound } = require('../lib/http');
+const PA = require('../domain/productAccounting');
 
 /**
  * Loan products, the whole configuration surface, after Mambu's loan
@@ -40,6 +41,8 @@ const ENUMS = {
   prepayment_recalculation: ['NONE', 'REDUCE_INSTALLMENT_AMOUNT', 'REDUCE_NUMBER_OF_INSTALLMENTS'],
   accounting_method: ['ACCRUAL', 'CASH', 'NONE'],
   interest_accrual: ['DAILY', 'MONTHLY', 'NONE'],
+  interest_accrued_accounting: ['NONE', 'DAILY', 'MONTHLY'],
+  accrual_granularity: ['PER_ACCOUNT', 'AGGREGATED'],
   day_count: ['THIRTY_360', 'ACTUAL_365', 'ACTUAL_360', 'ACTUAL_ACTUAL'],
   penalty_basis: ['NONE', 'OVERDUE_PRINCIPAL', 'OVERDUE_PRINCIPAL_INTEREST', 'OVERDUE_ALL', 'OUTSTANDING_PRINCIPAL'],
   id_mode: ['RANDOM', 'INCREMENTAL'],
@@ -78,6 +81,7 @@ const FIELDS = {
   chargeCapPercent: 'charge_cap_percent', chargeCapBase: 'charge_cap_base', chargeCapMode: 'charge_cap_mode',
   autoClosePaidOffDays: 'auto_close_paid_off_days', autoLockArrearsDays: 'auto_lock_arrears_days',
   accountingMethod: 'accounting_method', interestAccrual: 'interest_accrual', dayCount: 'day_count',
+  interestAccruedAccounting: 'interest_accrued_accounting', accrualGranularity: 'accrual_granularity',
   allocationOrder: 'allocation_order',
   enforceDepositMultiplier: 'enforce_deposit_multiplier',
   requireGuarantorCover: 'require_guarantor_cover', minCoverPercent: 'min_cover_percent',
@@ -106,14 +110,6 @@ const FROZEN_WITH_LOANS = ['product_type', 'method', 'interest_type', 'simple_ba
   'rate_frequency', 'day_count', 'repayment_interval_unit', 'repayment_interval_count', 'fixed_days_of_month',
   'tax_method', 'funding_enabled', 'funder_allocation'];
 
-// Which GL type each mapping must point at. A portfolio account that is an
-// income account would balance every entry and be wrong on every report.
-const GL_TYPES = {
-  gl_portfolio: ['ASSET'], gl_interest_rec: ['ASSET'], gl_fee_rec: ['ASSET'], gl_penalty_rec: ['ASSET'],
-  gl_interest_inc: ['INCOME'], gl_fee_inc: ['INCOME'], gl_penalty_inc: ['INCOME'],
-  gl_writeoff_exp: ['EXPENSE'], gl_credit_balance: ['LIABILITY'], gl_tax_payable: ['LIABILITY'],
-};
-
 const num = (v) => (v === null || v === undefined ? null : Number(v));
 
 const publicProduct = (p) => ({
@@ -141,6 +137,8 @@ const publicProduct = (p) => ({
   chargeCapPercent: num(p.charge_cap_percent), chargeCapBase: p.charge_cap_base, chargeCapMode: p.charge_cap_mode,
   autoClosePaidOffDays: p.auto_close_paid_off_days, autoLockArrearsDays: p.auto_lock_arrears_days,
   accountingMethod: p.accounting_method, interestAccrual: p.interest_accrual, dayCount: p.day_count,
+  interestAccruedAccounting: p.interest_accrued_accounting, accrualGranularity: p.accrual_granularity,
+  accountingRules: PA.resources('LOAN', p).filter((r) => r.used).map((r) => ({ resource: r.resource, glCode: r.glCode })),
   allocationOrder: p.allocation_order,
   enforceDepositMultiplier: p.enforce_deposit_multiplier,
   requireGuarantorCover: p.require_guarantor_cover, minCoverPercent: Number(p.min_cover_percent),
@@ -264,18 +262,20 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
   }
   if (creating && !cols.name) problems.push('name is required');
 
-  // Every GL mapping named must exist, be active and be of the right type.
-  const glCols = Object.keys(GL_TYPES).filter((k) => cols[k] !== undefined && cols[k] !== null);
-  if (glCols.length) {
-    const codes = glCols.map((k) => cols[k]);
-    const { rows } = await c.query('SELECT code, type, is_active FROM gl_accounts WHERE code = ANY($1)', [codes]);
-    for (const k of glCols) {
-      const g = rows.find((r) => r.code === cols[k]);
-      if (!g) problems.push(`${k}: no GL account ${cols[k]}`);
-      else if (!g.is_active) problems.push(`${k}: GL account ${cols[k]} is inactive`);
-      else if (!GL_TYPES[k].includes(g.type)) problems.push(`${k}: ${cols[k]} is ${g.type}, needs ${GL_TYPES[k].join(' or ')}`);
-    }
+  // The accounting method and GL mappings: which resources the product
+  // needs follows from the method and the features switched on
+  // (./domain/productAccounting). Changing the method, or when accrued
+  // interest reaches the ledger, on a product with loans is a change of
+  // accounting, done through POST /:id/accounting-method so that open
+  // balances are converted rather than stranded.
+  if (before && loans > 0) {
+    const moved = ['accounting_method', 'interest_accrued_accounting'].filter((k) => cols[k] !== undefined && cols[k] !== before[k]);
+    if (moved.length) problems.push(`ACCOUNTING_METHOD_CHANGES_THROUGH_CHANGE_ACTION: ${moved.join(', ')} cannot be edited while ${loans} loan(s) exist; use POST /api/loan-products/${before.id}/accounting-method`);
   }
+  const base = before ? {} : await PA.tableDefaults(c, 'loan_products');
+  const pa = await PA.validate(c, 'LOAN', { ...base, ...merged, accounting_method: merged.accounting_method || base.accounting_method || 'ACCRUAL' }, cols);
+  problems.push(...pa.problems);
+  Object.assign(cols, pa.fixes);
   return problems;
 }
 
@@ -323,13 +323,6 @@ router.post('/', requireAuth(...ADMIN), async (req, res, next) => {
     if (!/^[A-Z0-9_]{2,16}$/.test(id)) return badRequest(res, 'PRODUCT_ID_MUST_BE_2_TO_16_UPPERCASE_ALPHANUMERIC');
     const cols = toColumns(req.body);
     if (cols.product_type === 'INTEREST_FREE' && cols.monthly_rate === undefined) cols.monthly_rate = 0;
-    // Required GL mappings for a new product linked to accounting; an
-    // unlinked product needs none.
-    if (cols.accounting_method !== 'NONE') {
-      for (const k of ['gl_portfolio', 'gl_interest_inc']) {
-        if (!cols[k]) return badRequest(res, `${k.toUpperCase()}_REQUIRED`);
-      }
-    }
     const out = await withTenant(req.tenant.schema_name, async (c) => {
       const problems = await validate(c, cols, { creating: true });
       if (problems.length) return { problems };
@@ -345,6 +338,7 @@ router.post('/', requireAuth(...ADMIN), async (req, res, next) => {
         `INSERT INTO audit_log (actor, action, entity, entity_id, after)
          VALUES ($1,'LOAN_PRODUCT_CREATED','loan_product',$2,$3)`,
         [req.auth.email, id, JSON.stringify(rows[0])]);
+      await PA.recordMappings(c, 'LOAN', id, null, rows[0], req.auth.email);
       return { row: await withFees(c, rows[0]) };
     });
     if (out.problems) return apiError(res, 400, 400, 'INVALID_LOAN_PRODUCT', out.problems.join('; '));
@@ -374,6 +368,7 @@ router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
         `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
          VALUES ($1,'LOAN_PRODUCT_CHANGED','loan_product',$2,$3,$4)`,
         [req.auth.email, req.params.id, JSON.stringify(before), JSON.stringify(rows[0])]);
+      await PA.recordMappings(c, 'LOAN', req.params.id, before, rows[0], req.auth.email);
       return { row: await withFees(c, rows[0]) };
     });
     if (out.missing) return notFound(res, 'loan product');
@@ -382,12 +377,38 @@ router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// --- accounting method change and history ----------------------------------
+
+router.post('/:id/accounting-method', requireAuth(...ADMIN), async (req, res, next) => {
+  try {
+    const b = req.body || {};
+    const mappings = toColumns(b.mappings || {});
+    for (const k of Object.keys(mappings)) if (!k.startsWith('gl_')) delete mappings[k];
+    const out = await withTenant(req.tenant.schema_name, (c) => require('../domain/accountingChanges').changeLoanProduct(c, req.params.id, {
+      method: b.accountingMethod, interestAccruedAccounting: b.interestAccruedAccounting, mappings, reason: b.reason, createdBy: req.auth.email,
+    }));
+    res.status(201).json(out);
+  } catch (e) { next(e); }
+});
+
+router.get('/:id/accounting-changes', requireAuth(...READER), async (req, res, next) => {
+  try {
+    res.json(await withTenantRead(req.tenant.schema_name, (c) => require('../domain/accountingChanges').history(c, 'LOAN', req.params.id)));
+  } catch (e) { next(e); }
+});
+
+router.get('/:id/gl-mapping-history', requireAuth(...READER), async (req, res, next) => {
+  try {
+    res.json(await withTenantRead(req.tenant.schema_name, (c) => PA.mappingHistory(c, 'LOAN', req.params.id)));
+  } catch (e) { next(e); }
+});
+
 // --- fees -----------------------------------------------------------------
 
 const FEE_FIELDS = {
   code: 'code', name: 'name', feeType: 'fee_type', calculation: 'calculation', amount: 'amount', percent: 'percent',
   minAmount: 'min_amount', maxAmount: 'max_amount', required: 'required', glIncome: 'gl_income',
-  glReceivable: 'gl_receivable', isActive: 'is_active', taxable: 'taxable',
+  glReceivable: 'gl_receivable', glWriteOff: 'gl_writeoff', isActive: 'is_active', taxable: 'taxable',
 };
 const FEE_ENUMS = {
   fee_type: ['MANUAL', 'DISBURSEMENT_DEDUCTED', 'DISBURSEMENT_CAPITALIZED', 'DISBURSEMENT_UPFRONT', 'PAYMENT_DUE', 'LATE_REPAYMENT'],
@@ -422,13 +443,9 @@ async function validateFee(c, cols, before) {
   for (const col of ['required', 'is_active', 'taxable']) {
     if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
   }
-  for (const [col, types] of [['gl_income', ['INCOME']], ['gl_receivable', ['ASSET']]]) {
-    if (cols[col]) {
-      const { rows: [g] } = await c.query('SELECT type, is_active FROM gl_accounts WHERE code = $1', [cols[col]]);
-      if (!g) problems.push(`${col}: no GL account ${cols[col]}`);
-      else if (!types.includes(g.type)) problems.push(`${col}: ${cols[col]} is ${g.type}, needs ${types.join(' or ')}`);
-    }
-  }
+  // A fee's own accounts: income (or a liability, for fees collected for a
+  // third party), receivable and write-off. Detail accounts only.
+  problems.push(...await PA.validateFeeAccounts(c, cols));
   return problems;
 }
 

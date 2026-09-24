@@ -66,6 +66,12 @@ async function restructure(c, loanId, {
   if (term > np.max_term) throw err(`TERM_EXCEEDS_PRODUCT_MAX: ${np.max_term}`, 400);
 
   const capitalized = arrears === 'CAPITALIZE' ? charges : 0;
+  // Mambu refuses to carry capitalised amounts into a product booked on a
+  // different method: they were recognised one way and would be unwound
+  // another.
+  if ((Number(old.principal_capitalized) > 0 || capitalized > 0) && np.accounting_method !== old.accounting_method) {
+    throw err(`CAPITALIZED_AMOUNTS_NOT_ALLOWED_DUE_TO_DIFFERENT_ACCOUNTING: ${old.accounting_method} to ${np.accounting_method}`, 409);
+  }
   const writtenOff = arrears === 'WRITE_OFF' ? charges : 0;
   const newPrincipal = round2(b.principal + capitalized + extra);
   if (!(newPrincipal > 0)) throw err('NOTHING_TO_RESTRUCTURE', 409);
@@ -85,15 +91,17 @@ async function restructure(c, loanId, {
     debits.push({ glCode: np.gl_portfolio, amount: round2(b.principal + capitalized + extra), memberId: mid });
     credits.push({ glCode: old.gl_portfolio, amount: b.principal, memberId: mid });
     if (extra > 0) credits.push({ glCode: channel.gl_account_code, amount: extra, memberId: mid });
-    const accrual = L.isAccrual(old);
+    // Whether a component sits in a receivable: interest when accrued
+    // interest reaches the ledger, fees and penalties under accrual.
+    const inReceivable = (component) => (component === 'INTEREST' ? L.interestAccrues(old) : L.isAccrual(old));
     for (const [component, amount] of [['INTEREST', b.interest], ['FEE', b.fees], ['PENALTY', b.penalty]]) {
       if (!(amount > 0)) continue;
       if (capitalized > 0) {
         // Capitalised charges: under accrual they clear the receivable that
         // held them; under cash they are recognised as income now, since
         // they have become principal the member will repay.
-        credits.push({ glCode: accrual ? L.writeOffCredit(old, component) : L.paidCredit(old, component), amount, memberId: mid });
-      } else if (accrual) {
+        credits.push({ glCode: inReceivable(component) ? L.writeOffCredit(old, component) : L.paidCredit(old, component), amount, memberId: mid });
+      } else if (inReceivable(component)) {
         // Written off: expense against the receivable. Under cash nothing
         // was ever recognised, so there is nothing to write off in the ledger.
         debits.push({ glCode: old.gl_writeoff_exp, amount, memberId: mid });
@@ -105,6 +113,7 @@ async function restructure(c, loanId, {
     debits, credits,
     narration: `${kind === 'REFINANCE' ? 'Refinance' : 'Reschedule'} ${old.account_no}${note ? `: ${note}` : ''}`,
     sourceType: `LOAN_${kind}`, sourceId: old.id, bookingDate: date, channelId: extra > 0 ? channelId : undefined, createdBy,
+    branchId: old.branch_id || null,
   })).entryId : null;
 
   // ---- close the old loan ------------------------------------------------
@@ -121,7 +130,7 @@ async function restructure(c, loanId, {
 
   // ---- open the new one ----------------------------------------------------
   const created = await loans.apply(c, {
-    memberId: mid, productId: newProductId, principal: newPrincipal, termMonths: term,
+    memberId: mid, productId: newProductId, principal: newPrincipal, termMonths: term, branchId: old.branch_id,
     monthlyRate, purpose: `${kind === 'REFINANCE' ? 'Refinance' : 'Reschedule'} of ${old.account_no}`, notes: note, createdBy,
   });
   await c.query(

@@ -123,6 +123,10 @@ tenantApi.use('/savings', savings);
 tenantApi.use('/loans', require('./routes/loans'));
 tenantApi.use('/loan-products', require('./routes/loanProducts'));
 tenantApi.use('/accounting', savings.accounting);
+const branchRoutes = require('./routes/branches');
+tenantApi.use('/branches', branchRoutes.branches);
+tenantApi.use('/accounting', branchRoutes.accounting);
+tenantApi.use('/deposit-products', require('./routes/depositProducts'));
 
 const shares = require('./routes/shares');
 tenantApi.use('/shares', shares);
@@ -148,7 +152,10 @@ app.use('/api', tenantApi);
 app.use((req, res) => apiError(res, 404, 404, 'ROUTE_NOT_FOUND', req.path));
 
 app.use((err, _req, res, _next) => {
-  const status = err.status || 500;
+  // The ledger's own locks (closed year, accounting closure, savings floor)
+  // raise from triggers; they are refusals, not server faults.
+  const dbRefusal = err.code === '23001' || err.code === '23514';
+  const status = err.status || (dbRefusal ? 409 : 500);
   if (status >= 500) console.error('[error]', err);
   apiError(res, status, status, err.message || 'INTERNAL_ERROR');
 });

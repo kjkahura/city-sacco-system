@@ -229,6 +229,40 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('a dynamic, equal-installment product is created from the console',
       /Dynamic/.test(await page.textContent('main')) && /Reducing, equal installments/.test(await page.textContent('main')));
 
+    section('deposit products and accounting');
+    await page.waitForSelector('#d-new');
+    check('deposit products are listed under loan products with their accounting',
+      /Deposit products/.test(await page.textContent('main')) && /SAV01/.test(await page.textContent('main')) && /CASH/.test(await page.textContent('main')));
+    await page.click('#d-new');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=id]', 'UIACC');
+    await page.fill('dialog[open] input[name=name]', 'Console accrual savings');
+    await page.selectOption('dialog[open] select[name=interestPaidIntoAccount]', 'true');
+    await page.fill('dialog[open] input[name=annualRate]', '6');
+    await page.selectOption('dialog[open] select[name=accountingMethod]', 'ACCRUAL');
+    await page.selectOption('dialog[open] select[name=interestAccruedAccounting]', 'DAILY');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /UIACC created|INVALID/.test(document.getElementById('toast').textContent));
+    check('a deposit product on accrual is created, sending only the mappings it uses',
+      /UIACC created/.test(await page.textContent('#toast')), await page.textContent('#toast'));
+    await page.waitForFunction(() => /UIACC/.test(document.querySelector('main').textContent));
+    const depRows = await page.$$('section table tbody tr');
+    for (const r of depRows) { if (/UIACC/.test(await r.textContent())) { await r.click(); break; } }
+    await page.waitForSelector('#d-method');
+    check('it opens to its interest and accounting rules',
+      /6% a year/.test(await page.textContent('main')) && /interestPayable 200-110/.test(await page.textContent('main')), await page.textContent('main'));
+    await page.click('nav button[data-view=accounting]');
+    await page.waitForSelector('#k-new');
+    check('the accounting screen shows branches, inter-branch rules and closures',
+      /Inter-branch rules/.test(await page.textContent('main')) && /The books are open/.test(await page.textContent('main')));
+    await page.click('#b-new');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=code]', 'NKR');
+    await page.fill('dialog[open] input[name=name]', 'Nakuru');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /Branch NKR added/.test(document.getElementById('toast').textContent));
+    check('a branch is added from the console', true);
+
     section('no JavaScript errors anywhere in that');
     check('the browser reported no page errors', jsErrors.length === 0, jsErrors.join(' | '));
   } catch (e) {

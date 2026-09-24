@@ -98,6 +98,12 @@ src/
                        disbursement limits
     loans.js           application, disbursement, repayment, write-off,
                        reversal, account numbering
+    productAccounting.js  which GL mappings a product's settings require
+    accruals.js        interest accrual postings: per account or aggregated,
+                       daily or monthly
+    accountingChanges.js  changing a product's accounting method in use
+    branches.js        branches, inter-branch rules, closures, moving accounts
+    savings.js         deposits: legs across zero, fees, interest, overdrafts
     fees.js            product fees of every type, applying, waiving, settling
     workflow.js        states and undo, amendments by state, arrears, cap on
                        charges
@@ -111,7 +117,6 @@ src/
     provisioning.js    loan loss provisioning by PAR band
     reports.js         balance sheet, income statement, prudential, PAR
     returns.js         regulatory return engine, templates held as data
-    savings.js         deposit, withdraw, transfer, pledged-balance rules
     shares.js          share capital and the dividend cycle
   ops/
     eod.js             end-of-day jobs, idempotent per business date
@@ -119,7 +124,7 @@ src/
     crypt.js           AES-256-GCM streaming encryption, key ring, rekey
     offsite.js         dir and command drivers for shipping backups
     scheduler.js       in-process timer behind a Postgres advisory lock
-  routes/              auth, members, loans, loanProducts, savings, shares,
+  routes/              auth, members, loans, loanProducts, depositProducts, branches, savings, shares,
                        accounting, reports, finance (provisioning, periods,
                        returns), portal (the member-facing API)
   lib/
@@ -305,6 +310,131 @@ SQL, so no installment falls on a day the SACCO is shut.
 
 The invariant the test suite asserts after *every single operation*,
 corrections included: the trial balance still balances.
+
+## Product accounting: the switch, deposits, branches and closures
+
+Accounting belongs to the product, after Mambu's "Linking Products to
+Accounting". Every loan product and every deposit product has:
+
+| Setting | Values | What it does |
+|---|---|---|
+| `accounting_method` | `NONE`, `CASH`, `ACCRUAL` | NONE: the product's own accounts are never posted; the cash side of each movement goes against the tenant's suspense account (`290-900`), so the till still reconciles. CASH: income and expense when money moves. ACCRUAL: through receivables and payables. |
+| `interest_accrued_accounting` | `NONE`, `DAILY`, `MONTHLY` | When accrued interest reaches the ledger under ACCRUAL (Mambu's "Interest Accrued Method"). CASH and NONE force NONE; ACCRUAL with NONE recognises interest when paid while fees and penalties still go through their receivables. On loans this is separate from `interest_accrual`, which says when interest is added to what the member owes. |
+| `accrual_granularity` | `PER_ACCOUNT`, `AGGREGATED` | One accrual entry per account, or one per product and branch per day (Mambu's default), with the per-account lines kept behind it (`GET /api/accounting/accruals/:entryId`). |
+
+**The GL mappings a product needs are derived, not listed.** The catalogue
+in `src/domain/productAccounting.js` says, for each financial resource,
+which account types it takes and when the product uses it: receivables and
+payables under ACCRUAL, Taxes Payable when a tax or withholding tax is set,
+the overdraft accounts when overdrafts are allowed, the negative interest
+accounts when negative rates are. Saving a product refuses a resource it
+needs and lacks (`MISSING_ACCOUNTING_RULE`), a resource it cannot use
+(`NOT_REQUIRED_ACCOUNTING_RULE`), a header account
+(`HEADER_GL_ACCOUNT_NOT_ALLOWED`) and an account of the wrong type
+(`INVALID_RULE_GLACCOUNT_TYPE`), the names Mambu's API uses. Every change of
+mapping is kept in `product_gl_mapping_history` (`GET
+/api/loan-products/:id/gl-mapping-history`, and the same for deposits);
+postings always read the current mapping, so a change applies from then on.
+
+### Deposit products
+
+`GET/POST/PATCH /api/deposit-products`, with `/:id/fees` and `POST
+/accounting-rules` (the mappings a set of settings would need, before it is
+saved). A deposit product carries:
+
+- **Interest**: `interest_paid_into_account` (off unless switched on, so an
+  upgraded tenant does not start paying interest nobody configured), annual
+  rate, `END_OF_DAY` or `MINIMUM` balance, `ACTUAL_365`, `ACTUAL_360` or
+  `THIRTY_360`, applied `MONTHLY`, `QUARTERLY`, `SEMI_ANNUAL` or `ANNUAL` on the
+  period's last day, a minimum balance to earn it, and negative rates when
+  allowed. Interest accrues to six decimal places so the sub-cent remainder
+  carries into the next period.
+- **Withholding tax**: a percentage of interest applied, shipped unset.
+- **Overdrafts**: authorised (a product maximum and an account limit, with
+  its own annual rate) and technical (charges the system applies when there
+  is no money). A withdrawal is held to the authorised limit; the floor
+  trigger on `savings_accounts` refuses anything below it unless the product
+  allows technical overdrafts.
+- **Fees**: `MANUAL` and `MONTHLY`, each with its own income account if it
+  wants one.
+
+| Transaction | Debit | Credit |
+|---|---|---|
+| Deposit | Transaction Source (channel) | Savings Control, or Overdraft Portfolio for the overdrawn part |
+| Withdrawal | Savings Control, then Overdraft Portfolio below zero | Transaction Source |
+| Fee | Savings Control (Overdraft Portfolio below zero under accrual) | Fee Income |
+| Interest accrued (ACCRUAL) | Interest Expense | Interest Payable |
+| Interest applied | Interest Payable (what was accrued) and Interest Expense (the rest) | Savings Control |
+| Withholding tax | Savings Control | Taxes Payable |
+| Negative interest accrued, applied | Neg. Interest Receivable; Savings Control | Neg. Interest Income; Neg. Interest Receivable |
+| Overdraft interest accrued, applied | OD Interest Receivable; Overdraft Portfolio | OD Interest Income; OD Interest Receivable |
+| Overdraft write-off | OD Write-off Expense | Overdraft Portfolio (and OD Interest Receivable) |
+
+Under CASH, overdraft interest and fees applied to an overdrawn balance are
+owed but not yet income (`od_interest_due`, `od_fees_due`); the next deposit
+pays them first and recognises them then. Mambu's accrual table books
+"interest applied" as Dr Interest Expense, Cr Savings Control, the same as
+cash; here the application clears the payable explicitly, so the expense is
+recognised once.
+
+Accounts: `POST /api/savings/:id/fees`, `PUT /:id/overdraft`, `POST
+/:id/overdraft/write-off`, `POST /:id/interest` (accrue to a date, and apply
+with `apply: true`), `POST /:id/branch`.
+
+### Branches, inter-branch rules and closures
+
+Every account carries a branch (its member's when opened) and every journal
+line carries the branch it belongs to. An entry balances in each branch:
+when money for an account at one branch is handled at another (`branchId` on
+a deposit, withdrawal, disbursement or repayment), `accounting.post` squares
+the two through the inter-branch account named by the rule for that pair, or
+the default rule, and refuses with `NO_INTER_BRANCH_GL_ACCOUNT` when there
+is none. `POST /api/loans/:id/branch` and `/api/savings/:id/branch` move an
+account and its balances. The trial balance takes `?branchId=` and reads a
+per-branch rollup.
+
+`POST /api/accounting/closures` closes the book through a past date, for
+every branch or one; the date must follow the closure already covering that
+scope. Nothing may be dated on or before a closure: `accounting.post`
+refuses early with `JOURNAL_ENTRY_BEFORE_CLOSURE`, and triggers on
+`journal_lines` and `transactions` refuse at the database, so a product not
+linked to accounting (which writes no journal) is held to the same line.
+`DELETE /api/accounting/closures/:id` removes one, kept on record as
+deleted, when something has to be backdated. `PUT /api/accounting/settings`
+switches on automatic closures every N days. The year-end sweep is exempt:
+it is dated on the year's last day, which a closure has usually covered by
+the time the year is closed.
+
+### Changing the accounting method of a product in use
+
+A plain edit cannot change the method of a product that has accounts
+(`ACCOUNTING_METHOD_CHANGES_THROUGH_CHANGE_ACTION`). `POST
+/api/loan-products/:id/accounting-method` and `/api/deposit-products/:id/
+accounting-method` take the new method, GL accrual method, any new mappings
+and a reason. The change needs the previous month closed tenant-wide, is
+booked today with one entry per account, and converts what is open so
+nothing is stranded:
+
+| From | To | What is booked |
+|---|---|---|
+| ACCRUAL | CASH or NONE | Receivables and payables built by accrual reversed against income or expense |
+| CASH or NONE | ACCRUAL | What is owed at the change booked into them |
+| CASH or ACCRUAL | NONE | Portfolio and deposit balances moved to suspense |
+| NONE | CASH or ACCRUAL | And back from it |
+
+Pending accruals are posted first, so the conversion reads booked figures.
+The change is kept in `product_accounting_changes` with the amounts per
+account (`GET .../accounting-changes`) and in the audit log.
+
+### Loans, completed against the same rules
+
+- A fee may name its own write-off account; paying a fee credits that fee's
+  receivable (its income, under cash), and writing a loan off clears each
+  fee against its own receivable and write-off account.
+- A loan with capitalised amounts cannot be rescheduled or refinanced into a
+  product on another method (`CAPITALIZED_AMOUNTS_NOT_ALLOWED_DUE_TO_DIFFERENT_ACCOUNTING`).
+- A funded loan product uses ACCRUAL or NONE; a funding deposit product uses
+  NONE or CASH, and earns no interest and cannot be overdrawn.
 
 ## Loan products and their accounting
 
@@ -765,16 +895,23 @@ it off and use a CronJob calling the CLI instead.
 2. `billRevolving`: generates the installment on every revolving loan whose
    billing date has come
 3. `accrueInterest`
-4. `markArrears`
-5. `accruePenalties`, which reads the arrears state the previous job produced
-6. `applyFees`: a dynamic loan's payment-due fees on their dates, late fees on
+4. `accrueSavings`: deposit interest (positive, negative and overdraft)
+   accrued through the date, applied on each product's application dates
+   with withholding tax, and monthly deposit fees on the month's last day
+5. `markArrears`
+6. `accruePenalties`, which reads the arrears state the previous job produced
+7. `applyFees`: a dynamic loan's payment-due fees on their dates, late fees on
    installments that went overdue
-7. `enforceControls`: lock loans at the product's charge cap or after its
+8. `enforceControls`: lock loans at the product's charge cap or after its
    days in arrears
-8. `provision`, which reads the same arrears and posts only the movement
+9. `provision`, which reads the same arrears and posts only the movement
    since the last run. While the bands have no rates it records a skip, not a
    failure, so a tenant that has not configured provisioning does not fill
    the job log with red.
+10. `postAccruals`: posts the accruals waiting for the day's end (aggregated
+    products) or the month's end (monthly GL accrual)
+11. `autoClosure`: closes the whole book through yesterday every N days, when
+    the tenant has switched automatic closures on
 
 Each job is idempotent per business date through `platform.job_runs`, so a
 rerun is a no-op rather than a double posting.
@@ -1139,6 +1276,18 @@ official forms are not.
    cycles distinct from due dates on revolving loans, refunds on revolving
    loans, and the secondary marketplace for funded loans. Auto-close of
    paid-off loans is moot: a paid-off loan closes at once.
+7. **Deposit interest on catch-up days uses today's balance.** When the end
+   of day misses days, each missed day is priced on the balance as it stands
+   when it runs, and that is what `savings_daily_balances` records. A
+   transaction backdated before an accrual does not re-price the days
+   already accrued. Tiered deposit rates, fixed deposits with maturity, and
+   Shari'ah profit-sharing products are not modelled.
+8. **Taxes on loans are booked with the interest receivable.** Mambu keeps
+   a separate Taxes Receivable account; here the member's tax sits in the
+   interest (or fee) receivable, gross, and Taxes Payable carries the
+   liability. The totals agree; the split is one account coarser.
+9. **Funded loan products cannot change accounting method**, because the
+   interest split with funders would have to be unwound per funder.
 
 ## Before real member data
 

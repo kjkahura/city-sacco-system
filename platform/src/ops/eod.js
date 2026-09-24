@@ -96,6 +96,30 @@ const JOBS = {
   },
 
   /**
+   * Deposits: interest accrued through the business date on every open
+   * account (positive, negative and overdraft), applied on the product's
+   * application dates with withholding tax, and monthly fees on the last
+   * day of the month.
+   */
+  async accrueSavings(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => require('../domain/savings').endOfDay(c, { date: businessDate }));
+  },
+
+  /**
+   * Post the accruals waiting for the end of the day (aggregated products)
+   * or the month (monthly GL accrual). Last of the posting jobs, so it
+   * carries everything the night accrued.
+   */
+  async postAccruals(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => require('../domain/accruals').flush(c, { date: businessDate }));
+  },
+
+  /** Close the books automatically every N days, when the tenant has asked for it. */
+  async autoClosure(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => require('../domain/branches').autoClose(c, { date: businessDate }));
+  },
+
+  /**
    * Revolving loans: generate the installment for every billing date that
    * has come, interest brought up to the date first.
    */
@@ -199,7 +223,8 @@ async function runJob(tenant, job, { businessDate = null, force = false } = {}) 
  * posts, arrears before penalties (penalties read arrears state), and
  * provisioning last because it reads the arrears the others just produced.
  */
-const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'accrueInterest', 'markArrears', 'accruePenalties', 'applyFees', 'enforceControls', 'provision'];
+const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'accrueInterest', 'accrueSavings', 'markArrears', 'accruePenalties',
+  'applyFees', 'enforceControls', 'provision', 'postAccruals', 'autoClosure'];
 
 async function runAll({ businessDate = null, jobs = DEFAULT_JOBS, force = false } = {}) {
   const { rows: tenants } = await pool.query(
