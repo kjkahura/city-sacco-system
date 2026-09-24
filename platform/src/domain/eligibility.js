@@ -88,9 +88,16 @@ async function releaseGuarantors(c, loanId) {
  * separate so a teller can show a member the ceiling before an application
  * is written, and so approval and the preview cannot disagree about it.
  */
-async function checkEligibility(c, { memberId, productId, principal, loanId = null, excludeCollateralId = null }) {
+async function checkEligibility(c, { memberId, productId, principal, loanId = null, refinancing = null, excludeCollateralId = null }) {
   const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1', [productId]);
   if (!p) throw err('UNKNOWN_LOAN_PRODUCT', 404);
+  // A top-up application settles a running loan: that loan's guarantors and
+  // collateral move to the new one, so they count towards its cover now, and
+  // its balance is inside the new principal, so it is not exposure twice.
+  if (loanId && !refinancing) {
+    const { rows: [a] } = await c.query('SELECT refinance_of FROM loan_accounts WHERE id = $1', [loanId]);
+    refinancing = a?.refinance_of || null;
+  }
   const { rows: [d] } = await c.query(
     "SELECT COALESCE(SUM(balance), 0) AS total FROM savings_accounts WHERE member_id = $1 AND status = 'ACTIVE'",
     [memberId]
@@ -98,8 +105,10 @@ async function checkEligibility(c, { memberId, productId, principal, loanId = nu
   const deposits = round2(d.total);
   const requested = round2(principal);
   const ceiling = round2(deposits * Number(p.max_multiplier));
-  const pledged = loanId ? await guarantorCoverage(c, loanId) : 0;
-  const collateral = loanId ? await collateralCoverage(c, loanId, { exclude: excludeCollateralId }) : 0;
+  const carriedPledges = refinancing ? await guarantorCoverage(c, refinancing) : 0;
+  const carriedCollateral = refinancing ? await collateralCoverage(c, refinancing) : 0;
+  const pledged = round2((loanId ? await guarantorCoverage(c, loanId) : 0) + carriedPledges);
+  const collateral = round2((loanId ? await collateralCoverage(c, loanId, { exclude: excludeCollateralId }) : 0) + carriedCollateral);
   const coverRequired = round2(requested * Number(p.min_cover_percent || 100) / 100);
   const cover = round2(deposits + pledged + collateral);
 
@@ -112,7 +121,7 @@ async function checkEligibility(c, { memberId, productId, principal, loanId = nu
   if (p.max_principal && requested > Number(p.max_principal)) reasons.push('ABOVE_PRODUCT_MAXIMUM');
 
   // Tenant-wide exposure controls (Mambu "Internal Controls").
-  const controls = await lending.exposure(c, { memberId, loanId, requested });
+  const controls = await lending.exposure(c, { memberId, loanId, refinancing, requested });
   reasons.push(...controls.reasons);
 
   return {
@@ -124,6 +133,7 @@ async function checkEligibility(c, { memberId, productId, principal, loanId = nu
     shortfall: round2(Math.max(0, requested - ceiling)),
     pledged,
     collateral,
+    ...(refinancing ? { refinancing, carried: { pledged: carriedPledges, collateral: carriedCollateral } } : {}),
     coverRequired,
     cover,
     coverShortfall: round2(Math.max(0, coverRequired - cover)),

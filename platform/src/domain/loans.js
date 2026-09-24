@@ -121,8 +121,14 @@ async function nextAccountNo(c, p) {
  * account number follows the product's pattern and the initial state is
  * the product's: an application that still needs documents starts
  * PARTIAL_APPLICATION, one that is complete PENDING_APPROVAL.
+ *
+ * `refinance` ({ of, arrears, topUp }) is set only by ./restructure when it
+ * opens a top-up application, never from a request body: the application
+ * then settles that running loan when it is disbursed. `settles` names a
+ * running loan the new one replaces (a top-up's, or a reschedule's), which
+ * is left out of the exposure check.
  */
-async function apply(c, params) {
+async function apply(c, params, { refinance = null, settles = refinance?.of || null } = {}) {
   const { memberId, productId = 'NL01', principal, termMonths, purpose, notes, accountNo, createdBy,
     tranches: plannedTranches = null, fundingSources = null, collateral = null, branchId = undefined } = params;
   const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1 AND is_active', [productId]);
@@ -139,7 +145,7 @@ async function apply(c, params) {
   const given = Object.fromEntries(Object.keys(OVERRIDES).filter((k) => params[k] !== undefined).map((k) => [k, params[k]]));
   const own = resolveOverrides(p, given, { opening: true, term });
 
-  const exp = await controls.exposure(c, { memberId, requested: amount });
+  const exp = await controls.exposure(c, { memberId, requested: amount, refinancing: settles });
   if (exp.reasons.includes('ONE_ACTIVE_LOAN_PER_MEMBER')) throw err('MEMBER_ALREADY_HAS_AN_ACTIVE_LOAN', 409);
 
   const no = accountNo || await nextAccountNo(c, p);
@@ -151,6 +157,7 @@ async function apply(c, params) {
     account_no: no, member_id: memberId, product_id: productId, principal: amount, term_months: term,
     product_type: p.product_type || 'FIXED_TERM', status, purpose: purpose || null, notes: notes || null,
     ...own,
+    ...(refinance ? { refinance_of: refinance.of, refinance_arrears: refinance.arrears, top_up_requested: refinance.topUp } : {}),
   };
   const names = Object.keys(cols);
   const { rows } = await c.query(
@@ -212,6 +219,8 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
   const first = l.status === 'APPROVED';
   const again = !first && ['ACTIVE', 'IN_ARREARS'].includes(l.status) && type.disbursesAgain;
   if (!first && !again) throw err(`LOAN_NOT_APPROVED: ${l.status}`, 409);
+  // A top-up application pays out by settling the loan it refinances.
+  if (l.refinance_of) throw err('TOP_UP_APPLICATION_DISBURSES_THROUGH_REFINANCE', 409);
   const date = valueDate ? ymd(valueDate) : isoDate(new Date());
 
   // What may be paid out now: the product type says (the principal, the

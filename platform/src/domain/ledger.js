@@ -214,18 +214,21 @@ const PRODUCT_COLUMNS = (() => {
   return cols.join(', ');
 })();
 
-async function lock(c, loanId) {
+async function lock(c, loanId, { forUpdate = true } = {}) {
   const { rows } = await c.query(
     `SELECT l.*, ${PRODUCT_COLUMNS}
      FROM loan_accounts l
      JOIN loan_products p ON p.id = l.product_id
      WHERE l.id::text = $1 OR l.account_no = $1
-     FOR UPDATE OF l`,
+     ${forUpdate ? 'FOR UPDATE OF l' : ''}`,
     [loanId]
   );
   if (!rows.length) throw err('LOAN_NOT_FOUND', 404);
   return rows[0];
 }
+
+/** The same read without the row lock, for quotes in a read-only transaction. */
+const read = (c, loanId) => lock(c, loanId, { forUpdate: false });
 
 /** Outstanding principal: disbursed plus anything capitalised, less paid. */
 const principalOutstanding = (l) => round2(Number(l.principal_disbursed) + Number(l.principal_capitalized || 0) - Number(l.principal_paid));
@@ -254,6 +257,21 @@ function terms(l) {
 
 // Product-type predicates (isDynamic, isRevolving, ...) live with the
 // strategies in ./productTypes, which stand on this module.
+
+/**
+ * What settling a running loan costs, for a reschedule or a top-up: the
+ * principal outstanding, and the interest, fees and penalties owed when they
+ * are CAPITALIZED onto the new loan (WRITTEN_OFF ones are not paid).
+ */
+function settlement(l, arrears = 'CAPITALIZE') {
+  const b = balances(l);
+  const charges = round2(b.interest + b.fees + b.penalty);
+  const capitalized = arrears === 'CAPITALIZE' ? charges : 0;
+  return {
+    balances: b, charges, capitalized, writtenOff: arrears === 'WRITE_OFF' ? charges : 0,
+    amount: round2(b.principal + capitalized),
+  };
+}
 
 /** The schedule engine's inputs for this loan. */
 function scheduleInputs(l) {
@@ -374,7 +392,7 @@ const isMonthEnd = (d) => {
 
 module.exports = {
   OVERRIDES, effective, overrideSql, resolveOverrides, within,
-  PRODUCT_COLUMNS, lock, principalOutstanding, balances, terms,
+  PRODUCT_COLUMNS, lock, read, principalOutstanding, balances, settlement, terms,
   scheduleInputs, shiftOffClosedDays,
   isAccrual, booksEntries, interestAccrues, paidCredit, creditsFor, writeOffCredit, post,
   interestFor, isMonthEnd,

@@ -561,7 +561,12 @@ const product = (id, body) => call('POST', '/api/loan-products', { id, name: id,
     const b2 = await balancesOf(rl2.id);
     const woExpPre = await bal('500-310');
     const bankPre = await bal((await Rd(async (c) => (await c.query("SELECT gl_account_code FROM transaction_channels WHERE id = 'bank'")).rows[0].gl_account_code)));
-    const rf = await call('POST', `/api/loans/${rl2.id}/refinance`, { termMonths: 12, topUp: 25000, arrears: 'WRITE_OFF', channelId: 'bank' });
+    // A top-up is an application: requested, approved, then disbursed (test/top-up.test.js has the controls).
+    const rq = await call('POST', `/api/loans/${rl2.id}/refinance`, { termMonths: 12, topUp: 25000, arrears: 'WRITE_OFF' });
+    check('a top-up opens an application for approval', rq.status === 201 && rq.body.application.refinance_of === rl2.id
+      && Number(rq.body.application.principal) === 85000 && rq.body.quote.topUp === 25000, `${rq.status} ${rq.reason || ''}`);
+    await call('POST', `/api/loans/${rq.body.application.id}/approve`, {});
+    const rf = await call('POST', `/api/loans/${rq.body.application.id}/disbursements`, { channelId: 'bank' });
     check('refinanced with a 25,000 top-up, arrears written off', rf.status === 201 && rf.body.oldLoan.status === 'CLOSED_REFINANCED'
       && (await balancesOf(rf.body.newLoan.id)).principal === 85000, `${rf.status} ${rf.reason || ''} ${JSON.stringify(rf.body?.newLoan && (await balancesOf(rf.body.newLoan.id)))}`);
     check('the written-off interest hit the write-off expense', round((await bal('500-310')) - woExpPre) === b2.interest, `${round((await bal('500-310')) - woExpPre)} vs ${b2.interest}`);

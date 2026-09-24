@@ -133,6 +133,28 @@ const T = (fn) => withTenant(SCHEMA, fn);
     const schedule = await page.locator('section:has(h2:text("Schedule")) tbody tr').count();
     check('its schedule is there', schedule === 12, String(schedule));
 
+    // A top-up is an application: requested here, approved, then paid out.
+    const oldNo = (await page.textContent('main h1')).match(/LN\d+/)[0];
+    await page.click('button[data-action=refinance]');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=topUp]', '10000');
+    await page.fill('dialog[open] input[name=termMonths]', '18');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForSelector('#top-up-quote');
+    check('a top-up request opens an application awaiting approval, naming the loan it settles',
+      /PENDING_APPROVAL/.test(await page.textContent('main h1')) && (await page.textContent('#top-up-quote')).includes(oldNo),
+      await page.textContent('main h1'));
+    await page.click('button[data-action=approve]');
+    await page.waitForSelector('main h1 .badge:text("APPROVED")');
+    await page.click('button[data-action=disburse]');
+    await page.waitForSelector('dialog[open]');
+    const dialogText = await page.textContent('dialog[open]');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForSelector('main h1 .badge:text("ACTIVE")');
+    check('disbursing it shows the settlement and top-up, and the new loan becomes active',
+      /Settles/.test(dialogText) && /10,000/.test(dialogText) && (await page.textContent('main p.hint')).includes(`replaces ${oldNo}`),
+      dialogText.slice(0, 160));
+
     section('reports');
     await page.click('nav button[data-view=reports]');
     await page.waitForSelector('#r-out table');
