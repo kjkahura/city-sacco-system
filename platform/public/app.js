@@ -420,6 +420,7 @@ const LOAN_ACTIONS = {
   ACTIVE: [['repay', 'Post repayment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
   IN_ARREARS: [['repay', 'Post repayment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
   LOCKED: [['unlock', 'Unlock'], ['reschedule', 'Reschedule'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  CLOSED_WRITTEN_OFF: [['recovery', 'Post recovery'], ['guarantor-recovery', 'Recover from guarantor'], ['release-call', 'Release guarantor call'], ['notes', 'Notes']],
   CLOSED_REJECTED: [['undo-reject', 'Undo rejection']],
   CLOSED_WITHDRAWN: [['undo-withdraw', 'Undo withdrawal']],
 };
@@ -476,6 +477,9 @@ async function loanDetail(row) {
           ${l.next_billing_on ? `<dt>Next billing</dt><dd>${day(l.next_billing_on)}</dd>` : ''}` : ''}
         ${Number(l.tax_charged) > 0 ? `<dt>Of which tax</dt><dd>${money(l.tax_charged)}</dd>` : ''}
         ${l.arrears_since ? `<dt>In arrears since</dt><dd>${day(l.arrears_since)}</dd>` : ''}
+        ${l.written_off_on ? `<dt>Written off</dt><dd>${money(l.written_off_amount)} on ${day(l.written_off_on)} by ${esc(l.written_off_by || '')}</dd>
+          <dt>Recovered since</dt><dd>${money(l.recovered)}</dd>
+          <dt>Still to recover</dt><dd id="wo-left">${money(Number(l.written_off_amount) - Number(l.recovered))}</dd>` : ''}
         ${l.approved_by ? `<dt>Approved by</dt><dd>${esc(l.approved_by)}</dd>` : ''}
         ${l.disbursed_by ? `<dt>Disbursed by</dt><dd>${esc(l.disbursed_by)}</dd>` : ''}
       </dl>`)}
@@ -674,6 +678,30 @@ async function loanDetail(row) {
         return loanDetail({ account_no: res.body.application.account_no });
       }
       if (res.ok) { toast(`New loan ${res.body.newLoan.account_no} opened`); return loanDetail({ account_no: res.body.newLoan.account_no }); }
+    }
+    if (a === 'recovery') {
+      const d = await ask([
+        { label: 'Amount recovered', name: 'amount', type: 'number', step: '0.01' },
+        { label: 'From', name: 'source', options: ['MEMBER', 'COLLATERAL', 'OTHER'], value: 'MEMBER' },
+        { label: 'Channel', name: 'channelId', value: 'cash' },
+        { label: 'Note', name: 'narration', required: false },
+      ], `Recovery on ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/recoveries`, { amount: Number(d.amount), source: d.source, channelId: d.channelId, narration: d.narration || undefined });
+    }
+    if (a === 'guarantor-recovery' || a === 'release-call') {
+      const gs = ((await api('GET', `/api/loans/${id}/guarantors`)).body || []).filter((g) => g.status === 'CALLED');
+      if (!gs.length) return toast('No guarantor on this loan has an open call', true);
+      const d = await ask([
+        { label: 'Guarantor (member number)', name: 'memberNo', options: gs.map((g) => g.member_no), value: gs[0].member_no },
+        ...(a === 'guarantor-recovery' ? [{ label: `Amount (blank: the rest of the pledge; ${gs.map((g) => `${g.member_no} ${money(g.pledged_amount - g.recovered)}`).join(', ')})`, name: 'amount', type: 'number', step: '0.01', required: false }]
+          : [{ label: 'Reason', name: 'note' }]),
+      ], a === 'guarantor-recovery' ? 'Recover from a called guarantor\'s deposits' : 'Release the rest of a guarantor\'s call');
+      if (!d) return;
+      const g = gs.find((x) => x.member_no === d.memberNo);
+      res = a === 'guarantor-recovery'
+        ? await api('POST', `/api/loans/${id}/guarantors/${g.id}/recover`, { amount: d.amount ? Number(d.amount) : undefined })
+        : await api('POST', `/api/loans/${id}/guarantors/${g.id}/release-call`, { note: d.note });
     }
     if (a === 'write-off') {
       const d = await ask([{ label: 'Reason', name: 'narration' }], `Write off ${l.account_no}`);

@@ -68,6 +68,7 @@ const SEED_GL = [
   ['300-900', 'Accounting Method Conversions', 'EQUITY',  'INSTITUTIONAL_CAPITAL'],
   ['400-300', 'Overdraft Interest Income',   'INCOME',    'INCOME'],
   ['400-310', 'Negative Interest Income',    'INCOME',    'INCOME'],
+  ['400-400', 'Recoveries on Written-off Loans', 'INCOME', 'INCOME'],
   ['500-320', 'Overdraft Write-off Expense', 'EXPENSE',   'EXPENSE'],
 ];
 

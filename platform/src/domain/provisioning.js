@@ -133,6 +133,36 @@ async function compute(c, { asAt = null } = {}) {
 }
 
 /**
+ * The part of the allowance that stands for one loan: its outstanding
+ * principal at its band's rate, the same arithmetic the run uses, capped by
+ * what the allowance actually holds. A write-off uses this much of the
+ * allowance before it charges the expense; the next run then finds the loan
+ * gone and the allowance already lower by its share, so nothing is charged
+ * twice. Nothing is attributed while the bands have no rates.
+ */
+async function attributable(c, l, { asAt = null } = {}) {
+  const date = asAt || new Date().toISOString().slice(0, 10);
+  const rows = await bands(c);
+  if (!rows.length || rows.some((b) => b.rate_percent === null)) return { amount: 0, reason: 'PROVISION_RATES_NOT_CONFIGURED' };
+  const { rows: [a] } = await c.query(
+    `SELECT COALESCE(GREATEST(0, MAX($2::date - i.due_date)), 0) AS days_late,
+            GREATEST(l.principal_disbursed - l.principal_paid, 0) AS outstanding
+     FROM loan_accounts l
+     LEFT JOIN loan_installments i ON i.loan_id = l.id AND i.status <> 'PAID' AND i.due_date < $2::date
+     WHERE l.id = $1 GROUP BY l.id`, [l.id, date]);
+  const days = Number(a?.days_late || 0);
+  const outstanding = round2(a?.outstanding || 0);
+  const band = rows.find((b) => days >= b.min_days && (b.max_days === null || days <= b.max_days));
+  if (!band) return { amount: 0, reason: 'NO_BAND', daysLate: days };
+  const required = round2(outstanding * Number(band.rate_percent) / 100);
+  const held = round2(-(await acct.balance(c, GL_ALLOWANCE, { to: date })));
+  return {
+    band: band.code, rate: Number(band.rate_percent), daysLate: days, outstanding, required, held,
+    amount: round2(Math.max(0, Math.min(required, held, outstanding))),
+  };
+}
+
+/**
  * Post the movement for a date.
  *
  * Idempotent through the database: a partial unique index allows one POSTED
@@ -232,6 +262,6 @@ async function history(c, { limit = 24 } = {}) {
 }
 
 module.exports = {
-  bands, setBand, compute, run, reverseRun, history,
+  bands, setBand, compute, run, reverseRun, history, attributable,
   GL_ALLOWANCE, GL_EXPENSE,
 };

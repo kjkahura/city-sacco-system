@@ -38,6 +38,7 @@ const LOAN = {
   feeIncome:          { column: 'gl_fee_inc',      types: ALL,           when: () => true, optional: true },
   penaltyIncome:      { column: 'gl_penalty_inc',  types: ['INCOME'],    when: () => true, optional: true },
   writeOffExpense:    { column: 'gl_writeoff_exp', types: ['EXPENSE'],   when: () => true },
+  recoveries:         { column: 'gl_recoveries',   types: ['INCOME'],    when: () => true },
   interestReceivable: { column: 'gl_interest_rec', types: ['ASSET'],     when: (p) => accrues(p) },
   feeReceivable:      { column: 'gl_fee_rec',      types: ['ASSET'],     when: (p) => p.accounting_method === 'ACCRUAL' },
   penaltyReceivable:  { column: 'gl_penalty_rec',  types: ['ASSET'],     when: (p) => p.accounting_method === 'ACCRUAL' },

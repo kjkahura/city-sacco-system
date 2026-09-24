@@ -266,6 +266,19 @@ router.post('/:id/write-off', ...tx(async (c, req, res, { actor }) => {
   return await L.writeOff(c, req.params.id, { ...req.body, createdBy: actor });
 }, APPROVER));
 
+// After a write-off: money recovered through a channel (a teller receipt),
+// taken from a called guarantor's deposits, or a call forgone (management).
+router.post('/:id/recoveries', ...tx(async (c, req, res, { actor }) => {
+  res.status(201);
+  return await L.recover(c, req.params.id, { ...req.body, createdBy: actor });
+}, TELLER));
+router.post('/:id/guarantors/:guarantorId/recover', ...tx(async (c, req, res, { actor }) => {
+  res.status(201);
+  return await L.recoverFromGuarantor(c, req.params.id, req.params.guarantorId, { ...req.body, createdBy: actor });
+}, APPROVER));
+router.post('/:id/guarantors/:guarantorId/release-call', ...tx((c, req, _res, { actor }) =>
+  L.releaseCall(c, req.params.id, req.params.guarantorId, { ...req.body, createdBy: actor }), APPROVER));
+
 router.post('/:id/branch', ...tx((c, req, _res, { actor }) =>
   require('../domain/branches').moveAccount(c, { kind: 'LOAN', accountId: req.params.id, branchId: req.body?.branchId, createdBy: actor }), APPROVER));
 

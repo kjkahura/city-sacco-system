@@ -16,11 +16,12 @@ const installments = require('./installments');
 const interest = require('./interest');
 const types = require('./productTypes');
 const PA = require('./productAccounting');
+const writeOffs = require('./writeOffs');
 const { err, round2 } = acct;
 const { ymd, isoDate } = S;
 const {
   OVERRIDES, resolveOverrides, within,
-  lock, balances, isAccrual, interestAccrues, booksEntries, post, creditsFor, writeOffCredit,
+  lock, balances, interestAccrues, booksEntries, post, creditsFor,
 } = ledger;
 const { buildSchedule, reschedule, applyToInstallments } = installments;
 const { accrueInterest } = interest;
@@ -486,56 +487,8 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   });
 }
 
-async function writeOff(c, loanId, { narration, createdBy } = {}) {
-  const l = await lock(c, loanId);
-  if (!['ACTIVE', 'IN_ARREARS', 'LOCKED'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
-  await workflow.assertMayWriteOff(c, l);
-  const b = balances(l);
-  if (b.total <= 0) throw err('NOTHING_TO_WRITE_OFF', 409);
-
-  // Each component is cleared against the account that holds it: principal
-  // out of the portfolio, and under accrual the interest, fee and penalty
-  // receivables that were built up when they were applied. Under cash those
-  // three were never recognised, so only the principal is booked.
-  const funded = await funding.isFunded(c, l.id);
-  // A funded loan's principal was never on the SACCO's books.
-  // Each fee is written off against its own receivable and, where the fee
-  // names one, its own write-off account.
-  const credits = funded ? [] : [{ glCode: writeOffCredit(l, 'PRINCIPAL'), amount: b.principal, memberId: l.member_id }];
-  const debits = [];
-  if (isAccrual(l)) {
-    if (interestAccrues(l) && b.interest > 0) credits.push({ glCode: writeOffCredit(l, 'INTEREST'), amount: b.interest, memberId: l.member_id });
-    if (b.penalty > 0) credits.push({ glCode: writeOffCredit(l, 'PENALTY'), amount: b.penalty, memberId: l.member_id });
-    for (const f of await fees.writeOffLines(c, l, b.fees)) {
-      credits.push({ glCode: f.glReceivable, amount: f.amount, memberId: l.member_id });
-      if (f.glWriteOff !== l.gl_writeoff_exp) debits.push({ glCode: f.glWriteOff, amount: f.amount, memberId: l.member_id });
-    }
-  }
-  const booked = round2(credits.reduce((s2, x) => s2 + x.amount, 0));
-  const ownDebits = round2(debits.reduce((s2, x) => s2 + x.amount, 0));
-  if (round2(booked - ownDebits) > 0) debits.push({ glCode: l.gl_writeoff_exp, amount: round2(booked - ownDebits), memberId: l.member_id });
-  const entryId = booked > 0 ? await post(c, l, {
-    debits,
-    credits: credits.filter((x) => x.amount > 0),
-    narration: narration || `Write off ${l.account_no}`,
-    sourceType: 'LOAN_WRITE_OFF', sourceId: l.id, createdBy,
-  }) : null;
-  await securities.onClose(c, l.id, { seized: true });
-  await c.query(
-    "UPDATE loan_accounts SET status = 'CLOSED_WRITTEN_OFF', closed_on = current_date, updated_at = now() WHERE id = $1", [l.id]
-  );
-  await workflow.history(c, l.id, { from: l.status, to: 'CLOSED_WRITTEN_OFF', action: 'WRITE_OFF', actor: createdBy, note: narration });
-  // Guarantors are called, not released: their pledge is what covers this.
-  await c.query(
-    "UPDATE loan_guarantors SET status = 'CALLED' WHERE loan_id = $1 AND status = 'PLEDGED'", [l.id]
-  );
-
-  return savings.record(c, {
-    reference: savings.ref('LW'), kind: 'LOAN_WRITE_OFF', memberId: l.member_id,
-    loanAccountId: l.id, amount: b.total, entryId,
-    allocation: b, narration, createdBy,
-  });
-}
+// Write-offs, recoveries and their reversal live in ./writeOffs.
+const { writeOff } = writeOffs;
 
 async function reverseTransaction(c, reference, { narration = 'Reversal', createdBy } = {}) {
   const { rows } = await c.query('SELECT * FROM transactions WHERE reference = $1 FOR UPDATE', [reference]);
@@ -543,6 +496,7 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
   const tx = rows[0];
   if (tx.reversed_by) throw err('TRANSACTION_ALREADY_REVERSED', 409);
   if (!tx.loan_account_id) throw err('NOT_A_LOAN_TRANSACTION');
+  if (tx.kind === 'LOAN_WRITE_OFF' || tx.kind === 'LOAN_RECOVERY') return writeOffs.reverse(c, tx, { narration, createdBy });
 
   const entry = tx.entry_id ? await acct.reverse(c, tx.entry_id, narration, createdBy) : { entryId: null };
   const a = tx.allocation || {};
@@ -661,4 +615,5 @@ module.exports = {
   addGuarantor: eligibility.addGuarantor, guarantorCoverage: eligibility.guarantorCoverage,
   releaseGuarantors: eligibility.releaseGuarantors,
   checkEligibility: eligibility.checkEligibility, enforceEligibility: eligibility.enforceEligibility,
+  recover: writeOffs.recover, recoverFromGuarantor: writeOffs.recoverFromGuarantor, releaseCall: writeOffs.releaseCall,
 };

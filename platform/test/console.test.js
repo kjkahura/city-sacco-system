@@ -155,6 +155,22 @@ const T = (fn) => withTenant(SCHEMA, fn);
       /Settles/.test(dialogText) && /10,000/.test(dialogText) && (await page.textContent('main p.hint')).includes(`replaces ${oldNo}`),
       dialogText.slice(0, 160));
 
+    // Written off, then something recovered.
+    await page.click('button[data-action=write-off]');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=narration]', 'member absconded');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForSelector('main h1 .badge:text("CLOSED_WRITTEN_OFF")');
+    const leftBefore = await page.textContent('#wo-left');
+    await page.click('button[data-action=recovery]');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=amount]', '1000');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction((before) => document.querySelector('#wo-left') && document.querySelector('#wo-left').textContent !== before, leftBefore);
+    const num = (t) => Number(String(t).replace(/[^0-9.]/g, ''));
+    check('a written-off loan shows what is left to recover, and a recovery brings it down',
+      Math.round(num(leftBefore) - num(await page.textContent('#wo-left'))) === 1000, `${leftBefore} -> ${await page.textContent('#wo-left')}`);
+
     section('reports');
     await page.click('nav button[data-view=reports]');
     await page.waitForSelector('#r-out table');

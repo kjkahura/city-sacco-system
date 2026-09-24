@@ -75,12 +75,15 @@ const accrues = (a) => PA.accrues(a);
 
 /**
  * What a member's deposits are committed to: guarantor pledges on others'
- * loans, and funding pledged on approved loans not yet disbursed.
+ * loans (called ones until recovered or released), and funding pledged on
+ * approved loans not yet disbursed.
  */
 async function pledgedAmount(c, memberId) {
+  // A called pledge (the loan was written off) stays committed for what has
+  // not yet been recovered from it.
   const { rows: [r] } = await c.query(
-    `SELECT COALESCE(SUM(pledged_amount), 0) AS total
-     FROM loan_guarantors WHERE member_id = $1 AND status = 'PLEDGED'`,
+    `SELECT COALESCE(SUM(CASE WHEN status = 'PLEDGED' THEN pledged_amount ELSE pledged_amount - recovered END), 0) AS total
+     FROM loan_guarantors WHERE member_id = $1 AND status IN ('PLEDGED', 'CALLED')`,
     [memberId]
   );
   const locked = await lockedFunding(c, memberId);
