@@ -155,7 +155,22 @@ const T = (fn) => withTenant(SCHEMA, fn);
       /Settles/.test(dialogText) && /10,000/.test(dialogText) && (await page.textContent('main p.hint')).includes(`replaces ${oldNo}`),
       dialogText.slice(0, 160));
 
-    // Written off, then something recovered.
+    // A write-off is requested and waits for a second person; rejected here.
+    await page.click('button[data-action=write-off]');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=narration]', 'member absconded');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForSelector('#wo-pending');
+    check('a write-off request shows as pending with approve and reject in place of write-off',
+      (await page.textContent('#wo-pending')).includes('member absconded')
+      && await page.locator('button[data-action=approve-write-off]').count() === 1
+      && await page.locator('button[data-action=write-off]').count() === 0);
+    await page.click('button[data-action=reject-write-off]');
+    await page.waitForSelector('dialog[open]');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForSelector('button[data-action=write-off]');
+    // With approval turned off for the tenant, the same action writes it off; then something is recovered.
+    await T((c) => c.query('UPDATE lending_controls SET write_off_requires_approval = false WHERE id = 1'));
     await page.click('button[data-action=write-off]');
     await page.waitForSelector('dialog[open]');
     await page.fill('dialog[open] input[name=narration]', 'member absconded');
@@ -177,6 +192,11 @@ const T = (fn) => withTenant(SCHEMA, fn);
     const tbText = await page.textContent('#r-out');
     check('the trial balance renders', /Total \(whole book/.test(tbText));
     check('and it balances', !/does not balance/.test(tbText));
+
+    await page.selectOption('#r-which', 'write-offs');
+    await page.waitForSelector('#wo-totals');
+    check('the written-off loans report lists the write-off with its totals',
+      (await page.textContent('#r-out')).includes('member absconded') && /Recoveries received/.test(await page.textContent('#wo-totals')));
 
     await page.selectOption('#r-which', 'prudential');
     await page.waitForSelector('.notice');

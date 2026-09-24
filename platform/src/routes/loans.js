@@ -14,6 +14,7 @@ const TR = require('../domain/tranches');
 const SEC = require('../domain/securities');
 const FU = require('../domain/funding');
 const RV = require('../domain/revolving');
+const WO = require('../domain/writeOffs');
 
 const router = express.Router();
 
@@ -49,6 +50,19 @@ const APPROVER = ['TENANT_ADMIN', 'MANAGER'];
 const TELLER = ['TENANT_ADMIN', 'MANAGER', 'TELLER'];
 
 // --- tenant-wide lending controls ------------------------------------------
+
+// The write-off register and the approver's queue. Declared before /:id so
+// the words are not read as account numbers.
+router.get('/write-offs', requireAuth(), async (req, res, next) => {
+  try {
+    res.json(await withTenantRead(req.tenant.schema_name, (c) => WO.register(c, req.query)));
+  } catch (e) { next(e); }
+});
+router.get('/write-off-requests', requireAuth(), async (req, res, next) => {
+  try {
+    sendPage(res, await withTenantRead(req.tenant.schema_name, (c) => WO.pendingRequests(c, req.query)));
+  } catch (e) { next(e); }
+});
 
 router.get('/controls', requireAuth(), async (req, res, next) => {
   try { res.json(await withTenantRead(req.tenant.schema_name, (c) => W.controls(c))); } catch (e) { next(e); }
@@ -261,10 +275,19 @@ router.post('/:id/refinance', ...tx(async (c, req, res, { actor }) => {
 }, TELLER));
 router.get('/:id/refinance-quote', ...read((c, req) => R.quote(c, req.params.id)));
 
-router.post('/:id/write-off', ...tx(async (c, req, res, { actor }) => {
+// A write-off is asked for by one person and approved by another (unless
+// the tenant turns the approval off, in which case it happens at once).
+router.post('/:id/write-off', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
-  return await L.writeOff(c, req.params.id, { ...req.body, createdBy: actor });
+  return await WO.requestWriteOff(c, req.params.id, { ...req.body, createdBy: actor, user });
+}, TELLER));
+router.get('/:id/write-off', ...read((c, req) => WO.requestsFor(c, req.params.id)));
+router.post('/:id/write-off/approve', ...tx(async (c, req, res, { actor, user }) => {
+  res.status(201);
+  return await WO.decide(c, req.params.id, { approve: true, note: req.body?.note, createdBy: actor, user });
 }, APPROVER));
+router.post('/:id/write-off/reject', ...tx((c, req, _res, { actor, user }) =>
+  WO.decide(c, req.params.id, { approve: false, note: req.body?.note, createdBy: actor, user }), APPROVER));
 
 // After a write-off: money recovered through a channel (a teller receipt),
 // taken from a called guarantor's deposits, or a call forgone (management).

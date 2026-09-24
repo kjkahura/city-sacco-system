@@ -428,7 +428,7 @@ const BAD_STATES = ['IN_ARREARS', 'LOCKED', 'CLOSED_WRITTEN_OFF'];
 
 async function loanDetail(row) {
   const id = row.account_no;
-  const [loan, schedule, txs, pens, fees, hist, tranches, collateral, funding] = await Promise.all([
+  const [loan, schedule, txs, pens, fees, hist, tranches, collateral, funding, woReqs] = await Promise.all([
     api('GET', `/api/loans/${id}`),
     api('GET', `/api/loans/${id}/schedule`),
     api('GET', `/api/loans/${id}/transactions?limit=25`),
@@ -438,13 +438,16 @@ async function loanDetail(row) {
     api('GET', `/api/loans/${id}/tranches`),
     api('GET', `/api/loans/${id}/collateral`),
     api('GET', `/api/loans/${id}/funding`),
+    api('GET', `/api/loans/${id}/write-off`),
   ]);
   if (!loan.ok) throw new Error(loan.error);
   const l = loan.body;
   const b = l.balances || {};
   const revolving = l.product_type === 'REVOLVING';
   const tranched = l.product_type === 'TRANCHED';
-  const actions = (LOAN_ACTIONS[l.status] || []).filter(([a]) => {
+  const woPending = (woReqs.body || []).find((r) => r.status === 'PENDING');
+  const actions = (LOAN_ACTIONS[l.status] || []).flatMap((x) => (x[0] === 'write-off' && woPending
+    ? [['approve-write-off', 'Approve write-off'], ['reject-write-off', 'Reject write-off']] : [x])).filter(([a]) => {
     if (a === 'drawdown') return revolving || (tranched && (tranches.body || []).some((t) => t.status === 'PLANNED'));
     if (a === 'close') return revolving;
     if (a === 'tranches') return tranched;
@@ -459,6 +462,7 @@ async function loanDetail(row) {
       ${l.locked_reason ? `<span class="badge warn">locked: ${esc(l.locked_reason)}</span>` : ''}</h1>
     <p class="hint">${esc(l.first_name)} ${esc(l.last_name)} · ${esc(l.member_no)} · product ${esc(l.product_id)} · ${esc(l.product_type || '')}
       ${l.purpose ? ` · ${esc(l.purpose)}` : ''}${l.parent_account_no ? ` · replaces ${esc(l.parent_account_no)}` : ''}</p>
+    ${woPending ? `<p class="notice" id="wo-pending">Write-off of ${money(woPending.amount_at_request)} requested by ${esc(woPending.requested_by)}, dated ${day(woPending.value_date)}: ${esc(woPending.reason)}. Another manager approves it.</p>` : ''}
     ${l.refinance_of && !l.parent_loan_id ? `<p class="notice" id="top-up-quote">Top-up of ${esc(l.refinances_account_no)}: on disbursement this loan settles it and pays the rest to the member.</p>` : ''}
     ${l.notes ? `<p class="hint">${esc(l.notes)}</p>` : ''}
     <div class="toolbar">${actions.map(([a, label]) =>
@@ -704,9 +708,19 @@ async function loanDetail(row) {
         : await api('POST', `/api/loans/${id}/guarantors/${g.id}/release-call`, { note: d.note });
     }
     if (a === 'write-off') {
-      const d = await ask([{ label: 'Reason', name: 'narration' }], `Write off ${l.account_no}`);
+      const d = await ask([
+        { label: 'Reason', name: 'narration' },
+        { label: 'Value date (blank: today)', name: 'valueDate', type: 'date', required: false },
+      ], `Write off ${l.account_no}`);
       if (!d) return;
-      res = await api('POST', `/api/loans/${id}/write-off`, { narration: d.narration });
+      res = await api('POST', `/api/loans/${id}/write-off`, { reason: d.narration, valueDate: d.valueDate || undefined });
+      if (res.ok && !res.body.transaction) { toast('Write-off requested; another manager approves it'); return loanDetail(row); }
+    }
+    if (a === 'approve-write-off') res = await api('POST', `/api/loans/${id}/write-off/approve`, {});
+    if (a === 'reject-write-off') {
+      const d = await ask([{ label: 'Why it is rejected', name: 'note', required: false }], `Reject write-off of ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/write-off/reject`, { note: d.note });
     }
     if (!res) return;
     toast(res.ok ? 'Done' : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
@@ -783,7 +797,7 @@ async function reportsView() {
       <label>Report<select id="r-which">
         ${[['trial-balance', 'Trial balance'], ['balance-sheet', 'Balance sheet'],
     ['income-statement', 'Income statement'], ['portfolio-at-risk', 'Portfolio at risk'],
-    ['par-loans', 'Loans at risk'], ['prudential', 'Prudential ratios']].map(([v, label]) =>
+    ['par-loans', 'Loans at risk'], ['write-offs', 'Written-off loans'], ['prudential', 'Prudential ratios']].map(([v, label]) =>
     `<option value="${v}" ${R.which === v ? 'selected' : ''}>${label}</option>`).join('')}
       </select></label>
       <label>From<input id="r-from" type="date" value="${R.from}"></label>
@@ -878,6 +892,36 @@ async function runReport() {
       { label: 'Days late', num: true, key: 'days_late' },
       { label: 'Outstanding', num: true, value: (x) => money(x.outstanding) },
     ], p.items || []) + pager(R, p.total || 0);
+    wirePager(R, runReport);
+    return;
+  }
+
+  if (R.which === 'write-offs') {
+    qs.set('offset', R.offset); qs.set('limit', R.limit);
+    const r = await api('GET', `/api/loans/write-offs?${qs}`);
+    if (!r.ok) return void (out.innerHTML = `<p class="error">${esc(r.error)}</p>`);
+    const w = r.body;
+    const t = w.totals;
+    out.innerHTML = table([
+      { label: 'Loan', key: 'account_no' },
+      { label: 'Member', value: (x) => `${x.first_name} ${x.last_name}` },
+      { label: 'Written off', value: (x) => day(x.written_off_on) },
+      { label: 'Amount', num: true, value: (x) => money(x.written_off_amount) },
+      { label: 'From allowance', num: true, value: (x) => money(x.allowance_used) },
+      { label: 'Recovered', num: true, value: (x) => money(x.recovered) },
+      { label: 'Still owed', num: true, value: (x) => money(x.outstanding) },
+      { label: 'Asked by', value: (x) => x.requested_by || '' },
+      { label: 'Approved by', value: (x) => x.approved_by || x.written_off_by || '' },
+      { label: 'Reason', value: (x) => x.reason || '' },
+    ], w.items || [], { empty: 'No loans written off in this period' }) + pager(R, w.total || 0)
+      + card('Totals for the period', `<dl class="kv" id="wo-totals">
+        <dt>Loans</dt><dd>${t.loans}</dd>
+        <dt>Written off</dt><dd>${money(t.written_off)}</dd>
+        <dt>of which principal / interest / fees / penalties</dt><dd>${money(t.principal)} / ${money(t.interest)} / ${money(t.fees)} / ${money(t.penalty)}</dd>
+        <dt>Taken from the allowance</dt><dd>${money(t.allowance_used)}</dd>
+        <dt>Recovered on these loans</dt><dd>${money(t.recovered)}</dd>
+        <dt>Still owed</dt><dd>${money(t.outstanding)}</dd>
+        <dt>Recoveries received in the period (any write-off date)</dt><dd>${money(w.recoveriesInPeriod.amount)}</dd></dl>`);
     wirePager(R, runReport);
     return;
   }
