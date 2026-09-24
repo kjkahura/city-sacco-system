@@ -252,13 +252,8 @@ function terms(l) {
   };
 }
 
-// Tranched and revolving loans price interest on the actual balance, like a
-// dynamic term loan, and their schedules are drawn from the balance as it
-// moves.
-const isDynamic = (l) => ['DYNAMIC_TERM', 'TRANCHED', 'REVOLVING'].includes(l.product_type);
-const isRevolving = (l) => l.product_type === 'REVOLVING';
-const isTranched = (l) => l.product_type === 'TRANCHED';
-const isInterestFree = (l) => l.product_type === 'INTEREST_FREE' || !(Number(l.monthly_rate) > 0);
+// Product-type predicates (isDynamic, isRevolving, ...) live with the
+// strategies in ./productTypes, which stand on this module.
 
 /** The schedule engine's inputs for this loan. */
 function scheduleInputs(l) {
@@ -380,7 +375,7 @@ const isMonthEnd = (d) => {
 module.exports = {
   OVERRIDES, effective, overrideSql, resolveOverrides, within,
   PRODUCT_COLUMNS, lock, principalOutstanding, balances, terms,
-  isDynamic, isRevolving, isTranched, isInterestFree, scheduleInputs, shiftOffClosedDays,
+  scheduleInputs, shiftOffClosedDays,
   isAccrual, booksEntries, interestAccrues, paidCredit, creditsFor, writeOffCredit, post,
   interestFor, isMonthEnd,
 };

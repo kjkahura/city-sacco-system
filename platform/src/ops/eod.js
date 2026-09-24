@@ -79,7 +79,7 @@ const JOBS = {
       let due = 0; let late = 0;
       for (const r of rows) {
         const l = await L.lock(c, r.id);
-        if (L.isDynamic(l)) due += await F.applyPaymentDueFees(c, l, businessDate);
+        if (L.productType(l).paymentDueFeesByCalendar) due += await F.applyPaymentDueFees(c, l, businessDate);
         late += await F.applyLateFees(c, l, businessDate);
       }
       return { loans: rows.length, paymentDueApplied: due, lateFeesApplied: late };

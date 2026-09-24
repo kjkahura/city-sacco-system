@@ -10,9 +10,9 @@ const accruals = require('./accruals');
 const { round2 } = acct;
 const { ymd, isoDate, toUTC, interestBetween } = S;
 const {
-  lock, principalOutstanding, terms, isDynamic, isInterestFree, isAccrual, interestAccrues, booksEntries, post, isMonthEnd,
+  lock, terms, interestAccrues, booksEntries, post, isMonthEnd,
 } = require('./ledger');
-const { scheduledOutstanding, scheduledInterestThrough } = require('./installments');
+const types = require('./productTypes');
 
 /**
  * Interest: daily or monthly accrual by product type and interest type, and
@@ -33,7 +33,7 @@ const { scheduledOutstanding, scheduledInterestThrough } = require('./installmen
  *   NONE     never accrues; interest is owed on the schedule and booked
  *            when paid
  *
- * What a day of interest *is* depends on the product type:
+ * What a day of interest *is* depends on the product type (./productTypes):
  *
  *   FIXED_TERM    the schedule's interest, pro rata through the period in
  *                 progress (scheduledInterestThrough). Prepaying principal
@@ -54,9 +54,9 @@ const { scheduledOutstanding, scheduledInterestThrough } = require('./installmen
  */
 async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   const l = await lock(c, loanId);
+  const type = types.forLoan(l);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) return null;
-  if (l.interest_accrual === 'NONE' || isInterestFree(l)) return null;
-  if (l.interest_posting === 'ON_DISBURSEMENT' && !isDynamic(l)) return null;
+  if (l.interest_accrual === 'NONE' || !type.accrues(l)) return null;
 
   let date = valueDate ? ymd(valueDate) : isoDate(new Date());
   const from = l.accrued_through || l.disbursed_on;
@@ -65,25 +65,17 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   if (date <= fromIso) return null;
 
   const t = terms(l);
-  const dynamic = isDynamic(l);
-  const capitalizing = l.interest_type === 'CAPITALIZED';
+  const capitalizing = type.capitalizes(l);
   const { rows: installments } = await c.query(
     'SELECT number, principal_due, interest_due, due_date, nominal_due FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]
   );
 
-  if (dynamic && !l.accrue_late_interest && installments.length) {
-    // Interest stops at maturity; penalties take over from there.
-    const maturity = ymd(installments[installments.length - 1].nominal_due);
-    if (fromIso >= maturity) return null;
-    if (date > maturity) date = maturity;
-  }
-
-  // The base a period is priced on, at the start of the run.
-  const unpaidInterest = Math.max(0, round2(l.interest_accrued - l.interest_paid));
-  const onInterestToo = t.interestType === 'COMPOUND' || (t.interestType === 'SIMPLE' && l.simple_base === 'PRINCIPAL_AND_INTEREST');
-  const base = dynamic
-    ? round2(principalOutstanding(l) + (onInterestToo ? unpaidInterest : 0))
-    : l.method === 'FLAT' ? Number(l.principal) : scheduledOutstanding(l, installments, fromIso);
+  // How far this run may go (a dynamic loan stops at maturity unless it
+  // accrues late interest) and the base a period is priced on.
+  const capped = type.accrualWindow(l, fromIso, date, installments);
+  if (!capped) return null;
+  date = capped;
+  const base = type.accrualBase(l, installments, fromIso);
 
   let amt = 0;
   const through = date;
@@ -98,11 +90,8 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
       if (monthEnd > end) break;
       if (monthEnd > start) amt = round2(amt + interestBetween(base, t, new Date(Date.UTC(y, m, 0)), monthEnd));
     }
-  } else if (!dynamic && installments.length) {
-    amt = round2(scheduledInterestThrough(l, installments, date, t.convention)
-      - scheduledInterestThrough(l, installments, fromIso, t.convention));
   } else {
-    amt = interestBetween(base, t, fromIso, date);
+    amt = type.dailyAccrual(l, t, { base, fromIso, date, installments });
   }
 
   // A loan in arrears under a charge cap may not be charged past it.
@@ -145,7 +134,7 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
       loanAccountId: l.id, amount: tx.gross, valueDate: date, entryId,
       allocation: {
         from: fromIso, through, base, dayCount: t.convention, method: l.interest_accrual,
-        interestType: t.interestType, productType: l.product_type, basis: dynamic ? 'ACTUAL_BALANCE' : 'SCHEDULE',
+        interestType: t.interestType, productType: l.product_type, basis: type.basis,
         ...(tx.tax > 0 ? { tax: tx.tax, net: tx.income } : {}),
       },
       createdBy,
@@ -154,7 +143,7 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
 
   // Capitalising products fold the interest earned into principal on each
   // due date that this run crossed (and at repayment, which calls here first).
-  if (capitalizing && dynamic) {
+  if (capitalizing) {
     const crossed = installments.some((i) => ymd(i.nominal_due) > fromIso && ymd(i.nominal_due) <= date);
     if (crossed) await capitalizeInterest(c, l.id, { valueDate: date, createdBy });
   }

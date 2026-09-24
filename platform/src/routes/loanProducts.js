@@ -554,3 +554,4 @@ router.post('/:id/schedule-preview', requireAuth(...READER), async (req, res, ne
 
 module.exports = router;
 module.exports.publicProduct = publicProduct;
+module.exports.ENUMS = ENUMS;

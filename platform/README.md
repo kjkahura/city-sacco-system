@@ -96,6 +96,9 @@ src/
     eligibility.js     guarantors, cover, the rules checked at approval
     controls.js        tenant lending controls, user approval and
                        disbursement limits
+    productTypes/      one strategy per product type (FIXED_TERM with
+                       INTEREST_FREE, DYNAMIC_TERM, TRANCHED, REVOLVING)
+                       and the dispatcher, index.js
     loans.js           application, disbursement, repayment, write-off,
                        reversal, account numbering
     productAccounting.js  which GL mappings a product's settings require
@@ -109,7 +112,7 @@ src/
                        charges
     restructure.js     reschedule and refinance
     tranches.js        tranched disbursement
-    revolving.js       revolving credit: drawdowns, billing, credit balance
+    revolving.js       revolving credit billing and credit balance deposits
     securities.js      collateral assets alongside guarantors
     tax.js             value-added tax on interest, fees and penalties
     funding.js         funding sources (peer-to-peer lending)
@@ -496,6 +499,7 @@ Each module requires only modules below it, at the top of the file:
     tax, savings, controls
     ledger
     eligibility, funding, tranches
+    productTypes
     securities
     workflow
     fees, penalties
@@ -508,6 +512,38 @@ Each module requires only modules below it, at the top of the file:
 `test/loan-structure.test.js` fails if a cycle or a require inside a function
 comes back. `loans.js` re-exports the lower modules' functions under their
 old names, so routes, the EOD job and older tests use one import.
+
+### Product types are strategies
+
+Everything that depends on a loan's product type is in `src/domain/productTypes/`,
+one file per type:
+
+    fixedTerm.js     FIXED_TERM and INTEREST_FREE: the schedule is the contract
+    dynamicTerm.js   DYNAMIC_TERM: interest on the actual balance, redraws
+    tranched.js      TRANCHED: dynamic term paid out in planned parts
+    revolving.js     REVOLVING: a limit drawn and repaid at will
+    index.js         forLoan(l) picks the strategy; the contract is documented here
+
+Disbursement, repayment, reversal, interest accrual, fee placement,
+restructuring and the EOD fee run ask the loan's strategy (`types.forLoan(l)`)
+questions such as `disbursesAgain`, `disbursementAmount`, `afterDisbursement`,
+`beforeRepayment`, `installmentScope`, `closesWhenPaid`, `accrualWindow`,
+`accrualBase` and `dailyAccrual`, instead of testing `product_type`. Dynamic
+term, tranched and revolving build on the fixed-term object and override only
+what differs, so the differences between types can be read side by side.
+
+The strategy files require only accounting, schedule, ledger and tranches.
+Hooks that need the lifecycle above them (drawing a schedule, accruing,
+redrawing, fees) receive those operations as `ops` from `loans.js`. Adding a
+product type is a new file, a line in `BY_TYPE` and the value in the product
+enum. `test/loan-structure.test.js` checks that every offered type has a
+strategy that fills every hook, that the strategy files stay in their layer,
+and that none of the lifecycle modules tests the type directly.
+
+The product validation in `routes/loanProducts.js`, the override list in
+`ledger.js` and the tranche guard in `tranches.js` still name product types:
+they sit below or beside the strategies and describe what a product may be
+configured with, not how a loan behaves.
 
 ### The configuration, setting by setting
 
@@ -628,7 +664,12 @@ product's interval or fixed days of month) from the balance: principal by
 `revolving_repayment_method` with its floor and ceiling, interest accrued
 to the date, fees due. Arrears, penalties and late fees then work as on any
 loan. A revolving loan does not close itself at zero; `POST /close` does,
-and is refused while a credit balance stands.
+and is refused while a credit balance stands. Interest keeps accruing on the
+balance after the last billed installment, whether or not the product
+accrues late interest, since a billing date is not a maturity. (Before the
+strategy split a revolving loan with `accrue_late_interest` off treated its
+last billed installment as maturity and stopped accruing there; that was a
+bug.)
 
 The credit balance (`credit_balance_enabled`) is the member's own money on
 the loan: an overpayment lands there (up to `max_credit_balance`) instead of

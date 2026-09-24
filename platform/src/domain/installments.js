@@ -4,10 +4,12 @@ const acct = require('./accounting');
 const S = require('./schedule');
 const fees = require('./fees');
 const { err, round2 } = acct;
-const { ymd, isoDate, toUTC, dayCount, annuityPayment } = S;
+const { ymd, isoDate, toUTC, annuityPayment } = S;
 const {
-  principalOutstanding, balances, isDynamic, isRevolving, scheduleInputs, shiftOffClosedDays,
+  principalOutstanding, balances, scheduleInputs, shiftOffClosedDays,
 } = require('./ledger');
+const types = require('./productTypes');
+const { scheduledOutstanding, scheduledInterestThrough } = require('./productTypes/fixedTerm');
 
 /**
  * A loan's installments: drawing the schedule at disbursement, previewing
@@ -107,8 +109,7 @@ async function previewSchedule(c, { productId, principal, termMonths, monthlyRat
  * the old balance and is still unpaid.
  */
 async function reschedule(c, l, asOf, { force = false } = {}) {
-  if (!isDynamic(l) || isRevolving(l)) return null;
-  if (!force && (!l.prepayment_recalculation || l.prepayment_recalculation === 'NONE')) return null;
+  if (!types.forLoan(l).redrawsOnPrepayment(l, { force })) return null;
   const date = ymd(asOf);
   const { rows } = await c.query('SELECT * FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]);
   const past = rows.filter((r) => ymd(r.due_date) <= date);
@@ -168,40 +169,8 @@ async function maturityDate(c, loanId) {
   return r?.d ? ymd(r.d) : null;
 }
 
-/** Principal a FIXED_TERM loan's schedule says is still out at `date` (nominal period ends). */
-function scheduledOutstanding(l, installments, date) {
-  let out = principalOutstanding(l) + Number(l.principal_paid);
-  for (const i of installments) {
-    if (date >= ymd(i.nominal_due || i.due_date)) out -= Number(i.principal_due);
-    else break;
-  }
-  return round2(Math.max(0, out));
-}
-
-/**
- * Interest a FIXED_TERM loan has earned by `date`, reading the schedule:
- * every period whose nominal end has passed counts in full, the period in
- * progress counts pro rata by the day count, and nothing accrues after the
- * final period. A fixed-term loan's interest is fixed; that is the point.
- *
- * Periods are measured on the nominal due dates, not the shifted ones, so a
- * due date pushed off a weekend does not spread a month's interest over
- * thirty-two days.
- */
-function scheduledInterestThrough(l, installments, date, convention) {
-  let from = ymd(l.disbursed_on);
-  let total = 0;
-  for (const i of installments) {
-    const to = ymd(i.nominal_due || i.due_date);
-    const interest = Number(i.interest_due);
-    if (date >= to) { total += interest; from = to; continue; }
-    if (date <= from) break;
-    const periodDays = dayCount(from, to, convention) || 1;
-    total += interest * dayCount(from, date, convention) / periodDays;
-    break;
-  }
-  return round2(total);
-}
+// scheduledOutstanding and scheduledInterestThrough live with the FIXED_TERM
+// strategy (./productTypes/fixedTerm) and are re-exported here.
 
 /**
  * Spread paid amounts over installments, earliest first. With `dueBy`, only
