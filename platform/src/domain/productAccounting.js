@@ -43,6 +43,7 @@ const LOAN = {
   feeReceivable:      { column: 'gl_fee_rec',      types: ['ASSET'],     when: (p) => p.accounting_method === 'ACCRUAL' },
   penaltyReceivable:  { column: 'gl_penalty_rec',  types: ['ASSET'],     when: (p) => p.accounting_method === 'ACCRUAL' },
   taxesPayable:       { column: 'gl_tax_payable',  types: ['LIABILITY'], when: (p) => loanTaxed(p) },
+  deferredInterest:   { column: 'gl_deferred_interest', types: ['LIABILITY'], when: (p) => Boolean(p.interest_prepayment) && p.interest_prepayment !== 'NONE' },
   creditBalance:      { column: 'gl_credit_balance', types: ['LIABILITY'], when: (p) => p.product_type === 'REVOLVING' && p.credit_balance_enabled },
 };
 

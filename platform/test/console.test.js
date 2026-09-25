@@ -186,6 +186,49 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('a written-off loan shows what is left to recover, and a recovery brings it down',
       Math.round(num(leftBefore) - num(await page.textContent('#wo-left'))) === 1000, `${leftBefore} -> ${await page.textContent('#wo-left')}`);
 
+    section('schedule editing and postdated payments');
+    const { appNo, runNo, runId } = await T(async (c) => {
+      await c.query("UPDATE loan_products SET schedule_editing = ARRAY['PAYMENT_DATES','PRINCIPAL','INTEREST'], allow_postdated_payments = true WHERE id = 'NL01'");
+      const ms = (await c.query("SELECT id FROM members WHERE member_no IN ('M0002','M0003') ORDER BY member_no")).rows;
+      const a = await L.apply(c, { memberId: ms[0].id, productId: 'NL01', principal: 12000, termMonths: 3, createdBy: 'test' });
+      const sav = await S.open(c, { memberId: ms[1].id });
+      await S.deposit(c, sav.id, { amount: 50000, channelId: 'cash', createdBy: 'test' });
+      const r = await L.apply(c, { memberId: ms[1].id, productId: 'NL01', principal: 12000, termMonths: 3, createdBy: 'test' });
+      await L.changeState(c, r.id, 'APPROVE', { createdBy: 'test' });
+      await L.disburse(c, r.id, { amount: 12000, channelId: 'bank', createdBy: 'test' });
+      return { appNo: a.account_no, runNo: r.account_no, runId: r.id };
+    });
+    await page.evaluate((no) => loanDetail({ account_no: no }), appNo);
+    await page.waitForSelector('#application-schedule');
+    check('an application shows the schedule it would be drawn with', (await page.locator('#application-schedule tbody tr').count()) === 3);
+    await page.click('button[data-action=edit-schedule]');
+    await page.waitForSelector('dialog#schedule-editor');
+    check('the editor opens with a row per installment', (await page.locator('dialog#schedule-editor tbody tr').count()) === 3);
+    const soon = new Date(Date.now() + 12 * 86400000).toISOString().slice(0, 10);
+    await page.fill('dialog#schedule-editor tbody tr:first-child input[name=dueDate]', soon);
+    await page.click('dialog#schedule-editor button[value=ok]');
+    await page.waitForSelector('#application-schedule h2:has-text("edited")');
+    check('saving it keeps the schedule on the application, with a way back to the product\'s',
+      await page.locator('button[data-action=product-schedule]').count() === 1);
+    await page.evaluate((no) => loanDetail({ account_no: no }), runNo);
+    await page.waitForSelector('button[data-action=edit-schedule]');
+    await page.click('button[data-action=edit-schedule]');
+    await page.waitForSelector('dialog#schedule-editor');
+    await page.fill('dialog#schedule-editor tbody tr:nth-child(3) input[name=interest]', '55');
+    await page.click('dialog#schedule-editor button[value=ok]');
+    await page.waitForFunction(() => !document.querySelector('dialog#schedule-editor'));
+    await page.waitForTimeout(300);
+    const edited = await T((c) => c.query('SELECT interest_due FROM loan_installments WHERE loan_id = $1 AND number = 3', [runId]));
+    check('on a running loan the editor changes the installments that may change', Number(edited.rows[0].interest_due) === 55, String(edited.rows[0]?.interest_due));
+    await page.click('button[data-action=postdate-all]');
+    await page.waitForSelector('dialog[open]');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForSelector('section:has(h2:text("Postdated payments")) tbody tr');
+    check('the remaining installments can be postdated at once and are listed with a cancel link',
+      (await page.locator('section:has(h2:text("Postdated payments")) tbody tr').count()) === 3
+      && (await page.locator('[data-cancel-postdated]').count()) === 3,
+      `${await page.locator('section:has(h2:text("Postdated payments")) tbody tr').count()} ${await page.locator('[data-cancel-postdated]').count()}`);
+
     section('reports');
     await page.click('nav button[data-view=reports]');
     await page.waitForSelector('#r-out table');

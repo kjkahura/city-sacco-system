@@ -8,7 +8,7 @@ const loans = require('./loans');
 const fees = require('./fees');
 const funding = require('./funding');
 const eligibility = require('./eligibility');
-const { accrueInterest } = require('./interest');
+const { accrueInterest, prepaidToPrincipal } = require('./interest');
 const { buildSchedule } = require('./installments');
 const types = require('./productTypes');
 const { err, round2 } = acct;
@@ -78,8 +78,16 @@ function assertSameMethod(old, np, capitalized) {
   }
 }
 
-/** Interest owed brought up to the date, so the figure settled is the real one. */
+/**
+ * Interest owed brought up to the date, so the figure settled is the real
+ * one. Interest the member paid in advance and has not earned goes to the
+ * principal of the loan being settled.
+ */
 async function bringToDate(c, old, date, createdBy) {
+  if (Number(old.interest_prepaid) > 0) {
+    await prepaidToPrincipal(c, old.id, { valueDate: date, createdBy });
+    old = await L.lock(c, old.id);
+  }
   if (!types.forLoan(old).bringsInterestToDate || old.status === 'LOCKED') return old;
   await accrueInterest(c, old.id, { valueDate: date, createdBy });
   return L.lock(c, old.id);

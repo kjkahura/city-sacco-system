@@ -7,6 +7,7 @@ const P = require('../domain/penalties');
 const F = require('../domain/fees');
 const W = require('../domain/workflow');
 const RATES = require('../domain/rates');
+const PDP = require('../domain/postdated');
 const P2 = require('../domain/provisioning');
 const CL = require('../domain/close');
 
@@ -65,6 +66,16 @@ const JOBS = {
       }
       return { loans: rows.length, accrued, total: Math.round(total * 100) / 100 };
     });
+  },
+
+  /**
+   * Apply the postdated payments whose value date has come, as repayments
+   * on that date. After accrueInterest, so an installment falling due today
+   * has all its interest earned when its payment arrives, and before
+   * markArrears, so a loan paid by one is not marked late.
+   */
+  async applyPostdatedPayments(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => PDP.applyDue(c, { asOf: businessDate, createdBy: 'EOD' }));
   },
 
   /**
@@ -232,7 +243,7 @@ async function runJob(tenant, job, { businessDate = null, force = false } = {}) 
  * posts, arrears before penalties (penalties read arrears state), and
  * provisioning last because it reads the arrears the others just produced.
  */
-const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'reviewRates', 'accrueInterest', 'accrueSavings', 'markArrears', 'accruePenalties',
+const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'reviewRates', 'accrueInterest', 'applyPostdatedPayments', 'accrueSavings', 'markArrears', 'accruePenalties',
   'applyFees', 'enforceControls', 'provision', 'postAccruals', 'autoClosure'];
 
 async function runAll({ businessDate = null, jobs = DEFAULT_JOBS, force = false } = {}) {
