@@ -287,6 +287,8 @@ POST /api/loans/:id/repayments         allocation, posts to GL
 POST /api/loans/:id/accrue-interest
 POST /api/loans/:id/write-off          request; /write-off/approve|reject
 GET  /api/loans/write-offs             the written-off register
+GET  /api/loans/:id/rates              rate periods and every change of rate
+POST /api/index-rates, /:id/rates      index sources and their dated values
 POST /api/loans/:id/recoveries         money recovered after a write-off
 POST /api/loans/:id/guarantors/:gid/recover|release-call
 POST /api/loans/transactions/:ref/reversal
@@ -960,6 +962,49 @@ monthly rate):
 members expect the month's interest to be the month's interest. A product
 priced per annum should use an actual convention.
 
+### Index and adjustable interest rates
+
+After Mambu's "Interest Rate Source" and "Adjustable Interest Rates".
+
+**Index sources.** `POST /api/index-rates` creates a source (a central bank
+rate, say); `POST /api/index-rates/:id/rates` gives it a value from a date.
+Values are history: the value in force on a date is the latest dated on or
+before it. The console sets them under Loan products, Index rates.
+
+**INDEX products.** `interestRateSource: INDEX` with an `indexSourceId`:
+the loan's rate is the index plus a spread, within `rateFloor` and
+`rateCeiling`, reviewed every `rateReviewCount` `rateReviewUnit` (days,
+weeks, months) from disbursement. The product's rate and its band are the
+spread's. Not on FLAT or INTEREST_FREE products, as in Mambu, and frozen
+once loans exist.
+
+**Adjustable rates.** A product with `adjustableRates` lets a loan be
+opened with `ratePeriods`: a list, each `{ validFrom, source: FIXED, rate }`
+or `{ validFrom, source: INDEX, indexSourceId, spread, floor, ceiling,
+reviewCount, reviewUnit }` (the index settings default to the product's).
+Fixed rates must sit in the product's band; index sources must be the
+product's or in `allowedIndexSources`; a negative spread (a discount on the
+index) needs `allowNegativeRate`, and the rate never goes below zero. When
+the loan is disbursed on another day than its first period starts,
+`shiftAdjustableInterestPeriods: true` moves every period by the difference,
+`false` keeps them as opened, and leaving it out is refused, as in Mambu.
+
+**How a rate changes.** `loan_accounts.monthly_rate` is the rate in force.
+The end of day reviews every loan with rate periods before accruing
+interest (`reviewRates`; also `POST /api/loans/rates/review` and
+`/api/loans/:id/rates/review`). A FIXED period's rate applies from the day
+the period starts; an INDEX period's rate is the index on the latest review
+date plus the spread, applied from that review date. When the rate differs
+from the one in force, interest is brought to the change date at the old
+rate, the rate changes, the change is recorded with the index and spread
+(`GET /api/loans/:id/rates`), and the schedule's future installments are
+redrawn on the new rate, an equal-installment loan getting a new payment.
+A loan that earns interest on the actual balance changes on the date; a
+fixed-term loan, whose schedule is the contract, changes from its next due
+date, so the installment in progress keeps its amount. Mambu's worked
+example (5% index plus 2%, the index rising to 6% on 1 February, the third
+installment priced at 8%) is in `test/interest-rates.test.js`.
+
 ### Eligibility is enforced at approval
 
 Applying records a request; approving is the credit decision, and that is
@@ -1465,7 +1510,7 @@ official forms are not.
 5. **Early settlement of a fixed-term loan charges accrued interest only.**
    Recovering the rest of the schedule on settlement is not a setting yet.
 6. **Not modelled from Mambu's product form:** fee amortisation profiles
-   (deferred fee income), index-linked rates, payment holidays, billing
+   (deferred fee income), payment holidays, billing
    cycles distinct from due dates on revolving loans, refunds on revolving
    loans, and the secondary marketplace for funded loans. Auto-close of
    paid-off loans is moot: a paid-off loan closes at once.

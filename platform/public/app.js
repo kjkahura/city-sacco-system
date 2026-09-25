@@ -481,6 +481,7 @@ async function loanDetail(row) {
           ${l.next_billing_on ? `<dt>Next billing</dt><dd>${day(l.next_billing_on)}</dd>` : ''}` : ''}
         ${Number(l.tax_charged) > 0 ? `<dt>Of which tax</dt><dd>${money(l.tax_charged)}</dd>` : ''}
         ${l.arrears_since ? `<dt>In arrears since</dt><dd>${day(l.arrears_since)}</dd>` : ''}
+        ${l.rate_plan ? `<dt>Rate in force</dt><dd id="rate-plan">${esc(l.monthly_rate)}% · ${l.rate_plan === 'INDEX' ? 'index plus spread, reviewed' : 'adjustable periods'}</dd>` : ''}
         ${l.written_off_on ? `<dt>Written off</dt><dd>${money(l.written_off_amount)} on ${day(l.written_off_on)} by ${esc(l.written_off_by || '')}</dd>
           <dt>Recovered since</dt><dd>${money(l.recovered)}</dd>
           <dt>Still to recover</dt><dd id="wo-left">${money(Number(l.written_off_amount) - Number(l.recovered))}</dd>` : ''}
@@ -1229,24 +1230,34 @@ const PRODUCT_FIELDS = (p = {}) => [
   { label: 'Accrual entries', name: 'accrualGranularity', options: ['PER_ACCOUNT', 'AGGREGATED'], value: p.accrualGranularity || 'PER_ACCOUNT' },
   { label: 'Interest added to what is owed', name: 'interestAccrual', options: ['DAILY', 'MONTHLY', 'NONE'], value: p.interestAccrual || 'DAILY' },
   { label: 'Day count', name: 'dayCount', options: ['THIRTY_360', 'ACTUAL_365', 'ACTUAL_360', 'ACTUAL_ACTUAL', 'BUS_252'], value: p.dayCount || 'THIRTY_360' },
+  { label: 'Interest rate source (INDEX: the rate above is the spread)', name: 'interestRateSource', options: ['FIXED', 'INDEX'], value: p.interestRateSource || 'FIXED' },
+  { label: 'Index source (INDEX products)', name: 'indexSourceId', value: p.indexSourceId || '', required: false },
+  { label: 'Rate floor', name: 'rateFloor', type: 'number', step: '0.0001', value: p.rateFloor ?? '', required: false },
+  { label: 'Rate ceiling', name: 'rateCeiling', type: 'number', step: '0.0001', value: p.rateCeiling ?? '', required: false },
+  { label: 'Review the index every', name: 'rateReviewCount', type: 'number', value: p.rateReviewCount ?? '', required: false },
+  { label: 'Review unit', name: 'rateReviewUnit', options: ['MONTHS', 'WEEKS', 'DAYS'], value: p.rateReviewUnit || 'MONTHS' },
+  { label: 'Adjustable rate periods on loans', name: 'adjustableRates', options: ['false', 'true'], value: String(p.adjustableRates ?? false) },
+  { label: 'Allow negative spreads', name: 'allowNegativeRate', options: ['false', 'true'], value: String(p.allowNegativeRate ?? false) },
 ];
 
 const PRODUCT_ENUM_FIELDS = ['category', 'idMode', 'initialState', 'productType', 'method', 'interestType', 'simpleBase', 'interestPosting',
   'rateFrequency', 'prepaymentRecalculation', 'repaymentIntervalUnit', 'shortMonthHandling', 'nonWorkingDays', 'residualInstallment', 'graceType', 'rounding',
   'arrearsCountFrom', 'arrearsNonWorkingDays', 'penaltyBasis', 'chargeCapBase', 'chargeCapMode', 'accountingMethod', 'interestAccrual', 'dayCount',
-  'taxMethod', 'funderAllocation', 'interestAccruedAccounting', 'accrualGranularity'];
+  'taxMethod', 'funderAllocation', 'interestAccruedAccounting', 'accrualGranularity', 'interestRateSource', 'rateReviewUnit'];
 const PRODUCT_NUM_FIELDS = ['monthlyRate', 'rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm', 'maxTerm',
   'repaymentIntervalCount', 'firstDueOffsetDays', 'gracePeriods', 'amortizationPeriods', 'processingFee', 'maxMultiplier',
   'arrearsToleranceDays', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'penaltyRate', 'penaltyToleranceDays',
   'chargeCapPercent', 'autoLockArrearsDays', 'maxTranches', 'revolvingRepaymentValue', 'revolvingRepaymentFloor', 'revolvingRepaymentCeiling',
-  'maxCreditBalance', 'taxRatePercent', 'orgCommission', 'funderRateDefault', 'funderRateMin', 'funderRateMax'];
+  'maxCreditBalance', 'taxRatePercent', 'orgCommission', 'funderRateDefault', 'funderRateMin', 'funderRateMax',
+  'rateFloor', 'rateCeiling', 'rateReviewCount'];
 const PRODUCT_BOOL_FIELDS = ['accrueLateInterest', 'allowArbitraryFees', 'enforceDepositMultiplier', 'requireGuarantorCover',
-  'creditBalanceEnabled', 'enableGuarantors', 'enableCollateral', 'taxOnInterest', 'taxOnFees', 'taxOnPenalties', 'fundingEnabled', 'lockFundsAtApproval'];
+  'creditBalanceEnabled', 'enableGuarantors', 'enableCollateral', 'taxOnInterest', 'taxOnFees', 'taxOnPenalties', 'fundingEnabled', 'lockFundsAtApproval',
+  'adjustableRates', 'allowNegativeRate'];
 // Optional numbers that a blank field sets back to "unset".
 const PRODUCT_NULLABLE = ['rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm',
   'amortizationPeriods', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'chargeCapPercent', 'autoLockArrearsDays',
   'maxTranches', 'revolvingRepaymentValue', 'revolvingRepaymentFloor', 'revolvingRepaymentCeiling', 'maxCreditBalance', 'taxRatePercent',
-  'orgCommission', 'funderRateDefault', 'funderRateMin', 'funderRateMax'];
+  'orgCommission', 'funderRateDefault', 'funderRateMin', 'funderRateMax', 'rateFloor', 'rateCeiling', 'rateReviewCount'];
 
 function productBody(d) {
   const out = { name: d.name, idPattern: d.idPattern };
@@ -1257,6 +1268,7 @@ function productBody(d) {
     if (d[k] === '') { if (PRODUCT_NULLABLE.includes(k)) out[k] = null; continue; }
     out[k] = Number(d[k]);
   }
+  if (d.indexSourceId !== undefined) out.indexSourceId = d.indexSourceId.trim() ? d.indexSourceId.trim().toUpperCase() : null;
   if (d.fixedDaysOfMonth !== undefined) {
     out.fixedDaysOfMonth = d.fixedDaysOfMonth.trim() ? d.fixedDaysOfMonth.split(',').map((x) => Number(x.trim())).filter(Boolean) : null;
   }
@@ -1383,7 +1395,7 @@ async function productsView() {
   const r = await api('GET', '/api/loan-products');
   if (!r.ok) throw new Error(r.error);
   view().innerHTML = `
-    <div class="toolbar"><h1>Loan products</h1><span class="spacer"></span><button id="p-new">New product</button></div>
+    <div class="toolbar"><h1>Loan products</h1><span class="spacer"></span><button id="p-index" class="secondary">Index rates</button><button id="p-new">New product</button></div>
     <p class="hint">Rates are copied onto a loan when it is applied for, so changing a product does not
       reprice loans already running. The accounting method and GL accounts are read live.
       A fixed-term loan owes the interest on its schedule however it is paid; a dynamic-term loan
@@ -1404,6 +1416,25 @@ async function productsView() {
     <p class="hint">Click a product to see and change its settings and fees.</p>`;
 
   wireRows(r.body, productDetail);
+
+  $('#p-index').addEventListener('click', async () => {
+    const list = await api('GET', '/api/index-rates');
+    const current = (list.body || []).map((x) => `${x.id} ${x.current_rate ?? '-'}%`).join(', ') || 'none yet';
+    const d = await ask([
+      { label: `Index source id (now: ${current})`, name: 'id' },
+      { label: 'Name (for a new source)', name: 'name', required: false },
+      { label: 'Rate, %', name: 'rate', type: 'number', step: '0.0001' },
+      { label: 'Valid from', name: 'validFrom', type: 'date' },
+    ], 'Set an index rate');
+    if (!d) return;
+    const id = d.id.trim().toUpperCase();
+    if (!(list.body || []).some((x) => x.id === id)) {
+      const made = await api('POST', '/api/index-rates', { id, name: d.name || id });
+      if (!made.ok) return toast(made.error, true);
+    }
+    const res = await api('POST', `/api/index-rates/${id}/rates`, { rate: Number(d.rate), validFrom: d.validFrom });
+    toast(res.ok ? `${id} is ${d.rate}% from ${d.validFrom}; indexed loans take it at their next review` : res.error, !res.ok);
+  });
 
   $('#p-new').addEventListener('click', async () => {
     const d = await ask([

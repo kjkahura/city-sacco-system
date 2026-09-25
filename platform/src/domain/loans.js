@@ -17,6 +17,7 @@ const interest = require('./interest');
 const types = require('./productTypes');
 const PA = require('./productAccounting');
 const writeOffs = require('./writeOffs');
+const rates = require('./rates');
 const { err, round2 } = acct;
 const { ymd, isoDate } = S;
 const {
@@ -176,6 +177,9 @@ async function apply(c, params, { refinance = null, settles = refinance?.of || n
   if (types.forLoan(p).plansTranches) {
     if (Array.isArray(plannedTranches) && plannedTranches.length) await tranches.setTranches(c, rows[0].id, plannedTranches, { createdBy });
   } else if (plannedTranches) throw err('ONLY_A_TRANCHED_PRODUCT_TAKES_TRANCHES', 400);
+  // A rate that can move: an INDEX product's period, or the adjustable
+  // periods the application gives (./rates).
+  await rates.planPeriods(c, rows[0], p, params.ratePeriods);
   for (const f of fundingSources || []) await funding.addFundingSource(c, rows[0].id, { ...f, createdBy });
   for (const k of collateral || []) await securities.addCollateral(c, rows[0].id, { ...k, createdBy });
   return (await c.query('SELECT * FROM loan_accounts WHERE id = $1', [rows[0].id])).rows[0];
@@ -214,8 +218,8 @@ async function postUnlinked(c, l, entry, { cash, funded = null, extra = [] }) {
  * The schedule is drawn on the resulting principal. Under ON_DISBURSEMENT
  * posting the schedule's whole interest is applied at once.
  */
-async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narration, createdBy, user = null, fees: selectedFees = [], tranche = null, branchId: tellerBranch = null } = {}) {
-  const l = await lock(c, loanId);
+async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narration, createdBy, user = null, fees: selectedFees = [], tranche = null, branchId: tellerBranch = null, shiftAdjustableInterestPeriods } = {}) {
+  let l = await lock(c, loanId);
   const type = types.forLoan(l);
   const first = l.status === 'APPROVED';
   const again = !first && ['ACTIVE', 'IN_ARREARS'].includes(l.status) && type.disbursesAgain;
@@ -223,6 +227,11 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
   // A top-up application pays out by settling the loan it refinances.
   if (l.refinance_of) throw err('TOP_UP_APPLICATION_DISBURSES_THROUGH_REFINANCE', 409);
   const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  // An indexed or adjustable rate is set from its periods on the day.
+  if (first && l.rate_plan) {
+    await rates.start(c, l, { date, shift: shiftAdjustableInterestPeriods, createdBy });
+    l = await lock(c, l.id);
+  }
 
   // What may be paid out now: the product type says (the principal, the
   // next tranche, or a drawdown within the available limit).
