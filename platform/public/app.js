@@ -1257,13 +1257,19 @@ const PRODUCT_FIELDS = (p = {}) => [
   { label: 'Review unit', name: 'rateReviewUnit', options: ['MONTHS', 'WEEKS', 'DAYS'], value: p.rateReviewUnit || 'MONTHS' },
   { label: 'Adjustable rate periods on loans', name: 'adjustableRates', options: ['false', 'true'], value: String(p.adjustableRates ?? false) },
   { label: 'Allow negative spreads', name: 'allowNegativeRate', options: ['false', 'true'], value: String(p.allowNegativeRate ?? false) },
+  { label: 'Payment allocation', name: 'paymentMethod', options: ['VERTICAL', 'HORIZONTAL'], value: p.paymentMethod || 'VERTICAL' },
+  { label: 'Accept prepayments', name: 'allowPrepayments', options: ['true', 'false'], value: String(p.allowPrepayments ?? true) },
+  { label: 'Interest on prepayments (dynamic)', name: 'prepaymentInterest', options: ['AUTOMATIC', 'MANUAL'], value: p.prepaymentInterest || 'AUTOMATIC' },
+  { label: 'Prepayment allocation (dynamic equal installments)', name: 'prepaymentAllocation', options: ['UPCOMING_PENDING', 'NEXT_INSTALLMENTS'], value: p.prepaymentAllocation || 'UPCOMING_PENDING' },
+  { label: 'Mark installment paid when (dynamic equal installments)', name: 'markPaidWhen', options: ['FULL_DUE', 'PRINCIPAL_EXPECTED'], value: p.markPaidWhen || 'FULL_DUE' },
   { label: 'Schedule edits allowed (comma separated: PAYMENT_DATES, PRINCIPAL, INTEREST, FEES, PAYMENT_HOLIDAYS, NUMBER_OF_INSTALLMENTS)', name: 'scheduleEditing', value: (p.scheduleEditing || []).join(', '), required: false },
 ];
 
 const PRODUCT_ENUM_FIELDS = ['category', 'idMode', 'initialState', 'productType', 'method', 'interestType', 'simpleBase', 'interestPosting',
   'rateFrequency', 'prepaymentRecalculation', 'repaymentIntervalUnit', 'shortMonthHandling', 'nonWorkingDays', 'residualInstallment', 'graceType', 'rounding',
   'arrearsCountFrom', 'arrearsNonWorkingDays', 'penaltyBasis', 'chargeCapBase', 'chargeCapMode', 'accountingMethod', 'interestAccrual', 'dayCount',
-  'taxMethod', 'funderAllocation', 'interestAccruedAccounting', 'accrualGranularity', 'interestRateSource', 'rateReviewUnit'];
+  'taxMethod', 'funderAllocation', 'interestAccruedAccounting', 'accrualGranularity', 'interestRateSource', 'rateReviewUnit',
+  'paymentMethod', 'prepaymentInterest', 'prepaymentAllocation', 'markPaidWhen'];
 const PRODUCT_NUM_FIELDS = ['monthlyRate', 'rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm', 'maxTerm',
   'repaymentIntervalCount', 'firstDueOffsetDays', 'gracePeriods', 'amortizationPeriods', 'processingFee', 'maxMultiplier',
   'arrearsToleranceDays', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'penaltyRate', 'penaltyToleranceDays',
@@ -1272,7 +1278,7 @@ const PRODUCT_NUM_FIELDS = ['monthlyRate', 'rateMin', 'rateMax', 'minPrincipal',
   'rateFloor', 'rateCeiling', 'rateReviewCount'];
 const PRODUCT_BOOL_FIELDS = ['accrueLateInterest', 'allowArbitraryFees', 'enforceDepositMultiplier', 'requireGuarantorCover',
   'creditBalanceEnabled', 'enableGuarantors', 'enableCollateral', 'taxOnInterest', 'taxOnFees', 'taxOnPenalties', 'fundingEnabled', 'lockFundsAtApproval',
-  'adjustableRates', 'allowNegativeRate'];
+  'adjustableRates', 'allowNegativeRate', 'allowPrepayments'];
 // Optional numbers that a blank field sets back to "unset".
 const PRODUCT_NULLABLE = ['rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm',
   'amortizationPeriods', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'chargeCapPercent', 'autoLockArrearsDays',

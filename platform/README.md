@@ -1039,6 +1039,29 @@ is an API call. Penalties are charged on the loan, not placed on
 installments, so there is no penalty schedule to edit, and a schedule is
 edited once the loan is disbursed (an application has none yet).
 
+### Repayment collection
+
+After Mambu's "Repayment collection" and "Prepayment Recalculation Methods":
+
+| Setting | Values | What it does |
+|---|---|---|
+| `paymentMethod` | VERTICAL (default), HORIZONTAL | VERTICAL pays by balance in the allocation order: all penalties, then all fees, and so on. HORIZONTAL pays by the schedule: each unpaid installment in turn takes its own penalties, fees, interest and principal before the next is touched, interest never beyond what has been earned; what the loan owes outside its installments is then paid in the order. Mambu offers VERTICAL on dynamic products only; here it stays available on fixed-term products because it is what they did before. |
+| `allocationOrder` on a repayment | the four components | A custom order for one repayment, as Mambu allows through the API. |
+| `allowPrepayments` | true (default), false | false refuses a payment above what is due (charges owed and the principal of installments fallen due). |
+| `prepaymentInterest` | AUTOMATIC (default), MANUAL | Dynamic term. AUTOMATIC applies interest to the day before a payment, so a prepayment pays it first; MANUAL applies it after the payment, on the lower balance. |
+| `prepaymentAllocation` | UPCOMING_PENDING (default), NEXT_INSTALLMENTS | Dynamic equal installments. UPCOMING_PENDING redraws the schedule by `prepaymentRecalculation`; NEXT_INSTALLMENTS pays the next installments' principal in turn and redraws nothing. |
+| `markPaidWhen` | FULL_DUE (default), PRINCIPAL_EXPECTED | Dynamic equal installments. FULL_DUE: an installment is paid once all of it is, on or after its date. PRINCIPAL_EXPECTED: a prepaid installment is paid once its principal is, and the interest it expected moves to the next installment. |
+
+Mambu's four Declining Balance recalculation methods map onto
+`prepaymentRecalculation`: No recalculation is NONE; Reschedule remaining
+repayments and Recalculate keeping the same number of terms are
+REDUCE_INSTALLMENT_AMOUNT (on equal principal shares they draw the same
+schedule); Recalculate keeping the same principal amount is
+REDUCE_NUMBER_OF_INSTALLMENTS. Not built: postdated payments (a Mambu UI
+option for fixed-term loans) and interest prepayment into a deferred
+interest account; a payment before a due date pays the interest earned to
+that day and the rest goes to principal.
+
 ### Eligibility is enforced at approval
 
 Applying records a request; approving is the credit decision, and that is

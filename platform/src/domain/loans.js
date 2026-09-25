@@ -24,7 +24,7 @@ const {
   OVERRIDES, resolveOverrides, within,
   lock, balances, interestAccrues, booksEntries, post, creditsFor,
 } = ledger;
-const { buildSchedule, reschedule, applyToInstallments } = installments;
+const { buildSchedule, reschedule, applyToInstallments, markPaidOnPrincipal } = installments;
 const { accrueInterest } = interest;
 
 /**
@@ -349,7 +349,55 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
  * under accrual, the receivable that was debited when it was applied; under
  * cash, income. See paidCredit().
  */
-async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy, branchId: tellerBranch = null } = {}) {
+const COMPONENTS = ['PENALTY', 'FEE', 'INTEREST', 'PRINCIPAL'];
+
+/**
+ * HORIZONTAL allocation (Mambu): the schedule decides. Each unpaid
+ * installment in turn takes its own penalties, fees, interest and principal
+ * in the allocation order before the next is touched; interest never beyond
+ * what has been earned. Whatever the loan owes outside its installments (a
+ * fee due at once, interest past the schedule) is then paid in the order,
+ * and the rest is surplus.
+ */
+async function horizontalAllocation(c, l, due, amount, order) {
+  const { rows: insts } = await c.query(
+    "SELECT * FROM loan_installments WHERE loan_id = $1 AND status <> 'PAID' ORDER BY number", [l.id]);
+  // Penalties are charged against installments; what has been paid is taken
+  // off the oldest first.
+  const { rows: pen } = await c.query(
+    `SELECT i.number, COALESCE(sum(pc.amount), 0) AS amount FROM penalty_charges pc JOIN loan_installments i ON i.id = pc.installment_id
+     WHERE pc.loan_id = $1 AND pc.waived_at IS NULL GROUP BY i.number ORDER BY i.number`, [l.id]);
+  let penPaid = Number(l.penalty_paid || 0);
+  const penLeft = {};
+  for (const x of pen) {
+    const take = Math.min(penPaid, Number(x.amount));
+    penPaid = round2(penPaid - take);
+    penLeft[x.number] = round2(Number(x.amount) - take);
+  }
+  const cap = { ...due };
+  const paid = { PENALTY: 0, FEE: 0, INTEREST: 0, PRINCIPAL: 0 };
+  let left = amount;
+  for (const inst of insts) {
+    if (!(left > 0)) break;
+    const owes = {
+      PENALTY: penLeft[inst.number] || 0,
+      FEE: round2(inst.fee_due - inst.fee_paid),
+      INTEREST: round2(inst.interest_due - inst.interest_paid),
+      PRINCIPAL: round2(inst.principal_due - inst.principal_paid),
+    };
+    for (const k of order) {
+      const t = round2(Math.max(0, Math.min(left, owes[k], cap[k])));
+      paid[k] = round2(paid[k] + t); cap[k] = round2(cap[k] - t); left = round2(left - t);
+    }
+  }
+  for (const k of order) {
+    const t = round2(Math.max(0, Math.min(left, cap[k])));
+    paid[k] = round2(paid[k] + t); cap[k] = round2(cap[k] - t); left = round2(left - t);
+  }
+  return { paid, left };
+}
+
+async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy, branchId: tellerBranch = null, allocationOrder = null } = {}) {
   let l = await lock(c, loanId);
   const type = types.forLoan(l);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
@@ -368,13 +416,36 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
 
   const b = balances(l);
   const due = { PENALTY: b.penalty, FEE: b.fees, INTEREST: b.interest, PRINCIPAL: b.principal };
-  const paid = { PENALTY: 0, FEE: 0, INTEREST: 0, PRINCIPAL: 0 };
-  const order = Array.isArray(l.allocation_order) && l.allocation_order.length === 4
-    ? l.allocation_order : ['PENALTY', 'FEE', 'INTEREST', 'PRINCIPAL'];
-  for (const component of order) {
-    const t = round2(Math.min(left, Math.max(0, due[component])));
-    paid[component] = t;
-    left = round2(left - t);
+  let paid = { PENALTY: 0, FEE: 0, INTEREST: 0, PRINCIPAL: 0 };
+  // The product's allocation order, or one given for this repayment (Mambu
+  // allows a custom order on a single repayment through the API).
+  if (allocationOrder !== null && allocationOrder !== undefined) {
+    if (!Array.isArray(allocationOrder) || allocationOrder.length !== 4 || new Set(allocationOrder).size !== 4
+      || allocationOrder.some((x) => !COMPONENTS.includes(x))) {
+      throw err(`ALLOCATION_ORDER_LISTS_EACH_OF: ${COMPONENTS.join(', ')}`, 400);
+    }
+  }
+  const order = allocationOrder || (Array.isArray(l.allocation_order) && l.allocation_order.length === 4
+    ? l.allocation_order : COMPONENTS);
+
+  // A product that does not accept prepayments takes no more than is due:
+  // charges owed and the principal of installments fallen due.
+  if (l.allow_prepayments === false) {
+    const { rows: [pd] } = await c.query(
+      `SELECT COALESCE(sum(principal_due - principal_paid), 0) AS p FROM loan_installments
+       WHERE loan_id = $1 AND due_date <= $2::date AND status NOT IN ('PAID', 'GRACE')`, [l.id, asOf]);
+    const dueNow = round2(b.penalty + b.fees + b.interest + Math.min(Number(pd.p), b.principal));
+    if (left > dueNow) throw err(`PREPAYMENT_NOT_ALLOWED: ${dueNow} is due`, 409);
+  }
+
+  if (l.payment_method === 'HORIZONTAL') {
+    ({ paid, left } = await horizontalAllocation(c, l, due, left, order));
+  } else {
+    for (const component of order) {
+      const t = round2(Math.min(left, Math.max(0, due[component])));
+      paid[component] = t;
+      left = round2(left - t);
+    }
   }
   const { PENALTY: penalty, FEE: feesPaid, INTEREST: interest, PRINCIPAL: principal } = paid;
   const surplus = round2(left);
@@ -467,7 +538,8 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   // anything beyond that is a prepayment: it reduces the balance, and the
   // schedule for what remains is redrawn from that balance. A revolving
   // loan's installments only exist once due, so all of them take a share.
-  await applyToInstallments(c, l.id, { principal, interest, fees: feesPaid }, type.installmentScope(asOf));
+  await applyToInstallments(c, l.id, { principal, interest, fees: feesPaid }, type.installmentScope(asOf, l));
+  if (l.mark_paid_when === 'PRINCIPAL_EXPECTED' && type.basis === 'ACTUAL_BALANCE') await markPaidOnPrincipal(c, l.id, asOf);
   await fees.settle(c, l.id, feesPaid);
 
   const fresh = await lock(c, l.id);
@@ -481,7 +553,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   } else if (fresh.status === 'IN_ARREARS') {
     await workflow.refreshArrears(c, fresh, asOf);
   }
-  rescheduled = await type.afterRepayment(c, fresh, { asOf, principal, interest }, ops);
+  rescheduled = await type.afterRepayment(c, fresh, { asOf, principal, interest, createdBy }, ops);
 
   return savings.record(c, {
     reference: savings.ref('LR'), kind: 'LOAN_REPAYMENT', memberId: l.member_id,
@@ -559,7 +631,7 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
     const today = isoDate(new Date());
     await applyToInstallments(c, tx.loan_account_id, {
       principal: Number(remaining[0].p), interest: Number(remaining[0].i), fees: Number(remaining[0].f),
-    }, type.installmentScope(today));
+    }, type.installmentScope(today, restored));
     await fees.resettle(c, tx.loan_account_id, Number(remaining[0].f));
     if (type.redrawsOnReversal) await reschedule(c, await lock(c, tx.loan_account_id), today);
   } else if (tx.kind === 'LOAN_DISBURSEMENT') {

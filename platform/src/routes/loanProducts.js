@@ -37,6 +37,10 @@ const ENUMS = {
   interest_type: ['SIMPLE', 'CAPITALIZED', 'COMPOUND', 'COMPOUND_DAILY_REST'],
   residual_installment: ['FIRST', 'LAST'],
   interest_rate_source: ['FIXED', 'INDEX'],
+  payment_method: ['VERTICAL', 'HORIZONTAL'],
+  prepayment_interest: ['AUTOMATIC', 'MANUAL'],
+  prepayment_allocation: ['UPCOMING_PENDING', 'NEXT_INSTALLMENTS'],
+  mark_paid_when: ['FULL_DUE', 'PRINCIPAL_EXPECTED'],
   rate_review_unit: ['DAYS', 'WEEKS', 'MONTHS'],
   simple_base: ['PRINCIPAL_ONLY', 'PRINCIPAL_AND_INTEREST'],
   interest_posting: ['ON_REPAYMENT', 'ON_DISBURSEMENT'],
@@ -77,6 +81,8 @@ const FIELDS = {
   interestRateSource: 'interest_rate_source', indexSourceId: 'index_source_id', rateFloor: 'rate_floor', rateCeiling: 'rate_ceiling',
   rateReviewCount: 'rate_review_count', rateReviewUnit: 'rate_review_unit', adjustableRates: 'adjustable_rates',
   allowedIndexSources: 'allowed_index_sources', allowNegativeRate: 'allow_negative_rate', scheduleEditing: 'schedule_editing',
+  paymentMethod: 'payment_method', allowPrepayments: 'allow_prepayments', prepaymentInterest: 'prepayment_interest',
+  prepaymentAllocation: 'prepayment_allocation', markPaidWhen: 'mark_paid_when',
   firstDueOffsetDays: 'first_due_offset_days', firstDueOffsetMin: 'first_due_offset_min', firstDueOffsetMax: 'first_due_offset_max',
   graceType: 'grace_type', gracePeriods: 'grace_periods', amortizationPeriods: 'amortization_periods', rounding: 'rounding',
   processingFee: 'processing_fee', allowArbitraryFees: 'allow_arbitrary_fees',
@@ -137,6 +143,8 @@ const publicProduct = (p) => ({
   interestRateSource: p.interest_rate_source, indexSourceId: p.index_source_id, rateFloor: num(p.rate_floor), rateCeiling: num(p.rate_ceiling),
   rateReviewCount: p.rate_review_count, rateReviewUnit: p.rate_review_unit, adjustableRates: p.adjustable_rates,
   allowedIndexSources: p.allowed_index_sources, allowNegativeRate: p.allow_negative_rate, scheduleEditing: p.schedule_editing || [],
+  paymentMethod: p.payment_method, allowPrepayments: p.allow_prepayments, prepaymentInterest: p.prepayment_interest,
+  prepaymentAllocation: p.prepayment_allocation, markPaidWhen: p.mark_paid_when,
   firstDueOffsetDays: p.first_due_offset_days, firstDueOffsetMin: p.first_due_offset_min, firstDueOffsetMax: p.first_due_offset_max,
   graceType: p.grace_type, gracePeriods: p.grace_periods, amortizationPeriods: p.amortization_periods, rounding: p.rounding,
   processingFee: Number(p.processing_fee), allowArbitraryFees: p.allow_arbitrary_fees,
@@ -205,6 +213,15 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
     const changed = FROZEN_WITH_LOANS.filter((k) => k !== 'product_type' && cols[k] !== undefined && JSON.stringify(cols[k]) !== JSON.stringify(before[k]));
     if (changed.length) problems.push(`${changed.join(', ')} cannot change while ${loans} loan(s) exist under the product; create a new product`);
   }
+  {
+    // Collection options, where Mambu offers them.
+    const dynamic = ['DYNAMIC_TERM', 'TRANCHED'].includes(type);
+    const dbei = dynamic && method === 'REDUCING_EQUAL_INSTALLMENTS';
+    if (merged.prepayment_interest === 'MANUAL' && !dynamic) problems.push('MANUAL prepayment interest is for dynamic-term products');
+    if (merged.prepayment_allocation === 'NEXT_INSTALLMENTS' && !dbei) problems.push('NEXT_INSTALLMENTS prepayment allocation is for dynamic REDUCING_EQUAL_INSTALLMENTS products');
+    if (merged.mark_paid_when === 'PRINCIPAL_EXPECTED' && !dbei) problems.push('PRINCIPAL_EXPECTED is for dynamic REDUCING_EQUAL_INSTALLMENTS products');
+    if (merged.payment_method === 'HORIZONTAL' && type === 'REVOLVING') problems.push('a REVOLVING product pays by balance (VERTICAL)');
+  }
   if (cols.schedule_editing !== undefined) {
     const edits = cols.schedule_editing;
     const known = ['PAYMENT_DATES', 'PRINCIPAL', 'INTEREST', 'FEES', 'PAYMENT_HOLIDAYS', 'NUMBER_OF_INSTALLMENTS'];
@@ -268,7 +285,7 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
 
   for (const col of ['accrue_late_interest', 'enforce_deposit_multiplier', 'require_guarantor_cover', 'is_active', 'allow_arbitrary_fees',
     'credit_balance_enabled', 'enable_guarantors', 'enable_collateral', 'tax_on_interest', 'tax_on_fees', 'tax_on_penalties',
-    'funding_enabled', 'lock_funds_at_approval', 'adjustable_rates', 'allow_negative_rate']) {
+    'funding_enabled', 'lock_funds_at_approval', 'adjustable_rates', 'allow_negative_rate', 'allow_prepayments']) {
     if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
   }
   const nonNeg = ['monthly_rate', 'rate_min', 'rate_max', 'processing_fee', 'penalty_rate', 'penalty_rate_min', 'penalty_rate_max',

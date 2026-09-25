@@ -229,7 +229,30 @@ async function applyToInstallments(c, loanId, { principal, interest, fees }, { d
   }
 }
 
+/**
+ * Mambu's "mark installment as paid when principal expected is paid": an
+ * installment not yet due whose principal a prepayment has covered is paid,
+ * and the interest it was expected to carry and has not been paid moves to
+ * the next installment, where the loan's interest to the day will be.
+ */
+async function markPaidOnPrincipal(c, loanId, asOf) {
+  const { rows } = await c.query(
+    `SELECT * FROM loan_installments WHERE loan_id = $1 AND status = 'PARTIALLY_PAID'
+       AND due_date > $2::date AND principal_paid >= principal_due AND fee_paid >= fee_due ORDER BY number`, [loanId, asOf]);
+  for (const inst of rows) {
+    const moved = round2(Number(inst.interest_due) - Number(inst.interest_paid));
+    await c.query("UPDATE loan_installments SET status = 'PAID', interest_due = interest_paid WHERE id = $1", [inst.id]);
+    if (moved > 0) {
+      await c.query(
+        `UPDATE loan_installments SET interest_due = interest_due + $2
+         WHERE id = (SELECT id FROM loan_installments WHERE loan_id = $1 AND number > $3 AND status NOT IN ('PAID') ORDER BY number LIMIT 1)`,
+        [loanId, moved, inst.number]);
+    }
+  }
+  return rows.length;
+}
+
 module.exports = {
   buildSchedule, previewSchedule, reschedule, maturityDate, persistInstallments,
-  scheduledOutstanding, scheduledInterestThrough, applyToInstallments,
+  scheduledOutstanding, scheduledInterestThrough, applyToInstallments, markPaidOnPrincipal,
 };
