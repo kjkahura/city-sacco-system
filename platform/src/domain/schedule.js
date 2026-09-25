@@ -140,8 +140,18 @@ function effectiveAnnualRate(rate, frequency = 'PER_MONTH', convention = 'THIRTY
  *   COMPOUND               base × ((1 + effective annual) ^ (days / yearDays) − 1)
  *
  * ACTUAL_ACTUAL walks the days because a period can straddle a leap year.
+ *
+ * The amount is rounded to the cent unless `exact` is asked for: interest
+ * accrual keeps the unrounded amount and rounds only what it posts (see
+ * ./interest), so a year of daily accruals adds up to the year's interest
+ * instead of drifting by a fraction of a cent a day.
  */
-function interestBetween(base, { rate, frequency = 'PER_MONTH', convention = 'THIRTY_360', interestType = 'SIMPLE' }, from, to) {
+function interestBetween(base, terms, from, to, { exact = false } = {}) {
+  const raw = rawInterestBetween(base, terms, from, to);
+  return exact ? raw : round2(raw);
+}
+
+function rawInterestBetween(base, { rate, frequency = 'PER_MONTH', convention = 'THIRTY_360', interestType = 'SIMPLE' }, from, to) {
   if (!(base > 0) || !(Number(rate) > 0)) return 0;
   if (interestType === 'COMPOUND') {
     const E = effectiveAnnualRate(rate, frequency, convention);
@@ -151,9 +161,9 @@ function interestBetween(base, { rate, frequency = 'PER_MONTH', convention = 'TH
         d = addDays(d, 1);
         factor *= (1 + E) ** (1 / (isLeap(d.getUTCFullYear()) ? 366 : 365));
       }
-      return round2(base * (factor - 1));
+      return base * (factor - 1);
     }
-    return round2(base * ((1 + E) ** (dayCount(from, to, convention) / yearDays(convention)) - 1));
+    return base * ((1 + E) ** (dayCount(from, to, convention) / yearDays(convention)) - 1);
   }
   const annual = annualRate(rate, frequency, convention);
   if (convention === 'ACTUAL_ACTUAL') {
@@ -162,14 +172,14 @@ function interestBetween(base, { rate, frequency = 'PER_MONTH', convention = 'TH
       d = addDays(d, 1);
       total += base * annual / (isLeap(d.getUTCFullYear()) ? 366 : 365);
     }
-    return round2(total);
+    return total;
   }
-  return round2(base * annual * dayCount(from, to, convention) / yearDays(convention));
+  return base * annual * dayCount(from, to, convention) / yearDays(convention);
 }
 
 /** The rate for one period running from `from` to `to`, as a fraction of the base. */
 function periodRate(terms, from, to) {
-  return interestBetween(1_000_000, terms, from, to) / 1_000_000;
+  return interestBetween(1, terms, from, to, { exact: true });
 }
 
 /** The payment that clears `principal` at `rate` per period in `n` equal payments. */
@@ -267,8 +277,16 @@ function planInstallments({ principal, terms, method, periods, flatBase = null, 
  * them, and the lines on those periods.
  */
 function draftSchedule({ start, count, principal, terms, method, interval, fixedDays, shortMonth, firstOffsetDays,
-  grace, amortization, rounding, extraFirstInterest = 0 }) {
-  const dates = nominalDueDates({ start, count, interval, fixedDays, shortMonth, firstOffsetDays });
+  grace, amortization, rounding, extraFirstInterest = 0, skipDate = null }) {
+  // `skipDate` (Mambu's Extend Schedule for non-working days): a date it
+  // refuses is dropped and every later installment takes the next date in
+  // the sequence, so the loan runs longer by the periods skipped and the
+  // installment after a skipped date covers both periods.
+  let dates = nominalDueDates({ start, count: skipDate ? count + 60 : count, interval, fixedDays, shortMonth, firstOffsetDays });
+  if (skipDate) {
+    dates = dates.filter((d) => !skipDate(isoDate(d))).slice(0, count);
+    if (dates.length < count) throw Object.assign(new Error('NON_WORKING_DAYS_LEAVE_NO_DUE_DATES: every candidate date is a non-working day'), { status: 409 });
+  }
   const periods = dates.map((to, i) => ({ from: i === 0 ? toUTC(start) : dates[i - 1], to }));
   const lines = planInstallments({ principal, terms, method, periods, grace, amortization, rounding, extraFirstInterest });
   return lines.map((line, i) => ({ number: i + 1, nominalDue: isoDate(dates[i]), ...line }));

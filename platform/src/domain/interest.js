@@ -77,7 +77,13 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   date = capped;
   const base = type.accrualBase(l, installments, fromIso);
 
-  let amt = 0;
+  // The interest earned is computed unrounded and added to the fraction of
+  // a cent the last run left over (interest_accrual_carry). Only whole cents
+  // are posted; the new fraction waits for the next run. So the interest
+  // posted always equals the unrounded interest earned, to within half a
+  // cent, however many runs it took (Mambu keeps accruals unrounded and
+  // rounds when it posts, for the same reason).
+  let exact = 0;
   const through = date;
   if (l.interest_accrual === 'MONTHLY') {
     if (!isMonthEnd(date)) return null;
@@ -88,24 +94,32 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
     for (let y = start.getUTCFullYear(), m = start.getUTCMonth(); ; m += 1) {
       const monthEnd = new Date(Date.UTC(y, m + 1, 0));
       if (monthEnd > end) break;
-      if (monthEnd > start) amt = round2(amt + interestBetween(base, t, new Date(Date.UTC(y, m, 0)), monthEnd));
+      if (monthEnd > start) exact += interestBetween(base, t, new Date(Date.UTC(y, m, 0)), monthEnd, { exact: true });
     }
   } else {
-    amt = type.dailyAccrual(l, t, { base, fromIso, date, installments });
+    exact = type.dailyAccrual(l, t, { base, fromIso, date, installments });
   }
+  const carried = Number(l.interest_accrual_carry || 0) + exact;
+  let amt = round2(carried);
+  let carry = carried - amt;
 
-  // A loan in arrears under a charge cap may not be charged past it.
-  if (amt > 0 && l.status === 'IN_ARREARS') amt = await workflow.capAllows(c, l, amt);
+  // A loan in arrears under a charge cap may not be charged past it; what
+  // the cap refuses is not carried forward either.
+  if (amt > 0 && l.status === 'IN_ARREARS') {
+    const allowed = await workflow.capAllows(c, l, amt);
+    if (allowed < amt) carry = 0;
+    amt = allowed;
+  }
 
   // Tax on interest, where the product charges it: the member owes the
   // gross, the income is the net.
   const tx = tax.split(l, 'INTEREST', amt);
   await c.query(
     `UPDATE loan_accounts SET interest_accrued = interest_accrued + $1, accrued_through = $2::date,
-       tax_charged = tax_charged + $4,
+       tax_charged = tax_charged + $4, interest_accrual_carry = $5,
        charges_since_arrears = charges_since_arrears + CASE WHEN status = 'IN_ARREARS' THEN $1 ELSE 0 END,
        updated_at = now() WHERE id = $3`,
-    [tx.gross, through, l.id, tx.tax]
+    [tx.gross, through, l.id, tx.tax, carry]
   );
 
   let recorded = null;
@@ -133,7 +147,7 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
       reference: savings.ref('LI'), kind: 'LOAN_INTEREST_ACCRUAL', memberId: l.member_id,
       loanAccountId: l.id, amount: tx.gross, valueDate: date, entryId,
       allocation: {
-        from: fromIso, through, base, dayCount: t.convention, method: l.interest_accrual,
+        from: fromIso, through, base, exact, carry, dayCount: t.convention, method: l.interest_accrual,
         interestType: t.interestType, productType: l.product_type, basis: type.basis,
         ...(tx.tax > 0 ? { tax: tx.tax, net: tx.income } : {}),
       },

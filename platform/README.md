@@ -316,8 +316,22 @@ is released (see Write-offs and recoveries).
 **The eligibility rule** is `principal <= deposits * product.max_multiplier`,
 the "three times your savings" convention.
 
-**Due dates** shift forward off weekends and off the `holidays` table, in
-SQL, so no installment falls on a day the SACCO is shut.
+**Due dates** on a weekend or a day in the `holidays` table follow the
+product's `non_working_days` rule, after Mambu's "Installments on
+Non-Working Days":
+
+| Rule | What happens |
+|---|---|
+| `MOVE_FORWARD` (default, and what every product did before) | due on the next working day |
+| `MOVE_BACKWARD` | due on the previous working day, never on or before the disbursement or the previous installment (then forward) |
+| `DO_NOT_RESCHEDULE` | due on the day as drawn |
+| `EXTEND_SCHEDULE` | that installment and every later one move one repayment period on; the loan runs longer by the periods skipped, and the installment after a gap carries interest for both periods |
+
+The nominal date an installment was drawn on is kept beside its due date,
+and interest runs on nominal dates, except under `EXTEND_SCHEDULE`, where
+the nominal dates themselves move. A revolving loan's bill under a rule
+other than forward or backward moves forward, and a revolving product
+cannot take `EXTEND_SCHEDULE`.
 
 The invariant the test suite asserts after *every single operation*,
 corrections included: the trial balance still balances.
@@ -904,6 +918,22 @@ and the nightly job called it nightly.
 
 `interest_accrual` per product: `DAILY` (default), `MONTHLY` (booked on the
 last day of the month, missed month-ends caught up), or `NONE`.
+
+**Precision.** Each accrual works out the interest unrounded and adds the
+fraction of a cent the previous run left (`interest_accrual_carry`); it
+posts the whole cents and keeps the new fraction for the next run. The
+interest posted therefore always equals the unrounded interest earned to
+within half a cent, however many runs it took: 10,000 at 1% a month
+accrues 100.00 over thirty daily runs (twenty days of 3.33, ten of 3.34),
+where rounding each day used to give 99.90. This is Mambu's approach of
+keeping accruals unrounded and rounding when posting ("Truncating and
+rounding interest"). Two differences: the arithmetic is JavaScript double
+precision (about fifteen significant digits, far below a cent on any loan
+amount) rather than Mambu's twenty decimals, and amounts are posted to two
+decimals whatever the tenant's currency. Per-currency decimals (0 for UGX
+or JPY, 3 for JOD) are not modelled; the product's payment rounding (none,
+nearest whole unit, up to whole unit) covers whole-unit currencies on
+schedules. Penalty and deposit interest accruals still round each run.
 
 `day_count` per product, applied to the annualised rate (twelve times the
 monthly rate):

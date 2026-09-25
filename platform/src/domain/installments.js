@@ -6,7 +6,7 @@ const fees = require('./fees');
 const { err, round2 } = acct;
 const { ymd, isoDate, toUTC, annuityPayment } = S;
 const {
-  principalOutstanding, balances, scheduleInputs, shiftOffClosedDays,
+  principalOutstanding, balances, scheduleInputs, shiftOffClosedDays, closedDays,
 } = require('./ledger');
 const types = require('./productTypes');
 const { scheduledOutstanding, scheduledInterestThrough } = require('./productTypes/fixedTerm');
@@ -48,12 +48,25 @@ async function buildSchedule(c, l, { persist = true } = {}) {
   if (!principal || !count) throw err('LOAN_MISSING_PRINCIPAL_OR_TERM');
   const start = l.disbursed_on ? ymd(l.disbursed_on) : isoDate(new Date());
 
-  const lines = S.draftSchedule({ start, count, principal, ...scheduleInputs(l) });
+  // What happens to a date on a non-working day is the product's rule
+  // (Mambu's "Installments on Non-Working Days"). Extend Schedule is applied
+  // to the nominal dates themselves, so interest follows the longer period.
+  const inputs = scheduleInputs(l);
+  let skipDate = null;
+  if (inputs.nonWorkingDays === 'EXTEND_SCHEDULE') {
+    const span = S.nominalDueDates({ start, count: count + 60, interval: inputs.interval, fixedDays: inputs.fixedDays,
+      shortMonth: inputs.shortMonth, firstOffsetDays: inputs.firstOffsetDays });
+    skipDate = await closedDays(c, start, isoDate(span[span.length - 1]));
+  }
+  const lines = S.draftSchedule({ start, count, principal, ...inputs, skipDate });
   const feePlan = await fees.scheduledFees(c, l, lines);
   const installments = [];
+  let previous = start;
   for (const line of lines) {
-    const dueDate = await shiftOffClosedDays(c, line.nominalDue);
+    const dueDate = skipDate ? line.nominalDue
+      : await shiftOffClosedDays(c, line.nominalDue, inputs.nonWorkingDays, { notBefore: previous });
     installments.push({ ...line, dueDate, fee: round2(feePlan[line.number] || 0) });
+    previous = dueDate;
   }
 
   if (persist) {

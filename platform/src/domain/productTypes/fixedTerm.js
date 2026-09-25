@@ -40,7 +40,7 @@ function scheduledOutstanding(l, installments, date) {
  * due dates, so a due date pushed off a weekend does not spread a month's
  * interest over thirty-two days.
  */
-function scheduledInterestThrough(l, installments, date, convention) {
+function scheduledInterestThrough(l, installments, date, convention, { exact = false } = {}) {
   let from = ymd(l.disbursed_on);
   let total = 0;
   for (const i of installments) {
@@ -52,7 +52,7 @@ function scheduledInterestThrough(l, installments, date, convention) {
     total += interest * dayCount(from, date, convention) / periodDays;
     break;
   }
-  return round2(total);
+  return exact ? total : round2(total);
 }
 
 const UPFRONT = (items) => items.filter((x) => x.feeType === 'DISBURSEMENT_UPFRONT');
@@ -103,10 +103,11 @@ const fixedTerm = {
   accrues: (l) => Number(l.monthly_rate) > 0 && l.interest_posting !== 'ON_DISBURSEMENT',
   accrualWindow: (l, fromIso, date) => date,
   accrualBase: (l, installments, fromIso) => (l.method === 'FLAT' ? Number(l.principal) : scheduledOutstanding(l, installments, fromIso)),
+  /** Unrounded: the caller keeps the fraction of a cent for the next run. */
   dailyAccrual(l, t, { base, fromIso, date, installments }) {
-    if (!installments.length) return interestBetween(base, t, fromIso, date);
-    return round2(scheduledInterestThrough(l, installments, date, t.convention)
-      - scheduledInterestThrough(l, installments, fromIso, t.convention));
+    if (!installments.length) return interestBetween(base, t, fromIso, date, { exact: true });
+    return scheduledInterestThrough(l, installments, date, t.convention, { exact: true })
+      - scheduledInterestThrough(l, installments, fromIso, t.convention, { exact: true });
   },
   capitalizes: () => false,
 };
