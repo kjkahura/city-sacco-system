@@ -417,8 +417,8 @@ const LOAN_ACTIONS = {
   PARTIAL_APPLICATION: [['request-approval', 'Request approval'], ['amend', 'Amend terms'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
   PENDING_APPROVAL: [['approve', 'Approve'], ['set-incomplete', 'Send back'], ['amend', 'Amend terms'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
   APPROVED: [['disburse', 'Disburse'], ['undo-approve', 'Undo approval'], ['withdraw', 'Withdraw'], ['notes', 'Notes']],
-  ACTIVE: [['repay', 'Post repayment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
-  IN_ARREARS: [['repay', 'Post repayment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  ACTIVE: [['repay', 'Post repayment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['holiday', 'Payment holiday'], ['due-day', 'Change due day'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  IN_ARREARS: [['repay', 'Post repayment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['holiday', 'Payment holiday'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
   LOCKED: [['unlock', 'Unlock'], ['reschedule', 'Reschedule'], ['write-off', 'Write off'], ['notes', 'Notes']],
   CLOSED_WRITTEN_OFF: [['recovery', 'Post recovery'], ['guarantor-recovery', 'Recover from guarantor'], ['release-call', 'Release guarantor call'], ['notes', 'Notes']],
   CLOSED_REJECTED: [['undo-reject', 'Undo rejection']],
@@ -452,6 +452,8 @@ async function loanDetail(row) {
     if (a === 'close') return revolving;
     if (a === 'tranches') return tranched;
     if (['reschedule', 'refinance'].includes(a)) return !revolving;
+    if (a === 'holiday') return (l.schedule_editing || []).includes('PAYMENT_HOLIDAYS');
+    if (a === 'due-day') return (l.schedule_editing || []).includes('PAYMENT_DATES') && ['DYNAMIC_TERM', 'TRANCHED'].includes(l.product_type);
     return true;
   });
   const outstanding = Number(l.principal_disbursed) + Number(l.principal_capitalized || 0) - Number(l.principal_paid);
@@ -683,6 +685,23 @@ async function loanDetail(row) {
         return loanDetail({ account_no: res.body.application.account_no });
       }
       if (res.ok) { toast(`New loan ${res.body.newLoan.account_no} opened`); return loanDetail({ account_no: res.body.newLoan.account_no }); }
+    }
+    if (a === 'holiday') {
+      const d = await ask([
+        { label: 'From installment number', name: 'from', type: 'number' },
+        { label: 'Number of installments with nothing due', name: 'count', type: 'number', value: 1 },
+        { label: 'Note', name: 'note', required: false },
+      ], `Payment holiday on ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/payment-holiday`, { from: Number(d.from), count: Number(d.count), note: d.note || undefined });
+    }
+    if (a === 'due-day') {
+      const d = await ask([
+        { label: 'New day of the month for the next installment and every later one', name: 'day', type: 'number' },
+        { label: 'Note', name: 'note', required: false },
+      ], `Change the due day of ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/due-day`, { day: Number(d.day), note: d.note || undefined });
     }
     if (a === 'recovery') {
       const d = await ask([
@@ -1238,6 +1257,7 @@ const PRODUCT_FIELDS = (p = {}) => [
   { label: 'Review unit', name: 'rateReviewUnit', options: ['MONTHS', 'WEEKS', 'DAYS'], value: p.rateReviewUnit || 'MONTHS' },
   { label: 'Adjustable rate periods on loans', name: 'adjustableRates', options: ['false', 'true'], value: String(p.adjustableRates ?? false) },
   { label: 'Allow negative spreads', name: 'allowNegativeRate', options: ['false', 'true'], value: String(p.allowNegativeRate ?? false) },
+  { label: 'Schedule edits allowed (comma separated: PAYMENT_DATES, PRINCIPAL, INTEREST, FEES, PAYMENT_HOLIDAYS, NUMBER_OF_INSTALLMENTS)', name: 'scheduleEditing', value: (p.scheduleEditing || []).join(', '), required: false },
 ];
 
 const PRODUCT_ENUM_FIELDS = ['category', 'idMode', 'initialState', 'productType', 'method', 'interestType', 'simpleBase', 'interestPosting',
@@ -1268,6 +1288,7 @@ function productBody(d) {
     if (d[k] === '') { if (PRODUCT_NULLABLE.includes(k)) out[k] = null; continue; }
     out[k] = Number(d[k]);
   }
+  if (d.scheduleEditing !== undefined) out.scheduleEditing = d.scheduleEditing.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
   if (d.indexSourceId !== undefined) out.indexSourceId = d.indexSourceId.trim() ? d.indexSourceId.trim().toUpperCase() : null;
   if (d.fixedDaysOfMonth !== undefined) {
     out.fixedDaysOfMonth = d.fixedDaysOfMonth.trim() ? d.fixedDaysOfMonth.split(',').map((x) => Number(x.trim())).filter(Boolean) : null;
