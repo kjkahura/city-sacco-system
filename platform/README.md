@@ -1005,6 +1005,40 @@ date, so the installment in progress keeps its amount. Mambu's worked
 example (5% index plus 2%, the index rising to 6% on 1 February, the third
 installment priced at 8%) is in `test/interest-rates.test.js`.
 
+### Schedule editing, payment holidays and the due day
+
+After Mambu's "Repayments Schedule Editing". A product lists what its loans'
+schedules may have changed (`scheduleEditing`): PAYMENT_DATES, PRINCIPAL,
+INTEREST (fixed term only; a dynamic loan's interest follows its balance),
+FEES, PAYMENT_HOLIDAYS and NUMBER_OF_INSTALLMENTS (dynamic term only; it
+brings PAYMENT_DATES and PRINCIPAL with it, as in Mambu). A running loan's
+installments may change when nothing has been paid on them, they have not
+fallen due, and, on a fixed-term loan, their period has not started to earn
+interest, so the interest already earned stays what the schedule said.
+
+- `PUT /api/loans/:id/schedule` with `installments` replaces those
+  installments: new due dates (rising, in the future), principal and fees
+  reallocated (they must add up to what they were; apply or waive a fee to
+  change the total), interest changed on a fixed-term loan. A dynamic
+  loan's expected interest is redrawn from the new principal and dates.
+- `POST /api/loans/:id/payment-holiday` with `from` and `count`: those
+  installments fall due with nothing to pay (they never go overdue), the
+  loan gains as many installments at the end, and the principal and the
+  holiday's interest are spread over the installments after it.
+- `POST /api/loans/:id/due-day` with `day` (dynamic term): the next
+  installment and every later one move to that day of their month, after
+  the product's non-working-day rule. The next installment's interest
+  follows its longer or shorter period; later installments keep their
+  amounts (Mambu's example: from the 10th to the 25th, asked on the 3rd,
+  the next installment grows by fifteen days of interest).
+
+Every edit is kept with the schedule before and after
+(`GET /api/loans/:id/schedule-edits`). The console offers the payment
+holiday and the due day on a loan whose product allows them; the full edit
+is an API call. Penalties are charged on the loan, not placed on
+installments, so there is no penalty schedule to edit, and a schedule is
+edited once the loan is disbursed (an application has none yet).
+
 ### Eligibility is enforced at approval
 
 Applying records a request; approving is the credit decision, and that is
@@ -1510,7 +1544,7 @@ official forms are not.
 5. **Early settlement of a fixed-term loan charges accrued interest only.**
    Recovering the rest of the schedule on settlement is not a setting yet.
 6. **Not modelled from Mambu's product form:** fee amortisation profiles
-   (deferred fee income), payment holidays, billing
+   (deferred fee income), billing
    cycles distinct from due dates on revolving loans, refunds on revolving
    loans, and the secondary marketplace for funded loans. Auto-close of
    paid-off loans is moot: a paid-off loan closes at once.

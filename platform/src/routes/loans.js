@@ -16,6 +16,7 @@ const FU = require('../domain/funding');
 const RV = require('../domain/revolving');
 const WO = require('../domain/writeOffs');
 const RATES = require('../domain/rates');
+const SE = require('../domain/scheduleEdits');
 
 const router = express.Router();
 
@@ -96,8 +97,9 @@ router.get('/', requireAuth(), async (req, res, next) => {
 router.get('/:id', ...read(async (c, req) => {
   const { rows } = await c.query(
     `SELECT l.*, m.member_no, m.first_name, m.last_name,
-            r.account_no AS refinances_account_no, pl.account_no AS parent_account_no
+            r.account_no AS refinances_account_no, pl.account_no AS parent_account_no, lp.schedule_editing
      FROM loan_accounts l JOIN members m ON m.id = l.member_id
+     JOIN loan_products lp ON lp.id = l.product_id
      LEFT JOIN loan_accounts r ON r.id = l.refinance_of
      LEFT JOIN loan_accounts pl ON pl.id = l.parent_loan_id
      WHERE l.id::text = $1 OR l.account_no = $1`, [req.params.id]);
@@ -288,6 +290,16 @@ router.post('/:id/write-off', ...tx(async (c, req, res, { actor, user }) => {
 }, TELLER));
 router.get('/:id/write-off', ...read((c, req) => WO.requestsFor(c, req.params.id)));
 router.get('/:id/rates', ...read((c, req) => RATES.historyOf(c, req.params.id)));
+
+// Schedule editing, payment holidays and the monthly due day, as far as the
+// product allows (./scheduleEdits).
+router.put('/:id/schedule', ...tx((c, req, _res, { actor }) => SE.editSchedule(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+router.post('/:id/payment-holiday', ...tx(async (c, req, res, { actor }) => {
+  res.status(201);
+  return SE.paymentHoliday(c, req.params.id, { ...req.body, createdBy: actor });
+}, APPROVER));
+router.post('/:id/due-day', ...tx((c, req, _res, { actor }) => SE.changeDueDay(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+router.get('/:id/schedule-edits', ...read((c, req) => SE.editsOf(c, req.params.id)));
 router.post('/:id/rates/review', ...tx((c, req, _res, { actor }) =>
   RATES.reviewLoan(c, req.params.id, { date: req.body?.asOf, createdBy: actor }).then((x) => x || { changed: false }), APPROVER));
 router.post('/:id/write-off/approve', ...tx(async (c, req, res, { actor, user }) => {

@@ -188,7 +188,7 @@ const PRODUCT_ONLY = [
   'processing_fee', 'max_multiplier',
   'interest_type', 'simple_base', 'interest_posting', 'rate_frequency',
   'repayment_interval_unit', 'repayment_interval_count', 'fixed_days_of_month', 'short_month_handling',
-  'grace_type', 'rounding', 'non_working_days', 'residual_installment',
+  'grace_type', 'rounding', 'non_working_days', 'residual_installment', 'schedule_editing',
   'arrears_tolerance_floor', 'arrears_count_from', 'arrears_non_working_days',
   'penalty_basis', 'penalty_tolerance_days',
   'charge_cap_percent', 'charge_cap_base', 'charge_cap_mode',

@@ -76,7 +76,7 @@ const FIELDS = {
   residualInstallment: 'residual_installment',
   interestRateSource: 'interest_rate_source', indexSourceId: 'index_source_id', rateFloor: 'rate_floor', rateCeiling: 'rate_ceiling',
   rateReviewCount: 'rate_review_count', rateReviewUnit: 'rate_review_unit', adjustableRates: 'adjustable_rates',
-  allowedIndexSources: 'allowed_index_sources', allowNegativeRate: 'allow_negative_rate',
+  allowedIndexSources: 'allowed_index_sources', allowNegativeRate: 'allow_negative_rate', scheduleEditing: 'schedule_editing',
   firstDueOffsetDays: 'first_due_offset_days', firstDueOffsetMin: 'first_due_offset_min', firstDueOffsetMax: 'first_due_offset_max',
   graceType: 'grace_type', gracePeriods: 'grace_periods', amortizationPeriods: 'amortization_periods', rounding: 'rounding',
   processingFee: 'processing_fee', allowArbitraryFees: 'allow_arbitrary_fees',
@@ -136,7 +136,7 @@ const publicProduct = (p) => ({
   residualInstallment: p.residual_installment,
   interestRateSource: p.interest_rate_source, indexSourceId: p.index_source_id, rateFloor: num(p.rate_floor), rateCeiling: num(p.rate_ceiling),
   rateReviewCount: p.rate_review_count, rateReviewUnit: p.rate_review_unit, adjustableRates: p.adjustable_rates,
-  allowedIndexSources: p.allowed_index_sources, allowNegativeRate: p.allow_negative_rate,
+  allowedIndexSources: p.allowed_index_sources, allowNegativeRate: p.allow_negative_rate, scheduleEditing: p.schedule_editing || [],
   firstDueOffsetDays: p.first_due_offset_days, firstDueOffsetMin: p.first_due_offset_min, firstDueOffsetMax: p.first_due_offset_max,
   graceType: p.grace_type, gracePeriods: p.grace_periods, amortizationPeriods: p.amortization_periods, rounding: p.rounding,
   processingFee: Number(p.processing_fee), allowArbitraryFees: p.allow_arbitrary_fees,
@@ -204,6 +204,19 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
   if (before && loans > 0) {
     const changed = FROZEN_WITH_LOANS.filter((k) => k !== 'product_type' && cols[k] !== undefined && JSON.stringify(cols[k]) !== JSON.stringify(before[k]));
     if (changed.length) problems.push(`${changed.join(', ')} cannot change while ${loans} loan(s) exist under the product; create a new product`);
+  }
+  if (cols.schedule_editing !== undefined) {
+    const edits = cols.schedule_editing;
+    const known = ['PAYMENT_DATES', 'PRINCIPAL', 'INTEREST', 'FEES', 'PAYMENT_HOLIDAYS', 'NUMBER_OF_INSTALLMENTS'];
+    if (!Array.isArray(edits) || edits.some((x) => !known.includes(x))) problems.push(`schedule_editing lists any of ${known.join(', ')}`);
+    else {
+      const dynamic = ['DYNAMIC_TERM', 'TRANCHED'].includes(type);
+      if (type === 'REVOLVING' && edits.length) problems.push('a REVOLVING loan has no schedule to edit');
+      if (edits.includes('INTEREST') && dynamic) problems.push('a dynamic loan\'s interest follows its balance: INTEREST editing is for fixed-term products');
+      if (edits.includes('NUMBER_OF_INSTALLMENTS') && !dynamic) problems.push('NUMBER_OF_INSTALLMENTS editing is for dynamic-term products');
+      // As in Mambu, changing the number of installments brings dates and principal with it.
+      if (edits.includes('NUMBER_OF_INSTALLMENTS')) cols.schedule_editing = [...new Set([...edits, 'PAYMENT_DATES', 'PRINCIPAL'])];
+    }
   }
   if (merged.interest_rate_source === 'INDEX' || merged.adjustable_rates) {
     const what = merged.interest_rate_source === 'INDEX' ? 'an INDEX rate' : 'adjustable rates';
