@@ -560,7 +560,7 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
     }
     await c.query(
       `UPDATE loan_accounts SET principal_disbursed = principal_disbursed - $1,
-         principal_capitalized = 0, interest_accrued = 0, tax_charged = 0, accrued_through = NULL,
+         principal_capitalized = 0, interest_accrued = 0, interest_accrual_carry = 0, tax_charged = 0, accrued_through = NULL,
          credit_balance = credit_balance + $3, next_billing_on = NULL,
          status = 'APPROVED', disbursed_on = NULL, disbursed_by = NULL, updated_at = now() WHERE id = $2`,
       [tx.amount, tx.loan_account_id, a.fromCreditBalance || 0]

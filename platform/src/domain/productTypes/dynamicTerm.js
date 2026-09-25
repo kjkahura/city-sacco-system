@@ -71,7 +71,7 @@ const dynamicTerm = {
     const onInterestToo = t.interestType === 'COMPOUND' || (t.interestType === 'SIMPLE' && l.simple_base === 'PRINCIPAL_AND_INTEREST');
     return round2(ledger.principalOutstanding(l) + (onInterestToo ? unpaidInterest : 0));
   },
-  dailyAccrual: (l, t, { base, fromIso, date }) => interestBetween(base, t, fromIso, date),
+  dailyAccrual: (l, t, { base, fromIso, date }) => interestBetween(base, t, fromIso, date, { exact: true }),
   capitalizes: (l) => l.interest_type === 'CAPITALIZED',
 };
 

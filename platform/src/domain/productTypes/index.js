@@ -52,7 +52,7 @@ const { revolving } = require('./revolving');
  *   accrues(l)                       the loan earns interest by accrual
  *   accrualWindow(l, fromIso, date, installments)  -> date to accrue to, or null
  *   accrualBase(l, installments, fromIso)          -> the amount priced
- *   dailyAccrual(l, terms, {base, fromIso, date, installments})  -> amount
+ *   dailyAccrual(l, terms, {base, fromIso, date, installments})  -> amount, unrounded
  *   capitalizes(l)                   accrued interest folds into principal
  */
 

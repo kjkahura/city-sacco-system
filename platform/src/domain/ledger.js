@@ -4,7 +4,7 @@ const acct = require('./accounting');
 const S = require('./schedule');
 const tax = require('./tax');
 const { err, round2 } = acct;
-const { toUTC, interestBetween } = S;
+const { toUTC, interestBetween, ymd, isoDate, addDays } = S;
 
 /**
  * The loan core every other loan module stands on: reading a loan with its
@@ -188,7 +188,7 @@ const PRODUCT_ONLY = [
   'processing_fee', 'max_multiplier',
   'interest_type', 'simple_base', 'interest_posting', 'rate_frequency',
   'repayment_interval_unit', 'repayment_interval_count', 'fixed_days_of_month', 'short_month_handling',
-  'grace_type', 'rounding',
+  'grace_type', 'rounding', 'non_working_days',
   'arrears_tolerance_floor', 'arrears_count_from', 'arrears_non_working_days',
   'penalty_basis', 'penalty_tolerance_days',
   'charge_cap_percent', 'charge_cap_base', 'charge_cap_mode',
@@ -286,26 +286,47 @@ function scheduleInputs(l) {
     grace: { type: l.grace_type || 'NONE', periods: e.gracePeriods || 0 },
     amortization: e.amortizationPeriods,
     rounding: l.rounding || 'NONE',
+    nonWorkingDays: l.non_working_days || 'MOVE_FORWARD',
   };
 }
 
-async function shiftOffClosedDays(c, iso) {
-  // Weekends and anything in the holidays table push the due date forward.
-  // A repayment cannot fall due on a day the SACCO is shut.
-  const { rows: [r] } = await c.query(
-    `WITH RECURSIVE d(day, n) AS (
-       SELECT $1::date, 0
-       UNION ALL
-       SELECT day + 1, n + 1 FROM d
-       WHERE n < 10 AND (
-         EXTRACT(dow FROM day) IN (0, 6)
-         OR EXISTS (SELECT 1 FROM holidays h WHERE h.holiday_date = day)
-       )
-     )
-     SELECT max(day) AS day FROM d`,
-    [iso]
-  );
-  return r.day;
+const NON_WORKING_DAY_RULES = ['DO_NOT_RESCHEDULE', 'MOVE_FORWARD', 'MOVE_BACKWARD', 'EXTEND_SCHEDULE'];
+
+/**
+ * The days the SACCO is shut between two dates: weekends and anything in
+ * the holidays table. Returns a predicate on YYYY-MM-DD.
+ */
+async function closedDays(c, fromIso, toIso) {
+  const { rows } = await c.query(
+    'SELECT holiday_date::text AS d FROM holidays WHERE holiday_date BETWEEN $1::date AND $2::date', [fromIso, toIso]);
+  const holidays = new Set(rows.map((r) => r.d));
+  return (iso) => {
+    const dow = new Date(`${iso}T00:00:00Z`).getUTCDay();
+    return dow === 0 || dow === 6 || holidays.has(iso);
+  };
+}
+
+/**
+ * The due date for a nominal date that may fall on a non-working day, by the
+ * product's rule. EXTEND_SCHEDULE moves whole periods and is applied when the
+ * schedule is drawn (./schedule draftSchedule skipDate); a date that still
+ * lands on a closed day (a revolving bill, say) moves forward. MOVE_BACKWARD
+ * never goes back to or before `notBefore` (disbursement, or the previous
+ * installment); it moves forward instead.
+ */
+async function shiftOffClosedDays(c, iso, rule = 'MOVE_FORWARD', { notBefore = null } = {}) {
+  const day = ymd(iso);
+  if (rule === 'DO_NOT_RESCHEDULE') return day;
+  const closed = await closedDays(c, isoDate(addDays(day, -14)), isoDate(addDays(day, 14)));
+  if (!closed(day)) return day;
+  if (rule === 'MOVE_BACKWARD') {
+    let d = day;
+    for (let n = 0; n < 14 && closed(d); n += 1) d = isoDate(addDays(d, -1));
+    if (!closed(d) && (!notBefore || d > ymd(notBefore))) return d;
+  }
+  let d = day;
+  for (let n = 0; n < 14 && closed(d); n += 1) d = isoDate(addDays(d, 1));
+  return d;
 }
 
 // --------------------------------------------------------------------------
@@ -393,7 +414,7 @@ const isMonthEnd = (d) => {
 module.exports = {
   OVERRIDES, effective, overrideSql, resolveOverrides, within,
   PRODUCT_COLUMNS, lock, read, principalOutstanding, balances, settlement, terms,
-  scheduleInputs, shiftOffClosedDays,
+  scheduleInputs, shiftOffClosedDays, closedDays, NON_WORKING_DAY_RULES,
   isAccrual, booksEntries, interestAccrues, paidCredit, creditsFor, writeOffCredit, post,
   interestFor, isMonthEnd,
 };

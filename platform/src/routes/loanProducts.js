@@ -51,6 +51,7 @@ const ENUMS = {
   short_month_handling: ['LAST_DAY', 'FIRST_OF_NEXT'],
   grace_type: ['NONE', 'PRINCIPAL', 'PURE'],
   rounding: ['NONE', 'WHOLE', 'WHOLE_UP'],
+  non_working_days: ['DO_NOT_RESCHEDULE', 'MOVE_FORWARD', 'MOVE_BACKWARD', 'EXTEND_SCHEDULE'],
   arrears_count_from: ['FIRST_ARREARS', 'OLDEST_LATE'],
   arrears_non_working_days: ['INCLUDE', 'EXCLUDE'],
   charge_cap_base: ['ORIGINAL_PRINCIPAL', 'OUTSTANDING_PRINCIPAL'],
@@ -68,7 +69,7 @@ const FIELDS = {
   minPrincipal: 'min_principal', maxPrincipal: 'max_principal', defaultPrincipal: 'default_principal',
   minTerm: 'min_term', maxTerm: 'max_term', defaultTerm: 'default_term',
   repaymentIntervalUnit: 'repayment_interval_unit', repaymentIntervalCount: 'repayment_interval_count',
-  fixedDaysOfMonth: 'fixed_days_of_month', shortMonthHandling: 'short_month_handling',
+  fixedDaysOfMonth: 'fixed_days_of_month', shortMonthHandling: 'short_month_handling', nonWorkingDays: 'non_working_days',
   firstDueOffsetDays: 'first_due_offset_days', firstDueOffsetMin: 'first_due_offset_min', firstDueOffsetMax: 'first_due_offset_max',
   graceType: 'grace_type', gracePeriods: 'grace_periods', amortizationPeriods: 'amortization_periods', rounding: 'rounding',
   processingFee: 'processing_fee', allowArbitraryFees: 'allow_arbitrary_fees',
@@ -124,7 +125,7 @@ const publicProduct = (p) => ({
   minPrincipal: num(p.min_principal), maxPrincipal: num(p.max_principal), defaultPrincipal: num(p.default_principal),
   minTerm: p.min_term, maxTerm: p.max_term, defaultTerm: p.default_term,
   repaymentIntervalUnit: p.repayment_interval_unit, repaymentIntervalCount: p.repayment_interval_count,
-  fixedDaysOfMonth: p.fixed_days_of_month, shortMonthHandling: p.short_month_handling,
+  fixedDaysOfMonth: p.fixed_days_of_month, shortMonthHandling: p.short_month_handling, nonWorkingDays: p.non_working_days,
   firstDueOffsetDays: p.first_due_offset_days, firstDueOffsetMin: p.first_due_offset_min, firstDueOffsetMax: p.first_due_offset_max,
   graceType: p.grace_type, gracePeriods: p.grace_periods, amortizationPeriods: p.amortization_periods, rounding: p.rounding,
   processingFee: Number(p.processing_fee), allowArbitraryFees: p.allow_arbitrary_fees,
@@ -196,6 +197,7 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
   if (['DYNAMIC_TERM', 'TRANCHED', 'REVOLVING'].includes(type) && method === 'FLAT') {
     problems.push(`a ${type} product cannot use the FLAT method; use REDUCING or REDUCING_EQUAL_INSTALLMENTS`);
   }
+  if (type === 'REVOLVING' && merged.non_working_days === 'EXTEND_SCHEDULE') problems.push('a REVOLVING product bills on dates; EXTEND_SCHEDULE needs a schedule');
   if (type === 'TRANCHED' && (!merged.max_tranches || Number(merged.max_tranches) < 2)) problems.push('a TRANCHED product needs max_tranches of 2 or more');
   if (type === 'REVOLVING') {
     if (method !== 'REDUCING') problems.push('a REVOLVING product uses the REDUCING method');
