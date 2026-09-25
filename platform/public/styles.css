@@ -130,3 +130,9 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 .toolbar h1 { margin: 0; }
 .toolbar .spacer { flex: 1; }
 dialog form.card { max-height: 85vh; overflow-y: auto; min-width: 360px; }
+
+/* The schedule editor: a table of inputs in a wider dialog. */
+dialog form.card.wide { min-width: min(760px, 92vw); }
+table.editor input { width: 100%; min-width: 0; box-sizing: border-box; }
+table.editor td.n { color: var(--muted, #667); width: 2.5em; }
+@media (max-width: 600px) { table.editor th:nth-child(5), table.editor td:nth-child(5) { display: none; } }

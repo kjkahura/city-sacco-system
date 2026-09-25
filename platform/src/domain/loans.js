@@ -25,7 +25,7 @@ const {
   lock, balances, interestAccrues, booksEntries, post, creditsFor,
 } = ledger;
 const { buildSchedule, reschedule, applyToInstallments, markPaidOnPrincipal } = installments;
-const { accrueInterest } = interest;
+const { accrueInterest, recognisePrepaidInterest } = interest;
 
 /**
  * What a product type's hooks may call back into: the lifecycle operations
@@ -397,6 +397,50 @@ async function horizontalAllocation(c, l, due, amount, order) {
   return { paid, left };
 }
 
+/**
+ * Interest taken in advance on a fixed-term loan (the product's
+ * interest_prepayment). What the payment has left after penalties, fees and
+ * the interest earned so far (`pool`) goes through the unpaid installments
+ * in order: an installment not yet due gives up its whole interest first
+ * (NEXT_INSTALLMENT: only the next one; ALL_INSTALLMENTS: each one the
+ * payment reaches), then its principal. The interest not yet earned is held
+ * in the deferred interest account until it is (./interest). A funded
+ * loan's interest belongs partly to its funders when paid, so it is not
+ * taken in advance. Returns null when nothing is taken.
+ */
+async function prepayInterest(c, l, type, { interest, pool, asOf }) {
+  const mode = l.interest_prepayment || 'NONE';
+  if (mode === 'NONE' || type.basis !== 'SCHEDULE' || !type.accrues(l) || l.interest_accrual === 'NONE' || !(pool > 0)) return null;
+  if (await funding.isFunded(c, l.id)) return null;
+  const { rows } = await c.query(
+    "SELECT * FROM loan_installments WHERE loan_id = $1 AND status NOT IN ('PAID', 'GRACE') ORDER BY number", [l.id]);
+  const cap = balances(l).principal;
+  let earnedLeft = interest;   // the earned interest this payment settles, applied in order first
+  let left = pool;
+  let prepaid = 0;
+  let principal = 0;
+  let reached = 0;
+  for (const inst of rows) {
+    let owes = round2(Number(inst.interest_due) - Number(inst.interest_paid));
+    const earned = round2(Math.min(earnedLeft, owes));
+    earnedLeft = round2(earnedLeft - earned);
+    owes = round2(owes - earned);
+    const future = ymd(inst.due_date) > asOf;
+    if (future && owes > 0 && (mode === 'ALL_INSTALLMENTS' || reached === 0)) {
+      const t = round2(Math.min(left, owes));
+      prepaid = round2(prepaid + t); left = round2(left - t);
+    }
+    if (future) reached += 1;
+    const t = round2(Math.max(0, Math.min(left, Number(inst.principal_due) - Number(inst.principal_paid), cap - principal)));
+    principal = round2(principal + t); left = round2(left - t);
+    if (!(left > 0)) break;
+  }
+  const rest = round2(Math.max(0, Math.min(left, cap - principal)));
+  principal = round2(principal + rest); left = round2(left - rest);
+  if (!(prepaid > 0)) return null;
+  return { prepaid, principal, left };
+}
+
 async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy, branchId: tellerBranch = null, allocationOrder = null } = {}) {
   let l = await lock(c, loanId);
   const type = types.forLoan(l);
@@ -447,9 +491,13 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
       left = round2(left - t);
     }
   }
+  // Interest taken in advance, where the product takes it.
+  let prepaidInterest = 0;
+  const pre = await prepayInterest(c, l, type, { interest: paid.INTEREST, pool: round2(paid.PRINCIPAL + left), asOf });
+  if (pre) { prepaidInterest = pre.prepaid; paid.PRINCIPAL = pre.principal; left = pre.left; }
   const { PENALTY: penalty, FEE: feesPaid, INTEREST: interest, PRINCIPAL: principal } = paid;
   const surplus = round2(left);
-  const total = round2(penalty + feesPaid + interest + principal + surplus);
+  const total = round2(penalty + feesPaid + interest + principal + prepaidInterest + surplus);
   const finalPayment = round2(b.principal - principal) <= 0 && type.closesWhenPaid;
 
   // Where each component's money goes. On a funded loan the principal and
@@ -472,6 +520,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
       else credits.push(...creditsFor(l, component, paid[component], l.member_id));
     }
   }
+  if (prepaidInterest > 0) credits.push({ glCode: l.gl_deferred_interest, amount: prepaidInterest, memberId: l.member_id });
 
   // A surplus is the member's money: on a revolving loan with a credit
   // balance it stays on the loan for the next drawdown; otherwise it goes to
@@ -522,10 +571,10 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     `UPDATE loan_accounts SET
        penalty_paid = penalty_paid + $1, fees_paid = fees_paid + $2,
        interest_paid = interest_paid + $3, principal_paid = principal_paid + $4,
-       credit_balance = credit_balance + $6,
+       credit_balance = credit_balance + $6, interest_prepaid = interest_prepaid + $7,
        updated_at = now()
      WHERE id = $5`,
-    [penalty, feesPaid, interest, principal, l.id, toCreditBalance]
+    [penalty, feesPaid, interest, principal, l.id, toCreditBalance, prepaidInterest]
   );
   if (surplusAccount) {
     await c.query(
@@ -538,7 +587,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   // anything beyond that is a prepayment: it reduces the balance, and the
   // schedule for what remains is redrawn from that balance. A revolving
   // loan's installments only exist once due, so all of them take a share.
-  await applyToInstallments(c, l.id, { principal, interest, fees: feesPaid }, type.installmentScope(asOf, l));
+  await applyToInstallments(c, l.id, { principal, interest: round2(interest + prepaidInterest), fees: feesPaid }, type.installmentScope(asOf, l));
   if (l.mark_paid_when === 'PRINCIPAL_EXPECTED' && type.basis === 'ACTUAL_BALANCE') await markPaidOnPrincipal(c, l.id, asOf);
   await fees.settle(c, l.id, feesPaid);
 
@@ -546,6 +595,8 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   const after = balances(fresh);
   let rescheduled = null;
   if (after.total <= 0 && type.closesWhenPaid) {
+    // Interest still held in advance was paid under the contract.
+    await recognisePrepaidInterest(c, l.id, { valueDate: asOf, createdBy });
     await c.query("UPDATE loan_accounts SET status = 'CLOSED_REPAID', closed_on = $2::date, updated_at = now() WHERE id = $1", [l.id, asOf]);
     await workflow.history(c, l.id, { from: fresh.status, to: 'CLOSED_REPAID', action: 'PAID_OFF', actor: createdBy });
     await eligibility.releaseGuarantors(c, l.id);
@@ -560,6 +611,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     loanAccountId: l.id, channelId, amount: total, valueDate: asOf, entryId,
     allocation: {
       penalty, fees: feesPaid, interest, principal, surplus,
+      ...(prepaidInterest > 0 ? { prepaidInterest } : {}),
       ...(toCreditBalance > 0 ? { creditBalance: toCreditBalance } : {}),
       ...(distributed ? { funding: distributed.allocation, orgInterest: distributed.orgInterest } : {}),
       ...(rescheduled ? { rescheduled: { recalculation: rescheduled.recalculation, dropped: rescheduled.dropped } } : {}),
@@ -570,6 +622,47 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
 
 // Write-offs, recoveries and their reversal live in ./writeOffs.
 const { writeOff } = writeOffs;
+
+/**
+ * Undo the interest a repayment took in advance. What is still held comes
+ * off the deferred account with the repayment's own entry; what has been
+ * earned since (settled from it, or recognised when the loan closed) is
+ * owed again, so it is moved back: Dr the account the settlement credited,
+ * Cr Deferred Interest.
+ */
+async function unwindPrepaidInterest(c, tx, amount, { narration, createdBy }) {
+  let l = await lock(c, tx.loan_account_id);
+  // Recognised at closure by this payment: take that recognition back first.
+  const { rows: closure } = await c.query(
+    `SELECT * FROM transactions WHERE loan_account_id = $1 AND kind = 'LOAN_INTEREST_ACCRUAL' AND reversed_by IS NULL
+       AND allocation->>'method' = 'PREPAID_AT_CLOSURE' AND created_at >= $2 ORDER BY created_at`, [l.id, tx.created_at]);
+  for (const r of closure) {
+    const amt = Number(r.amount);
+    const taxed = Number(r.allocation?.tax || 0);
+    if (r.entry_id) await acct.reverse(c, r.entry_id, narration, createdBy);
+    await c.query(
+      `UPDATE loan_accounts SET interest_accrued = interest_accrued - $1, interest_paid = interest_paid - $1,
+         tax_charged = tax_charged - $3, interest_prepaid = interest_prepaid + $1 WHERE id = $2`, [amt, l.id, taxed]);
+    const rev = await savings.record(c, {
+      reference: savings.ref('REV'), kind: 'REVERSAL', memberId: r.member_id, loanAccountId: l.id, amount: -amt,
+      allocation: { reversalOf: r.reference }, narration, createdBy,
+    });
+    await c.query('UPDATE transactions SET reversed_by = $1 WHERE id = $2', [rev.id, r.id]);
+  }
+  l = await lock(c, l.id);
+  const held = round2(Math.min(Number(l.interest_prepaid), amount));
+  const earned = round2(amount - held);
+  await c.query('UPDATE loan_accounts SET interest_prepaid = interest_prepaid - $1, interest_paid = interest_paid - $2 WHERE id = $3',
+    [held, earned, l.id]);
+  if (earned > 0) {
+    await post(c, l, {
+      debits: creditsFor(l, 'INTEREST', earned, l.member_id),
+      credits: [{ glCode: l.gl_deferred_interest, amount: earned, memberId: l.member_id }],
+      narration: `${narration}: prepaid interest earned since ${tx.reference}`,
+      sourceType: 'LOAN_PREPAID_INTEREST', sourceId: l.id, bookingDate: isoDate(new Date()), createdBy,
+    });
+  }
+}
 
 async function reverseTransaction(c, reference, { narration = 'Reversal', createdBy } = {}) {
   const { rows } = await c.query('SELECT * FROM transactions WHERE reference = $1 FOR UPDATE', [reference]);
@@ -583,6 +676,7 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
   const a = tx.allocation || {};
 
   if (tx.kind === 'LOAN_REPAYMENT') {
+    if (a.prepaidInterest > 0) await unwindPrepaidInterest(c, tx, a.prepaidInterest, { narration, createdBy });
     await c.query(
       `UPDATE loan_accounts SET
          penalty_paid = penalty_paid - $1, fees_paid = fees_paid - $2,
@@ -621,7 +715,8 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
     );
     const { rows: remaining } = await c.query(
       `SELECT COALESCE(SUM((allocation->>'principal')::numeric),0) AS p,
-              COALESCE(SUM((allocation->>'interest')::numeric),0)  AS i,
+              COALESCE(SUM((allocation->>'interest')::numeric),0)
+                + COALESCE(SUM((allocation->>'prepaidInterest')::numeric),0) AS i,
               COALESCE(SUM((allocation->>'fees')::numeric),0)      AS f
        FROM transactions
        WHERE loan_account_id = $1 AND kind = 'LOAN_REPAYMENT'

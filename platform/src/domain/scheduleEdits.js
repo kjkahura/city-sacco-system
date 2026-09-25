@@ -4,6 +4,7 @@ const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
 const types = require('./productTypes');
+const { buildSchedule } = require('./installments');
 const { err } = acct;
 const { ymd, isoDate, toUTC } = S;
 
@@ -31,6 +32,13 @@ const { ymd, isoDate, toUTC } = S;
  * changed, and only installments whose period has not begun may change, so
  * the interest already earned stays exactly what the schedule said.
  *
+ * An application has no installments yet, but editSchedule works on it too
+ * (editApplication): what it changes is kept on the application
+ * (custom_schedule) and the loan is drawn with it at disbursement
+ * (installments.buildSchedule). The same product rights apply, except that
+ * the number of installments may change within the product's term band,
+ * as the term of an application may.
+ *
  * Every edit is kept with the schedule before and after (loan_schedule_edits).
  */
 
@@ -38,8 +46,8 @@ const EDITS = ['PAYMENT_DATES', 'PRINCIPAL', 'INTEREST', 'FEES', 'PAYMENT_HOLIDA
 const today = () => isoDate(new Date());
 const r2 = (n, d) => S.roundTo(n, d);
 
-async function load(c, loanId, kind, asOf) {
-  const l = await ledger.lock(c, loanId);
+async function load(c, loanId, kind, asOf, { forUpdate = true } = {}) {
+  const l = await ledger.lock(c, loanId, { forUpdate });
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`SCHEDULE_NOT_EDITABLE_IN_STATE_${l.status}`, 409);
   const type = types.forLoan(l);
   if (!type.schedulesUpfront) throw err('THIS_LOAN_HAS_NO_SCHEDULE_TO_EDIT', 409);
@@ -113,6 +121,8 @@ function expectedInterest(lines, { outstanding, start, terms, decimals }) {
  * (by position); a field changed needs the product to allow that edit.
  */
 async function editSchedule(c, loanId, { installments, note = null, asOf = null, createdBy } = {}) {
+  const current = await ledger.lock(c, loanId);
+  if (APPLICATION.includes(current.status)) return editApplication(c, current, { installments, note, asOf, createdBy });
   const ctx = await load(c, loanId, null, asOf);
   const { l, type, allowed, head, tail, decimals, inputs } = ctx;
   if (!Array.isArray(installments) || !installments.length) throw err('GIVE_THE_NEW_INSTALLMENTS', 400);
@@ -266,10 +276,132 @@ async function changeDueDay(c, loanId, { day, note = null, asOf = null, createdB
   return { loanId: l.id, day: d, before, after };
 }
 
+/**
+ * What an editor may show: the installments that can change now and the
+ * edits the product allows. For an application, the whole schedule it
+ * would be drawn with.
+ */
+async function editable(c, loanId, { asOf = null } = {}) {
+  const l = await ledger.read(c, loanId);
+  const allowed = [...(l.schedule_editing || [])];
+  const fixed = types.forLoan(l).basis === 'SCHEDULE';
+  if (APPLICATION.includes(l.status)) {
+    const a = await applicationSchedule(c, l.id);
+    return { loanId: l.id, application: true, allowed, fixedTerm: fixed, countMayChange: true,
+      head: [], installments: a.installments, custom: a.custom };
+  }
+  const { head, tail } = await load(c, l.id, null, asOf, { forUpdate: false });
+  return { loanId: l.id, application: false, allowed, fixedTerm: fixed, countMayChange: allowed.includes('NUMBER_OF_INSTALLMENTS'),
+    head: view(head), installments: view(tail) };
+}
+
+// --------------------------------------------------------------------------
+// Applications
+// --------------------------------------------------------------------------
+
+const APPLICATION = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED'];
+
+function assertApplication(l) {
+  if (!APPLICATION.includes(l.status)) throw err(`NOT_AN_APPLICATION: ${l.status}`, 409);
+  const type = types.forLoan(l);
+  if (!type.schedulesUpfront || type.plansTranches || type.disbursesAgain) throw err('THIS_PRODUCT_DRAWS_NO_SCHEDULE_AT_DISBURSEMENT', 409);
+  return type;
+}
+
+/** The schedule an application would be drawn with today. */
+async function draft(c, l, opts = {}) {
+  return (await buildSchedule(c, { ...l, ...opts.patch }, { persist: false, custom: opts.custom !== false })).installments;
+}
+const draftView = (rows) => rows.map((i) => ({
+  number: i.number, dueDate: i.dueDate, principal: i.principal, interest: i.interest, fee: i.fee || 0,
+}));
+
+/**
+ * The schedule an application will be drawn with, as it would be if it
+ * were disbursed today, and whether it has been edited.
+ */
+async function applicationSchedule(c, loanId) {
+  const l = await ledger.read(c, loanId);
+  assertApplication(l);
+  return { loanId: l.id, custom: Array.isArray(l.custom_schedule) && l.custom_schedule.length > 0, edited: l.custom_schedule || null,
+    installments: draftView(await draft(c, l)) };
+}
+
+async function editApplication(c, l, { installments, note, asOf, createdBy }) {
+  const type = assertApplication(l);
+  if (!Array.isArray(installments) || !installments.length) throw err('GIVE_THE_NEW_INSTALLMENTS', 400);
+  const allowed = new Set(l.schedule_editing || []);
+  const need = (kind) => { if (!allowed.has(kind)) throw err(`PRODUCT_DOES_NOT_ALLOW_${kind}_EDITING`, 409); };
+  const decimals = await ledger.currencyDecimals(c);
+  const date = asOf ? ymd(asOf) : today();
+  const { rows: [p] } = await c.query('SELECT min_term, max_term FROM loan_products WHERE id = $1', [l.product_id]);
+  const n = installments.length;
+  if (n > p.max_term) throw err(`TERM_EXCEEDS_PRODUCT_MAX: ${p.max_term}`, 400);
+  if (p.min_term && n < p.min_term) throw err(`TERM_BELOW_PRODUCT_MIN: ${p.min_term}`, 400);
+
+  const before = draftView(await draft(c, l));
+  // Positions keep what they had: the edited value, or the product's.
+  const previous = Array.isArray(l.custom_schedule) && l.custom_schedule.length === n ? l.custom_schedule : null;
+  const product = await draft(c, l, { patch: { term_months: n }, custom: false });
+  const given = (v) => v !== null && v !== undefined;
+  const edited = installments.map((x, k) => {
+    const old = previous ? previous[k] : {};
+    if (x.fee !== undefined && Number(x.fee) !== Number(product[k].fee || 0)) {
+      throw err('FEES_ARE_PLACED_ON_THE_SCHEDULE_AT_DISBURSEMENT: edit them once the loan is running', 400);
+    }
+    const dueDate = x.dueDate ? String(x.dueDate).slice(0, 10) : (old.dueDate || null);
+    const principal = given(x.principal) ? r2(x.principal, decimals) : (given(old.principal) ? Number(old.principal) : null);
+    const interest = given(x.interest) ? r2(x.interest, decimals) : (given(old.interest) ? Number(old.interest) : null);
+    return {
+      dueDate: dueDate && dueDate !== product[k].dueDate ? dueDate : null,
+      principal: given(principal) && principal !== product[k].principal ? principal : null,
+      interest: given(interest) && interest !== product[k].interest ? interest : null,
+    };
+  });
+  if (edited.some((x) => x.dueDate)) need('PAYMENT_DATES');
+  if (edited.some((x) => given(x.principal))) need('PRINCIPAL');
+  if (edited.some((x) => given(x.interest))) {
+    if (type.basis !== 'SCHEDULE') throw err('A_DYNAMIC_LOANS_INTEREST_FOLLOWS_ITS_BALANCE_AND_IS_NOT_EDITED', 409);
+    need('INTEREST');
+  }
+  const resolved = edited.map((x, k) => ({
+    dueDate: x.dueDate || product[k].dueDate, principal: given(x.principal) ? x.principal : product[k].principal,
+    interest: given(x.interest) ? x.interest : 0,
+  }));
+  let last = date;
+  for (const x of resolved) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(x.dueDate)) throw err(`INVALID_DUE_DATE: ${x.dueDate}`, 400);
+    if (x.dueDate <= last) throw err(`DUE_DATES_MUST_RISE: ${x.dueDate} is not after ${last}`, 400);
+    if (x.principal < 0 || x.interest < 0) throw err('AMOUNTS_CANNOT_BE_NEGATIVE', 400);
+    last = x.dueDate;
+  }
+  const total = r2(resolved.reduce((a, x) => a + x.principal, 0), decimals);
+  if (total !== r2(Number(l.principal), decimals)) throw err(`PRINCIPAL_MUST_ADD_UP_TO_THE_LOAN: ${Number(l.principal)}, not ${total}`, 400);
+
+  const custom = edited.every((x) => !x.dueDate && !given(x.principal) && !given(x.interest)) ? null : edited;
+  await c.query('UPDATE loan_accounts SET custom_schedule = $2, term_months = $3, updated_at = now() WHERE id = $1',
+    [l.id, custom ? JSON.stringify(custom) : null, n]);
+  const after = draftView(await draft(c, await ledger.lock(c, l.id)));
+  await record(c, l, 'APPLICATION', before, after, note, createdBy);
+  return { loanId: l.id, application: true, custom: Boolean(custom), before, after };
+}
+
+/** Back to the product's schedule. */
+async function clearApplicationSchedule(c, loanId, { note = null, createdBy } = {}) {
+  const l = await ledger.lock(c, loanId);
+  assertApplication(l);
+  if (!l.custom_schedule) throw err('THE_APPLICATION_HAS_THE_PRODUCTS_SCHEDULE', 409);
+  const before = draftView(await draft(c, l));
+  await c.query('UPDATE loan_accounts SET custom_schedule = NULL, updated_at = now() WHERE id = $1', [l.id]);
+  const after = draftView(await draft(c, await ledger.lock(c, l.id)));
+  await record(c, l, 'APPLICATION', before, after, note || 'back to the product schedule', createdBy);
+  return { loanId: l.id, application: true, custom: false, before, after };
+}
+
 async function editsOf(c, loanId) {
   const l = await ledger.read(c, loanId);
   const { rows } = await c.query('SELECT * FROM loan_schedule_edits WHERE loan_id = $1 ORDER BY created_at, id', [l.id]);
   return rows;
 }
 
-module.exports = { EDITS, editSchedule, paymentHoliday, changeDueDay, editsOf };
+module.exports = { EDITS, editSchedule, paymentHoliday, changeDueDay, editsOf, editable, applicationSchedule, clearApplicationSchedule };

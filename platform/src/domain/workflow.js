@@ -236,6 +236,11 @@ async function amend(c, loanId, patch, { actor } = {}) {
   vals.push(l.id);
   const { rows } = await c.query(
     `UPDATE loan_accounts SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length} RETURNING *`, vals);
+  // A schedule edited on the application was for the old amount and term.
+  if (l.custom_schedule && (keys.includes('principal') || keys.includes('termMonths'))) {
+    await c.query('UPDATE loan_accounts SET custom_schedule = NULL WHERE id = $1', [l.id]);
+    rows[0].custom_schedule = null;
+  }
   await c.query(
     `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
      VALUES ($1,'LOAN_AMENDED','loan_account',$2,$3,$4)`,

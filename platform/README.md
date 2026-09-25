@@ -1033,11 +1033,46 @@ interest, so the interest already earned stays what the schedule said.
   the next installment grows by fifteen days of interest).
 
 Every edit is kept with the schedule before and after
-(`GET /api/loans/:id/schedule-edits`). The console offers the payment
-holiday and the due day on a loan whose product allows them; the full edit
-is an API call. Penalties are charged on the loan, not placed on
-installments, so there is no penalty schedule to edit, and a schedule is
-edited once the loan is disbursed (an application has none yet).
+(`GET /api/loans/:id/schedule-edits`). Penalties are charged on the loan,
+not placed on installments, so there is no penalty schedule to edit.
+
+**In the console.** A loan whose product allows any of these edits has an
+"Edit schedule" action. It opens a table of the installments that may
+change (from `GET /api/loans/:id/schedule/editable`), with the fields the
+product allows open for editing, a running total of principal, and rows
+that can be added or removed where the number of installments may change.
+Saving calls `PUT /api/loans/:id/schedule`. Payment holidays and the due
+day have their own actions.
+
+**On an application.** Mambu edits a schedule once the loan is disbursed.
+Here `PUT /api/loans/:id/schedule` also works on an application (partial,
+pending approval or approved), because the schedule the member signs up to
+is often agreed before the money moves (a harvest loan with its payments
+after the harvest, say). What changes is kept on the application
+(`custom_schedule`) and the loan is drawn with it at disbursement:
+
+- The product's rights apply: PAYMENT_DATES to set dates, PRINCIPAL to
+  move principal, INTEREST (fixed term) to set an installment's interest.
+  The number of installments may change within the product's term band,
+  as the term of an application may; the term follows it.
+- Dates given stay as given. Dates left as the product's are drawn from
+  the disbursement date. Disbursing on or after an edited date is refused
+  until the schedule is edited again.
+- Principal must add up to the loan. Principal gained at disbursement
+  (capitalised fees) goes to the last installment.
+- Interest not given is worked out on each installment's own period and
+  balance (on the original principal under FLAT). If the edit moved no
+  date and no principal, the product's figures stand.
+- Fees are placed at disbursement and are edited once the loan runs.
+- Amending the application's amount or term drops the edited schedule.
+  `DELETE /api/loans/:id/application-schedule` goes back to the product's.
+
+`GET /api/loans/:id/application-schedule` shows the schedule the
+application would be drawn with if it were disbursed today; the console
+shows it in place of the empty schedule, with "Edit schedule" and "Product
+schedule" actions. Edits on an application are kept in the same register
+with the kind APPLICATION. Tranched and revolving products draw no schedule
+at disbursement and are refused.
 
 ### Repayment collection
 
@@ -1057,10 +1092,67 @@ Mambu's four Declining Balance recalculation methods map onto
 repayments and Recalculate keeping the same number of terms are
 REDUCE_INSTALLMENT_AMOUNT (on equal principal shares they draw the same
 schedule); Recalculate keeping the same principal amount is
-REDUCE_NUMBER_OF_INSTALLMENTS. Not built: postdated payments (a Mambu UI
-option for fixed-term loans) and interest prepayment into a deferred
-interest account; a payment before a due date pays the interest earned to
-that day and the rest goes to principal.
+REDUCE_NUMBER_OF_INSTALLMENTS.
+
+### Interest paid in advance
+
+On a fixed-term loan a payment made before a due date pays, by default, the
+interest earned to that day, and the rest goes to principal. The product
+setting `interestPrepayment` lets a payment take the installment's whole
+interest instead, as Mambu does with its deferred interest account:
+
+| Value | What a payment before the due date does |
+|---|---|
+| NONE (default) | Pays the interest earned so far; the rest goes to principal. |
+| NEXT_INSTALLMENT | Pays the next installment's whole interest before its principal. Anything beyond that goes to principal. |
+| ALL_INSTALLMENTS | Each installment the payment reaches gives up its whole interest before its principal, in order. |
+
+The part of that interest not yet earned is credited to the deferred
+interest liability, 200-340 Interest Received in Advance (`gl_deferred_interest`,
+mapped as the product's `deferredInterest` account), and kept on the loan
+as `interest_prepaid`. Each accrual then settles what it earns from there:
+Dr Deferred Interest, Cr the interest receivable (under cash, Cr interest
+income). By the due date the installment's interest is earned, the
+deferred account is back to nothing for it, and the installment is paid.
+
+- A loan that closes with interest still held in advance (the last
+  installment paid early) recognises the rest as income on the day, with
+  its own interest transaction. Under ALL_INSTALLMENTS an early payoff
+  therefore pays the scheduled interest of every installment; under
+  NEXT_INSTALLMENT, at most one period's.
+- Reversing the payment takes back what is still held and moves what has
+  been earned since back into the interest owed (and undoes a closure
+  recognition), so the deferred account returns to nothing.
+- A write-off, reschedule or top-up of a loan with interest held in
+  advance first applies it to principal (Dr Deferred Interest, Cr
+  Portfolio): it was never earned.
+- The option is for FIXED_TERM products that accrue interest, accept
+  prepayments and are not funded; interest posted ON_DISBURSEMENT is all
+  applied at once, so there is nothing to take in advance.
+
+### Postdated payments
+
+A fixed-term product with `allowPostdatedPayments` accepts payments recorded
+now with a later value date: postdated cheques, standing orders, a check-off
+promised for a date (a Mambu option for fixed-term loans).
+
+- `POST /api/loans/:id/postdated-payments` with `amount`, `valueDate`
+  (later than today), `channelId` and an optional `reference` records one.
+  With `installments: true` it records one per unpaid installment not yet
+  due, for what the installment still owes, on its due date (optionally
+  from installment `from`, references numbered `CHQ-1`, `CHQ-2` from a
+  given `reference`). Together they may not exceed what the schedule owes.
+- Nothing moves when it is recorded. The end-of-day job
+  `applyPostdatedPayments` (after the night's interest, before arrears)
+  applies each pending payment on its value date as an ordinary repayment
+  dated that day, so it settles what is owed that day in the product's
+  allocation. One that cannot be applied (the loan has closed, the channel
+  has gone) is marked FAILED with the reason; the rest carry on.
+  `POST /api/loans/postdated-payments/run` runs it by hand.
+- `POST /api/loans/postdated-payments/:id/cancel` cancels a pending one
+  (a returned cheque). `GET /api/loans/:id/postdated-payments` lists them.
+- The console has "Postdated payment" and "Postdate installments" actions
+  and a list with a cancel link on each pending one.
 
 ### Eligibility is enforced at approval
 

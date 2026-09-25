@@ -17,6 +17,7 @@ const RV = require('../domain/revolving');
 const WO = require('../domain/writeOffs');
 const RATES = require('../domain/rates');
 const SE = require('../domain/scheduleEdits');
+const PDP = require('../domain/postdated');
 
 const router = express.Router();
 
@@ -97,7 +98,9 @@ router.get('/', requireAuth(), async (req, res, next) => {
 router.get('/:id', ...read(async (c, req) => {
   const { rows } = await c.query(
     `SELECT l.*, m.member_no, m.first_name, m.last_name,
-            r.account_no AS refinances_account_no, pl.account_no AS parent_account_no, lp.schedule_editing
+            r.account_no AS refinances_account_no, pl.account_no AS parent_account_no, lp.schedule_editing,
+            lp.allow_postdated_payments, lp.interest_prepayment,
+            (SELECT count(*)::int FROM loan_postdated_payments pp WHERE pp.loan_id = l.id AND pp.status = 'PENDING') AS postdated_pending
      FROM loan_accounts l JOIN members m ON m.id = l.member_id
      JOIN loan_products lp ON lp.id = l.product_id
      LEFT JOIN loan_accounts r ON r.id = l.refinance_of
@@ -300,6 +303,23 @@ router.post('/:id/payment-holiday', ...tx(async (c, req, res, { actor }) => {
 }, APPROVER));
 router.post('/:id/due-day', ...tx((c, req, _res, { actor }) => SE.changeDueDay(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
 router.get('/:id/schedule-edits', ...read((c, req) => SE.editsOf(c, req.params.id)));
+// The schedule an application will be drawn with: the product's, or one
+// edited on the application (PUT /:id/schedule works before disbursement too).
+router.get('/:id/application-schedule', ...read((c, req) => SE.applicationSchedule(c, req.params.id)));
+router.get('/:id/schedule/editable', ...read((c, req) => SE.editable(c, req.params.id, req.query)));
+router.delete('/:id/application-schedule', ...tx((c, req, _res, { actor }) => SE.clearApplicationSchedule(c, req.params.id, { createdBy: actor }), APPROVER));
+
+// Postdated payments (fixed term): recorded now, applied by the end of day
+// on their value date (./postdated).
+router.get('/:id/postdated-payments', ...read((c, req) => PDP.forLoan(c, req.params.id)));
+router.post('/:id/postdated-payments', ...tx(async (c, req, res, { actor }) => {
+  res.status(201);
+  return req.body?.installments ? PDP.forInstallments(c, req.params.id, { ...req.body, createdBy: actor })
+    : PDP.schedule(c, req.params.id, { ...req.body, createdBy: actor });
+}, TELLER));
+router.post('/postdated-payments/:paymentId/cancel', ...tx((c, req, _res, { actor }) =>
+  PDP.cancel(c, req.params.paymentId, { ...req.body, createdBy: actor }), TELLER));
+router.post('/postdated-payments/run', ...tx((c, req) => PDP.applyDue(c, { ...req.body }), APPROVER));
 router.post('/:id/rates/review', ...tx((c, req, _res, { actor }) =>
   RATES.reviewLoan(c, req.params.id, { date: req.body?.asOf, createdBy: actor }).then((x) => x || { changed: false }), APPROVER));
 router.post('/:id/write-off/approve', ...tx(async (c, req, res, { actor, user }) => {

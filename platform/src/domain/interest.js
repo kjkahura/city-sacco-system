@@ -10,7 +10,7 @@ const accruals = require('./accruals');
 const { round2 } = acct;
 const { ymd, isoDate, toUTC, interestBetween } = S;
 const {
-  lock, termsFor, interestAccrues, booksEntries, post, isMonthEnd,
+  lock, termsFor, interestAccrues, booksEntries, post, isMonthEnd, creditsFor,
 } = require('./ledger');
 const types = require('./productTypes');
 
@@ -155,6 +155,9 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
     });
   }
 
+  // Interest the member paid in advance settles what has now been earned.
+  if (Number(l.interest_prepaid) > 0) await applyPrepaidInterest(c, l.id, { valueDate: date, createdBy });
+
   // Capitalising products fold the interest earned into principal on each
   // due date that this run crossed (and at repayment, which calls here first).
   if (capitalizing) {
@@ -189,4 +192,85 @@ async function capitalizeInterest(c, loanId, { valueDate, createdBy } = {}) {
   });
 }
 
-module.exports = { accrueInterest, capitalizeInterest };
+// --------------------------------------------------------------------------
+// Interest received in advance (loan_products.interest_prepayment)
+// --------------------------------------------------------------------------
+
+/**
+ * Interest a fixed-term loan's member paid before it was earned sits in the
+ * deferred interest liability (interest_prepaid). As interest is earned it
+ * is settled from there: Dr Deferred Interest, Cr what a payment of interest
+ * credits (the receivable under accrual, income under cash). Called after
+ * every accrual.
+ */
+async function applyPrepaidInterest(c, loanId, { valueDate, createdBy } = {}) {
+  const l = await lock(c, loanId);
+  const prepaid = Number(l.interest_prepaid || 0);
+  const owed = round2(Number(l.interest_accrued) - Number(l.interest_paid));
+  const amt = round2(Math.min(prepaid, owed));
+  if (!(amt > 0)) return 0;
+  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  await c.query(
+    'UPDATE loan_accounts SET interest_paid = interest_paid + $1, interest_prepaid = interest_prepaid - $1, updated_at = now() WHERE id = $2',
+    [amt, l.id]);
+  await post(c, l, {
+    debits: [{ glCode: l.gl_deferred_interest, amount: amt, memberId: l.member_id }],
+    credits: creditsFor(l, 'INTEREST', amt, l.member_id),
+    narration: `Prepaid interest earned ${l.account_no}`,
+    sourceType: 'LOAN_PREPAID_INTEREST', sourceId: l.id, bookingDate: date, createdBy,
+  });
+  return amt;
+}
+
+/**
+ * A loan that closes with interest still held in advance (every
+ * installment paid early): the member paid it under the contract, so it is
+ * recognised as income on the day, Dr Deferred Interest, Cr Interest Income
+ * (and the tax payable share where the product taxes interest).
+ */
+async function recognisePrepaidInterest(c, loanId, { valueDate, createdBy } = {}) {
+  const l = await lock(c, loanId);
+  const amt = round2(Number(l.interest_prepaid || 0));
+  if (!(amt > 0)) return 0;
+  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const s = tax.splitPaid(l, 'INTEREST', amt);
+  await c.query(
+    `UPDATE loan_accounts SET interest_accrued = interest_accrued + $1, interest_paid = interest_paid + $1,
+       tax_charged = tax_charged + $3, interest_prepaid = 0, updated_at = now() WHERE id = $2`, [amt, l.id, s.tax]);
+  const entryId = await post(c, l, {
+    debits: [{ glCode: l.gl_deferred_interest, amount: amt, memberId: l.member_id }],
+    credits: tax.incomeCredits(l, s, l.gl_interest_inc, l.member_id),
+    narration: `Prepaid interest recognised at closure ${l.account_no}`,
+    sourceType: 'LOAN_PREPAID_INTEREST', sourceId: l.id, bookingDate: date, createdBy,
+  });
+  await savings.record(c, {
+    reference: savings.ref('LI'), kind: 'LOAN_INTEREST_ACCRUAL', memberId: l.member_id,
+    loanAccountId: l.id, amount: amt, valueDate: date, entryId,
+    allocation: { method: 'PREPAID_AT_CLOSURE', prepaid: amt, ...(s.tax > 0 ? { tax: s.tax, net: s.income } : {}) }, createdBy,
+  });
+  return amt;
+}
+
+/**
+ * Interest held in advance on a loan that is being written off or settled
+ * by a reschedule or top-up was never earned: it goes to the principal
+ * instead, Dr Deferred Interest, Cr Portfolio. Returns the amount moved.
+ */
+async function prepaidToPrincipal(c, loanId, { valueDate, createdBy } = {}) {
+  const l = await lock(c, loanId);
+  const amt = round2(Math.min(Number(l.interest_prepaid || 0), Number(l.principal_disbursed) + Number(l.principal_capitalized) - Number(l.principal_paid)));
+  if (!(amt > 0)) return 0;
+  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  await c.query(
+    'UPDATE loan_accounts SET principal_paid = principal_paid + $1, interest_prepaid = interest_prepaid - $1, updated_at = now() WHERE id = $2',
+    [amt, l.id]);
+  await post(c, l, {
+    debits: [{ glCode: l.gl_deferred_interest, amount: amt, memberId: l.member_id }],
+    credits: [{ glCode: l.gl_portfolio, amount: amt, memberId: l.member_id }],
+    narration: `Prepaid interest applied to principal ${l.account_no}`,
+    sourceType: 'LOAN_PREPAID_INTEREST', sourceId: l.id, bookingDate: date, createdBy,
+  });
+  return amt;
+}
+
+module.exports = { accrueInterest, capitalizeInterest, applyPrepaidInterest, recognisePrepaidInterest, prepaidToPrincipal };

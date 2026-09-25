@@ -63,6 +63,7 @@ const SEED_GL = [
   ['100-410', 'Overdraft Interest Receivable', 'ASSET',   'OTHER_ASSET'],
   ['200-110', 'Interest Payable on Deposits', 'LIABILITY', 'SHORT_TERM_LIABILITY'],
   ['200-330', 'Withholding Tax Payable',     'LIABILITY', 'SHORT_TERM_LIABILITY'],
+  ['200-340', 'Interest Received in Advance', 'LIABILITY', 'SHORT_TERM_LIABILITY'],
   ['290-100', 'Inter-branch Clearing',       'LIABILITY', 'OTHER_LIABILITY'],
   ['290-900', 'Suspense: Products Without Accounting', 'LIABILITY', 'OTHER_LIABILITY'],
   ['300-900', 'Accounting Method Conversions', 'EQUITY',  'INSTITUTIONAL_CAPITAL'],

@@ -41,6 +41,7 @@ const ENUMS = {
   prepayment_interest: ['AUTOMATIC', 'MANUAL'],
   prepayment_allocation: ['UPCOMING_PENDING', 'NEXT_INSTALLMENTS'],
   mark_paid_when: ['FULL_DUE', 'PRINCIPAL_EXPECTED'],
+  interest_prepayment: ['NONE', 'NEXT_INSTALLMENT', 'ALL_INSTALLMENTS'],
   rate_review_unit: ['DAYS', 'WEEKS', 'MONTHS'],
   simple_base: ['PRINCIPAL_ONLY', 'PRINCIPAL_AND_INTEREST'],
   interest_posting: ['ON_REPAYMENT', 'ON_DISBURSEMENT'],
@@ -83,6 +84,7 @@ const FIELDS = {
   allowedIndexSources: 'allowed_index_sources', allowNegativeRate: 'allow_negative_rate', scheduleEditing: 'schedule_editing',
   paymentMethod: 'payment_method', allowPrepayments: 'allow_prepayments', prepaymentInterest: 'prepayment_interest',
   prepaymentAllocation: 'prepayment_allocation', markPaidWhen: 'mark_paid_when',
+  interestPrepayment: 'interest_prepayment', glDeferredInterest: 'gl_deferred_interest', allowPostdatedPayments: 'allow_postdated_payments',
   firstDueOffsetDays: 'first_due_offset_days', firstDueOffsetMin: 'first_due_offset_min', firstDueOffsetMax: 'first_due_offset_max',
   graceType: 'grace_type', gracePeriods: 'grace_periods', amortizationPeriods: 'amortization_periods', rounding: 'rounding',
   processingFee: 'processing_fee', allowArbitraryFees: 'allow_arbitrary_fees',
@@ -145,6 +147,7 @@ const publicProduct = (p) => ({
   allowedIndexSources: p.allowed_index_sources, allowNegativeRate: p.allow_negative_rate, scheduleEditing: p.schedule_editing || [],
   paymentMethod: p.payment_method, allowPrepayments: p.allow_prepayments, prepaymentInterest: p.prepayment_interest,
   prepaymentAllocation: p.prepayment_allocation, markPaidWhen: p.mark_paid_when,
+  interestPrepayment: p.interest_prepayment, allowPostdatedPayments: p.allow_postdated_payments,
   firstDueOffsetDays: p.first_due_offset_days, firstDueOffsetMin: p.first_due_offset_min, firstDueOffsetMax: p.first_due_offset_max,
   graceType: p.grace_type, gracePeriods: p.grace_periods, amortizationPeriods: p.amortization_periods, rounding: p.rounding,
   processingFee: Number(p.processing_fee), allowArbitraryFees: p.allow_arbitrary_fees,
@@ -166,6 +169,7 @@ const publicProduct = (p) => ({
     portfolio: p.gl_portfolio, interestIncome: p.gl_interest_inc, feeIncome: p.gl_fee_inc,
     penaltyIncome: p.gl_penalty_inc, interestReceivable: p.gl_interest_rec,
     feeReceivable: p.gl_fee_rec, penaltyReceivable: p.gl_penalty_rec, writeOffExpense: p.gl_writeoff_exp, recoveries: p.gl_recoveries,
+    deferredInterest: p.gl_deferred_interest,
   },
   maxTranches: p.max_tranches,
   revolving: p.product_type === 'REVOLVING' ? {
@@ -221,6 +225,15 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
     if (merged.prepayment_allocation === 'NEXT_INSTALLMENTS' && !dbei) problems.push('NEXT_INSTALLMENTS prepayment allocation is for dynamic REDUCING_EQUAL_INSTALLMENTS products');
     if (merged.mark_paid_when === 'PRINCIPAL_EXPECTED' && !dbei) problems.push('PRINCIPAL_EXPECTED is for dynamic REDUCING_EQUAL_INSTALLMENTS products');
     if (merged.payment_method === 'HORIZONTAL' && type === 'REVOLVING') problems.push('a REVOLVING product pays by balance (VERTICAL)');
+    // Interest taken in advance and postdated payments are fixed-term options, as in Mambu.
+    if (merged.interest_prepayment && merged.interest_prepayment !== 'NONE') {
+      if (type !== 'FIXED_TERM') problems.push('interest_prepayment is for FIXED_TERM products');
+      if (merged.interest_posting === 'ON_DISBURSEMENT') problems.push('interest_prepayment has nothing to take in advance when interest is posted ON_DISBURSEMENT');
+      if (merged.interest_accrual === 'NONE') problems.push('interest_prepayment needs interest to accrue (interest_accrual DAILY or MONTHLY)');
+      if (merged.funding_enabled) problems.push('interest_prepayment is not available on a funded product');
+      if (merged.allow_prepayments === false) problems.push('interest_prepayment needs allow_prepayments');
+    }
+    if (merged.allow_postdated_payments && !['FIXED_TERM', 'INTEREST_FREE'].includes(type)) problems.push('postdated payments are for fixed-term products');
   }
   if (cols.schedule_editing !== undefined) {
     const edits = cols.schedule_editing;
@@ -285,7 +298,8 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
 
   for (const col of ['accrue_late_interest', 'enforce_deposit_multiplier', 'require_guarantor_cover', 'is_active', 'allow_arbitrary_fees',
     'credit_balance_enabled', 'enable_guarantors', 'enable_collateral', 'tax_on_interest', 'tax_on_fees', 'tax_on_penalties',
-    'funding_enabled', 'lock_funds_at_approval', 'adjustable_rates', 'allow_negative_rate', 'allow_prepayments']) {
+    'funding_enabled', 'lock_funds_at_approval', 'adjustable_rates', 'allow_negative_rate', 'allow_prepayments',
+    'allow_postdated_payments']) {
     if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
   }
   const nonNeg = ['monthly_rate', 'rate_min', 'rate_max', 'processing_fee', 'penalty_rate', 'penalty_rate_min', 'penalty_rate_max',

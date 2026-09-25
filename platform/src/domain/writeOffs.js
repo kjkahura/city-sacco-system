@@ -9,7 +9,7 @@ const workflow = require('./workflow');
 const provisioning = require('./provisioning');
 const PA = require('./productAccounting');
 const types = require('./productTypes');
-const { accrueInterest } = require('./interest');
+const { accrueInterest, prepaidToPrincipal } = require('./interest');
 const { pageQuery } = require('../lib/page');
 const { err, round2 } = acct;
 const { lock, balances, isAccrual, interestAccrues, writeOffCredit, post, booksEntries } = ledger;
@@ -89,6 +89,11 @@ async function writeOff(c, loanId, { narration, createdBy, valueDate } = {}) {
   // back date stays owed and is written off with the rest.
   if (types.forLoan(l).bringsInterestToDate && l.status !== 'LOCKED') {
     await accrueInterest(c, l.id, { valueDate: date, createdBy });
+    l = await lock(c, l.id);
+  }
+  // Interest paid in advance and not earned reduces the principal written off.
+  if (Number(l.interest_prepaid) > 0) {
+    await prepaidToPrincipal(c, l.id, { valueDate: date, createdBy });
     l = await lock(c, l.id);
   }
   const b = balances(l);

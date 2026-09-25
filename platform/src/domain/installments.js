@@ -42,7 +42,7 @@ async function persistInstallments(c, loanId, installments) {
  * Payment-due fees and, on fixed-term loans, the upfront disbursement fees
  * are placed on the schedule by ./fees, which is called here.
  */
-async function buildSchedule(c, l, { persist = true } = {}) {
+async function buildSchedule(c, l, { persist = true, custom = true } = {}) {
   const count = Number(l.term_months);
   const principal = Number(l.principal_disbursed) > 0 ? principalOutstanding(l) : Number(l.principal);
   if (!principal || !count) throw err('LOAN_MISSING_PRINCIPAL_OR_TERM');
@@ -60,13 +60,18 @@ async function buildSchedule(c, l, { persist = true } = {}) {
   }
   const lines = S.draftSchedule({ start, count, principal, ...inputs, skipDate });
   const feePlan = await fees.scheduledFees(c, l, lines);
-  const installments = [];
+  let installments = [];
   let previous = start;
   for (const line of lines) {
     const dueDate = skipDate ? line.nominalDue
       : await shiftOffClosedDays(c, line.nominalDue, inputs.nonWorkingDays, { notBefore: previous });
     installments.push({ ...line, dueDate, fee: round2(feePlan[line.number] || 0) });
     previous = dueDate;
+  }
+  // A schedule edited on the application replaces the product's where it
+  // says something (./scheduleEdits).
+  if (custom && Array.isArray(l.custom_schedule) && l.custom_schedule.length) {
+    installments = applyCustomSchedule(l, installments, { start, principal, inputs });
   }
 
   if (persist) {
@@ -85,6 +90,55 @@ async function buildSchedule(c, l, { persist = true } = {}) {
     },
     installments,
   };
+}
+
+/**
+ * Lay an application's own schedule (loan_accounts.custom_schedule, one
+ * { dueDate, principal, interest } per installment, null where the product's
+ * figure stands) over the product's draft. Dates given stay as given;
+ * dates left out are the product's from the disbursement date. Principal
+ * the loan gained at disbursement (capitalised fees) goes to the last
+ * installment. Interest left out is worked out on the installment's own
+ * period and balance (on the original principal under FLAT), unless the
+ * application changed no date or principal, in which case the product's
+ * figure stands.
+ */
+function applyCustomSchedule(l, draft, { start, principal, inputs }) {
+  const cs = l.custom_schedule;
+  if (cs.length !== draft.length) throw err(`APPLICATION_SCHEDULE_HAS_${cs.length}_INSTALLMENTS_BUT_THE_TERM_IS_${draft.length}`, 409);
+  const given = (v) => v !== null && v !== undefined;
+  const reshaped = cs.some((x) => x.dueDate || given(x.principal));
+  const d = inputs.decimals;
+  const lines = cs.map((x, k) => ({
+    number: k + 1,
+    dueDate: x.dueDate || draft[k].dueDate,
+    nominalDue: x.dueDate || draft[k].nominalDue,
+    principal: given(x.principal) ? Number(x.principal) : draft[k].principal,
+    interest: given(x.interest) ? Number(x.interest) : null,
+    fee: draft[k].fee,
+  }));
+  const last = lines[lines.length - 1];
+  last.principal = S.roundTo(last.principal + principal - lines.reduce((a, x) => a + x.principal, 0), d);
+  if (last.principal < 0) throw err('APPLICATION_SCHEDULE_PRINCIPAL_EXCEEDS_THE_LOAN: edit the schedule', 409);
+  let prev = start;
+  for (const x of lines) {
+    if (x.dueDate <= prev) throw err(`APPLICATION_SCHEDULE_DATES_DO_NOT_FIT: ${x.dueDate} is not after ${prev}; edit the schedule`, 409);
+    prev = x.dueDate;
+  }
+  let bal = principal;
+  let from = start;
+  for (let k = 0; k < lines.length; k += 1) {
+    const x = lines[k];
+    if (x.interest === null) {
+      x.interest = reshaped
+        ? S.roundTo(S.interestBetween(l.method === 'FLAT' ? Number(l.principal) : bal, inputs.terms, from, x.nominalDue, { exact: true }), d)
+        : draft[k].interest;
+    }
+    if (!(x.principal > 0) && !(x.interest > 0)) x.grace = 'PURE';
+    bal = S.roundTo(bal - x.principal, d);
+    from = x.nominalDue;
+  }
+  return lines;
 }
 
 /**
