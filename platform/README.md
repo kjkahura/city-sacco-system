@@ -579,14 +579,16 @@ configured with, not how a loan behaves.
 | Securities | `enable_guarantors`, `enable_collateral` | Which securities the product takes; both count towards the required cover. |
 | Tax | `tax_rate_percent`, `tax_method`, `tax_on_interest/fees/penalties`, `gl_tax_payable` | EXCLUSIVE adds the tax on top for the member to pay; INCLUSIVE splits the quoted figure. Booked to Taxes Payable. A fee may be marked non-taxable. |
 | Funding | `funding_enabled`, `funder_allocation`, `org_commission` (+ band), `funder_rate_default` (+ band), `lock_funds_at_approval` | FIXED_TERM and DYNAMIC_TERM products, ACCRUAL or NONE accounting. |
-| Interest type | `interest_type`, `simple_base` | SIMPLE (linear), CAPITALIZED (applied interest joins the principal, Dr Portfolio Cr Income, and is repaid as principal), COMPOUND (daily exponential; the annuity uses the periodic compound rate). SIMPLE on a dynamic equal-installment product may run on principal and unpaid interest. Figures reproduce Mambu's worked examples to the cent. |
+| Interest type | `interest_type`, `simple_base` | SIMPLE (linear), CAPITALIZED (applied interest joins the principal, Dr Portfolio Cr Income, and is repaid as principal; on Declining Balance every installment but the last is interest only and the principal falls due at the end), COMPOUND (daily exponential on the effective annual rate; the annuity uses the periodic compound rate), COMPOUND_DAILY_REST (the nominal rate over the days in the year, each day's interest earning interest the next day; the monthly payment is PMT(daily, months/12 x days, -P) x days/12). SIMPLE on a dynamic equal-installment product may run on principal and unpaid interest. Compound types are not available on FLAT or REVOLVING products. Figures reproduce Mambu's worked examples to the cent. |
 | Posting | `interest_posting` | ON_REPAYMENT, or ON_DISBURSEMENT for a fixed-term product that applies the whole term's interest on day one. |
 | Rate | `monthly_rate`, `rate_frequency`, `rate_min`, `rate_max` | The rate is quoted PER_MONTH, PER_YEAR, PER_WEEK or PER_DAY; a loan may take a rate inside the band. |
 | Amount and term | `min/default/max_principal`, `min/default/max_term` | Bands checked at application and amendment. `term_months` on a loan is the number of installments. |
 | Interval | `repayment_interval_unit/count`, `fixed_days_of_month`, `short_month_handling`, `first_due_offset_days` (+ band) | Every n months, weeks or days, or on fixed days of the month (payday: 1 and 15) with the 29th to 31st moved to the last day or the 1st of the next. |
 | Grace | `grace_type`, `grace_periods` | PRINCIPAL: interest-only installments first. PURE: nothing due for those installments, their interest spread over the rest; stored as GRACE lines that never go overdue. |
 | Balloon | `amortization_periods` | Amortise as if over this many periods; the last scheduled installment carries the balance. |
-| Rounding | `rounding` | NONE, WHOLE, WHOLE_UP, applied to each payment; the last line takes the remainder. |
+| Rounding | `rounding` | NONE, WHOLE, WHOLE_UP, applied to each payment. |
+| Leftover principal | `residual_installment` | LAST (default) or FIRST: which installment takes the principal left over by a longer first period or by rounding. The annuity is priced on a regular period. |
+| Non-working days | `non_working_days` | MOVE_FORWARD (default), MOVE_BACKWARD, DO_NOT_RESCHEDULE, EXTEND_SCHEDULE. See the due dates note above. |
 | Arrears | `arrears_tolerance_days`, `arrears_tolerance_percent`, `arrears_tolerance_floor`, `arrears_count_from`, `arrears_non_working_days` | A loan stays ACTIVE for the tolerance days (working days only, if so set); a shortfall under the greater of the percentage of outstanding and the floor is a partial payment, not arrears. Days in arrears count from the oldest late installment or from when the loan first went into arrears. |
 | Penalties | `penalty_rate` (+ band), `penalty_basis`, `penalty_tolerance_days` | Daily rate on OVERDUE_PRINCIPAL, OVERDUE_PRINCIPAL_INTEREST, OVERDUE_ALL or OUTSTANDING_PRINCIPAL, or NONE; applied once the tolerance lapses, for every late day. A loan may carry its own rate inside the band. |
 | Cap on charges | `charge_cap_percent`, `charge_cap_base`, `charge_cap_mode` | When interest, fees and penalties charged since the loan went into arrears reach the percentage of the original or outstanding principal, the loan is LOCKED: HARD refuses the charge that would cross the line, SOFT applies it first. Ships unset; the in duplum position is 100% of outstanding principal, HARD. |
@@ -927,13 +929,21 @@ within half a cent, however many runs it took: 10,000 at 1% a month
 accrues 100.00 over thirty daily runs (twenty days of 3.33, ten of 3.34),
 where rounding each day used to give 99.90. This is Mambu's approach of
 keeping accruals unrounded and rounding when posting ("Truncating and
-rounding interest"). Two differences: the arithmetic is JavaScript double
+rounding interest"). One difference: the arithmetic is JavaScript double
 precision (about fifteen significant digits, far below a cent on any loan
-amount) rather than Mambu's twenty decimals, and amounts are posted to two
-decimals whatever the tenant's currency. Per-currency decimals (0 for UGX
-or JPY, 3 for JOD) are not modelled; the product's payment rounding (none,
-nearest whole unit, up to whole unit) covers whole-unit currencies on
-schedules. Penalty and deposit interest accruals still round each run.
+amount) rather than Mambu's twenty decimals. Penalties carry their fraction
+the same way (`penalty_accrual_carry`), and deposit interest was already
+accrued unrounded and booked as the change in the rounded total.
+
+**Currency decimals.** `accounting_settings.currency_decimals` is the
+currency's minor units: 0 for UGX, RWF, JPY and the other currencies
+without cents in use, 3 for the dinars, 2 otherwise, set from the tenant's
+currency and changeable (`PUT /api/accounting/settings`). Amounts worked out
+from a rate follow it: schedule lines, interest accrual and penalties. A
+UGX loan's schedule is in whole shillings and its daily interest posts whole
+shillings, carrying the fraction. Amounts people enter (disbursements,
+repayments, fixed fees) are taken as entered; percentage fees and tax
+splits still round to two decimals.
 
 `day_count` per product, applied to the annualised rate (twelve times the
 monthly rate):
@@ -944,6 +954,7 @@ monthly rate):
 | `ACTUAL_365` | Mambu's default. Days that passed over 365. |
 | `ACTUAL_360` | Days that passed over 360. |
 | `ACTUAL_ACTUAL` | Each day is a fraction of its own year, leap years included. |
+| `BUS_252` | Business days over 252: weekends and the days in the `holidays` table do not count. Brazil's convention; compound interest only, as in Mambu. |
 
 30E/360 is the default because SACCO products are quoted per month and
 members expect the month's interest to be the month's interest. A product

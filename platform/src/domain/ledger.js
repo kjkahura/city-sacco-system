@@ -188,7 +188,7 @@ const PRODUCT_ONLY = [
   'processing_fee', 'max_multiplier',
   'interest_type', 'simple_base', 'interest_posting', 'rate_frequency',
   'repayment_interval_unit', 'repayment_interval_count', 'fixed_days_of_month', 'short_month_handling',
-  'grace_type', 'rounding', 'non_working_days',
+  'grace_type', 'rounding', 'non_working_days', 'residual_installment',
   'arrears_tolerance_floor', 'arrears_count_from', 'arrears_non_working_days',
   'penalty_basis', 'penalty_tolerance_days',
   'charge_cap_percent', 'charge_cap_base', 'charge_cap_mode',
@@ -273,9 +273,47 @@ function settlement(l, arrears = 'CAPITALIZE') {
   };
 }
 
+/** The tenant currency's minor units (accounting_settings.currency_decimals). */
+async function currencyDecimals(c) {
+  const { rows: [r] } = await c.query('SELECT currency_decimals FROM accounting_settings LIMIT 1');
+  return r ? Number(r.currency_decimals) : 2;
+}
+
+/** Every holiday on the calendar, for BUS/252. */
+async function holidaySet(c) {
+  const { rows } = await c.query('SELECT holiday_date::text AS d FROM holidays');
+  return new Set(rows.map((r) => r.d));
+}
+
+/**
+ * The loan's terms with what the calendar and currency add: the holidays a
+ * BUS/252 count needs, and the currency's decimals.
+ */
+async function termsFor(c, l) {
+  const t = terms(l);
+  if (t.convention === 'BUS_252') t.holidays = await holidaySet(c);
+  t.decimals = await currencyDecimals(c);
+  return t;
+}
+
+/**
+ * The schedule engine's inputs, with the calendar and currency (termsFor).
+ * What buildSchedule, preview and reschedule use.
+ */
+async function scheduleInputsFor(c, l) {
+  const inputs = scheduleInputs(l);
+  inputs.terms = await termsFor(c, l);
+  inputs.decimals = inputs.terms.decimals;
+  return inputs;
+}
+
 /** The schedule engine's inputs for this loan. */
 function scheduleInputs(l) {
   const e = effective(l);
+  // Capitalized interest on Declining Balance: every installment but the
+  // last is interest only (the interest capitalises on its due date) and
+  // the whole principal falls due at the end, as in Mambu.
+  const capitalizedReducing = l.interest_type === 'CAPITALIZED' && l.method === 'REDUCING';
   return {
     terms: terms(l),
     method: l.method,
@@ -283,10 +321,13 @@ function scheduleInputs(l) {
     fixedDays: l.fixed_days_of_month,
     shortMonth: l.short_month_handling || 'LAST_DAY',
     firstOffsetDays: e.firstDueOffsetDays || 0,
-    grace: { type: l.grace_type || 'NONE', periods: e.gracePeriods || 0 },
+    grace: capitalizedReducing
+      ? { type: 'PRINCIPAL', periods: Math.max(0, Number(l.term_months) - 1) }
+      : { type: l.grace_type || 'NONE', periods: e.gracePeriods || 0 },
     amortization: e.amortizationPeriods,
     rounding: l.rounding || 'NONE',
     nonWorkingDays: l.non_working_days || 'MOVE_FORWARD',
+    residual: l.residual_installment || 'LAST',
   };
 }
 
@@ -414,7 +455,7 @@ const isMonthEnd = (d) => {
 module.exports = {
   OVERRIDES, effective, overrideSql, resolveOverrides, within,
   PRODUCT_COLUMNS, lock, read, principalOutstanding, balances, settlement, terms,
-  scheduleInputs, shiftOffClosedDays, closedDays, NON_WORKING_DAY_RULES,
+  scheduleInputs, scheduleInputsFor, termsFor, currencyDecimals, holidaySet, shiftOffClosedDays, closedDays, NON_WORKING_DAY_RULES,
   isAccrual, booksEntries, interestAccrues, paidCredit, creditsFor, writeOffCredit, post,
   interestFor, isMonthEnd,
 };

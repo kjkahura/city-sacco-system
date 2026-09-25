@@ -6,6 +6,7 @@ const tax = require('./tax');
 const L = require('./ledger');
 const W = require('./workflow');
 const { pageQuery } = require('../lib/page');
+const S = require('./schedule');
 const { err, round2 } = acct;
 
 /**
@@ -60,6 +61,11 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
 
   const glIncome = l.gl_penalty_inc || l.gl_interest_inc;
   const charges = [];
+  // Like interest, a penalty is worked out unrounded and the fraction of a
+  // minor unit it leaves is carried to the next charge on the loan, so a
+  // month of daily penalties is the month's penalty (penalty_accrual_carry).
+  const decimals = await L.currencyDecimals(c);
+  let carry = Number(l.penalty_accrual_carry || 0);
 
   for (const inst of overdue) {
     const late = daysLate(inst.due_date, date);
@@ -77,10 +83,16 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
       case 'OUTSTANDING_PRINCIPAL': basisAmount = L.principalOutstanding(l); break;
       default: basisAmount = round2(overduePrincipal + overdueInterest + overdueFees);
     }
-    let amount = round2(Math.max(0, basisAmount) * rate);
-    if (!(amount > 0)) continue;
-    amount = await W.capAllows(c, l, amount);
-    if (!(amount > 0)) break;
+    const iterCarry = carry;
+    const exact = Math.max(0, basisAmount) * rate + carry;
+    let amount = S.roundTo(exact, decimals);
+    const nextCarry = exact - amount;
+    if (!(amount > 0)) { carry = exact; continue; }
+    const allowed = await W.capAllows(c, l, amount);
+    if (!(allowed > 0)) { carry = 0; break; }
+    // What the cap refuses is not carried forward.
+    carry = allowed < amount ? 0 : nextCarry;
+    amount = allowed;
     // Tax on penalties, where the product charges it.
     const tx = tax.split(l, 'PENALTY', amount);
     amount = tx.gross;
@@ -98,7 +110,7 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
        RETURNING *`,
       [l.id, inst.id, date, late, basisAmount, effRate, amount]
     );
-    if (!ins.length) continue;            // already charged for this day
+    if (!ins.length) { carry = iterCarry; continue; }  // already charged for this day
     const inserted = ins[0];
 
     // Penalty applied: Dr Penalty Receivable, Cr Penalty Income (accrual).
@@ -124,6 +136,9 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
     l.charges_since_arrears = Number(l.charges_since_arrears || 0) + amount;
 
     charges.push({ ...inserted, entryId });
+  }
+  if (carry !== Number(l.penalty_accrual_carry || 0)) {
+    await c.query('UPDATE loan_accounts SET penalty_accrual_carry = $1 WHERE id = $2', [carry, l.id]);
   }
 
   return charges;

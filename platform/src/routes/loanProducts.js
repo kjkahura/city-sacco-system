@@ -34,7 +34,8 @@ const ENUMS = {
   funder_allocation: ['PERCENT_OF_FUNDING', 'FIXED_COMMISSIONS'],
   category: ['PERSONAL', 'PURCHASE_FINANCING', 'MORTGAGE', 'SME', 'COMMERCIAL', 'UNCATEGORIZED'],
   method: ['FLAT', 'REDUCING', 'REDUCING_EQUAL_INSTALLMENTS'],
-  interest_type: ['SIMPLE', 'CAPITALIZED', 'COMPOUND'],
+  interest_type: ['SIMPLE', 'CAPITALIZED', 'COMPOUND', 'COMPOUND_DAILY_REST'],
+  residual_installment: ['FIRST', 'LAST'],
   simple_base: ['PRINCIPAL_ONLY', 'PRINCIPAL_AND_INTEREST'],
   interest_posting: ['ON_REPAYMENT', 'ON_DISBURSEMENT'],
   rate_frequency: ['PER_YEAR', 'PER_MONTH', 'PER_WEEK', 'PER_DAY'],
@@ -43,7 +44,7 @@ const ENUMS = {
   interest_accrual: ['DAILY', 'MONTHLY', 'NONE'],
   interest_accrued_accounting: ['NONE', 'DAILY', 'MONTHLY'],
   accrual_granularity: ['PER_ACCOUNT', 'AGGREGATED'],
-  day_count: ['THIRTY_360', 'ACTUAL_365', 'ACTUAL_360', 'ACTUAL_ACTUAL'],
+  day_count: ['THIRTY_360', 'ACTUAL_365', 'ACTUAL_360', 'ACTUAL_ACTUAL', 'BUS_252'],
   penalty_basis: ['NONE', 'OVERDUE_PRINCIPAL', 'OVERDUE_PRINCIPAL_INTEREST', 'OVERDUE_ALL', 'OUTSTANDING_PRINCIPAL'],
   id_mode: ['RANDOM', 'INCREMENTAL'],
   initial_state: ['PARTIAL_APPLICATION', 'PENDING_APPROVAL'],
@@ -70,6 +71,7 @@ const FIELDS = {
   minTerm: 'min_term', maxTerm: 'max_term', defaultTerm: 'default_term',
   repaymentIntervalUnit: 'repayment_interval_unit', repaymentIntervalCount: 'repayment_interval_count',
   fixedDaysOfMonth: 'fixed_days_of_month', shortMonthHandling: 'short_month_handling', nonWorkingDays: 'non_working_days',
+  residualInstallment: 'residual_installment',
   firstDueOffsetDays: 'first_due_offset_days', firstDueOffsetMin: 'first_due_offset_min', firstDueOffsetMax: 'first_due_offset_max',
   graceType: 'grace_type', gracePeriods: 'grace_periods', amortizationPeriods: 'amortization_periods', rounding: 'rounding',
   processingFee: 'processing_fee', allowArbitraryFees: 'allow_arbitrary_fees',
@@ -126,6 +128,7 @@ const publicProduct = (p) => ({
   minTerm: p.min_term, maxTerm: p.max_term, defaultTerm: p.default_term,
   repaymentIntervalUnit: p.repayment_interval_unit, repaymentIntervalCount: p.repayment_interval_count,
   fixedDaysOfMonth: p.fixed_days_of_month, shortMonthHandling: p.short_month_handling, nonWorkingDays: p.non_working_days,
+  residualInstallment: p.residual_installment,
   firstDueOffsetDays: p.first_due_offset_days, firstDueOffsetMin: p.first_due_offset_min, firstDueOffsetMax: p.first_due_offset_max,
   graceType: p.grace_type, gracePeriods: p.grace_periods, amortizationPeriods: p.amortization_periods, rounding: p.rounding,
   processingFee: Number(p.processing_fee), allowArbitraryFees: p.allow_arbitrary_fees,
@@ -216,7 +219,10 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
   }
   if (type === 'INTEREST_FREE' && Number(merged.monthly_rate || 0) > 0) problems.push('an INTEREST_FREE product has no rate');
   if (merged.interest_type === 'CAPITALIZED' && type !== 'DYNAMIC_TERM') problems.push('CAPITALIZED interest needs a DYNAMIC_TERM product');
-  if (merged.interest_type === 'COMPOUND' && method === 'FLAT') problems.push('COMPOUND interest cannot be FLAT');
+  const compounding = ['COMPOUND', 'COMPOUND_DAILY_REST'].includes(merged.interest_type);
+  if (compounding && method === 'FLAT') problems.push(`${merged.interest_type} interest cannot be FLAT`);
+  if (compounding && type === 'REVOLVING') problems.push(`${merged.interest_type} interest is not available on REVOLVING products`);
+  if (merged.day_count === 'BUS_252' && merged.interest_type !== 'COMPOUND') problems.push('the BUS_252 day count needs COMPOUND interest');
   if (merged.simple_base === 'PRINCIPAL_AND_INTEREST' && !(type === 'DYNAMIC_TERM' && method === 'REDUCING_EQUAL_INSTALLMENTS')) {
     problems.push('PRINCIPAL_AND_INTEREST base needs a DYNAMIC_TERM, REDUCING_EQUAL_INSTALLMENTS product');
   }

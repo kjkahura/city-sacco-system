@@ -6,7 +6,7 @@ const fees = require('./fees');
 const { err, round2 } = acct;
 const { ymd, isoDate, toUTC, annuityPayment } = S;
 const {
-  principalOutstanding, balances, scheduleInputs, shiftOffClosedDays, closedDays,
+  principalOutstanding, balances, scheduleInputsFor, shiftOffClosedDays, closedDays,
 } = require('./ledger');
 const types = require('./productTypes');
 const { scheduledOutstanding, scheduledInterestThrough } = require('./productTypes/fixedTerm');
@@ -51,7 +51,7 @@ async function buildSchedule(c, l, { persist = true } = {}) {
   // What happens to a date on a non-working day is the product's rule
   // (Mambu's "Installments on Non-Working Days"). Extend Schedule is applied
   // to the nominal dates themselves, so interest follows the longer period.
-  const inputs = scheduleInputs(l);
+  const inputs = await scheduleInputsFor(c, l);
   let skipDate = null;
   if (inputs.nonWorkingDays === 'EXTEND_SCHEDULE') {
     const span = S.nominalDueDates({ start, count: count + 60, interval: inputs.interval, fixedDays: inputs.fixedDays,
@@ -132,7 +132,7 @@ async function reschedule(c, l, asOf, { force = false } = {}) {
   const b = balances(l);
   const pastPrincipalStillDue = round2(past.reduce((s, r) => s + Math.max(0, r.principal_due - r.principal_paid), 0));
   const remaining = round2(b.principal - pastPrincipalStillDue);
-  const inputs = scheduleInputs(l);
+  const inputs = await scheduleInputsFor(c, l);
   const t = inputs.terms;
 
   let fixedShare = null;
@@ -141,7 +141,7 @@ async function reschedule(c, l, asOf, { force = false } = {}) {
     const n = Number(l.term_months);
     const first = rows[0];
     const r = S.periodRate(t, ymd(l.disbursed_on), ymd(first.nominal_due));
-    fixedShare = l.method === 'REDUCING_EQUAL_INSTALLMENTS' ? annuityPayment(P, r, inputs.amortization || n) : round2(P / (inputs.amortization || n));
+    fixedShare = l.method === 'REDUCING_EQUAL_INSTALLMENTS' ? annuityPayment(P, r, inputs.amortization || n, inputs.decimals) : S.roundTo(P / (inputs.amortization || n), inputs.decimals);
   }
 
   const periods = future.map((r, i) => ({
@@ -150,7 +150,7 @@ async function reschedule(c, l, asOf, { force = false } = {}) {
   const amortization = inputs.amortization ? Math.max(future.length, inputs.amortization - past.length) : null;
   let lines = S.planInstallments({
     principal: remaining, terms: t, method: l.method, periods, fixedShare, amortization,
-    rounding: inputs.rounding, extraFirstInterest: Math.max(0, b.interest),
+    rounding: inputs.rounding, extraFirstInterest: Math.max(0, b.interest), decimals: inputs.decimals,
   });
   if (lines.length > future.length) {
     // More periods than dates: fold the tail into the last dated line.

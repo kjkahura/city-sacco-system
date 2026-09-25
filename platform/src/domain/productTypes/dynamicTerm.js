@@ -68,7 +68,8 @@ const dynamicTerm = {
   accrualBase(l) {
     const unpaidInterest = Math.max(0, round2(l.interest_accrued - l.interest_paid));
     const t = ledger.terms(l);
-    const onInterestToo = t.interestType === 'COMPOUND' || (t.interestType === 'SIMPLE' && l.simple_base === 'PRINCIPAL_AND_INTEREST');
+    const onInterestToo = t.interestType === 'COMPOUND' || t.interestType === 'COMPOUND_DAILY_REST'
+      || (t.interestType === 'SIMPLE' && l.simple_base === 'PRINCIPAL_AND_INTEREST');
     return round2(ledger.principalOutstanding(l) + (onInterestToo ? unpaidInterest : 0));
   },
   dailyAccrual: (l, t, { base, fromIso, date }) => interestBetween(base, t, fromIso, date, { exact: true }),

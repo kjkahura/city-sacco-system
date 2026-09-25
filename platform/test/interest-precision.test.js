@@ -159,6 +159,85 @@ const preview = (productId, disbursedOn, termMonths = 6) => T((c) => L.previewSc
     const nwLoan = await disbursed('NW3', 6000, 6, d0);
     const saved = await Rd(async (c) => (await c.query('SELECT due_date::text AS d, nominal_due::text AS n FROM loan_installments WHERE loan_id = $1 ORDER BY number', [nwLoan.id])).rows);
     check('a disbursed loan is saved with the extended dates', saved.map((x) => x.d).join(',') === due(extH).join(',') && saved.every((x) => x.d === x.n), saved.map((x) => x.d).join(','));
+
+    // ----------------------------------------------------------------------
+    section('leftover principal on the first or last installment');
+    await Promise.all([
+      mk('RL', { productType: 'DYNAMIC_TERM', method: 'REDUCING_EQUAL_INSTALLMENTS', monthlyRate: 2, firstDueOffsetDays: 20 }),
+      mk('RF', { productType: 'DYNAMIC_TERM', method: 'REDUCING_EQUAL_INSTALLMENTS', monthlyRate: 2, firstDueOffsetDays: 20, residualInstallment: 'FIRST' }),
+    ]);
+    const tot = (x) => round(x.principal + x.interest);
+    const rl = (await T((c) => L.previewSchedule(c, { productId: 'RL', principal: 60000, termMonths: 6, disbursedOn: '2026-04-01' }))).installments;
+    const rf = (await T((c) => L.previewSchedule(c, { productId: 'RF', principal: 60000, termMonths: 6, disbursedOn: '2026-04-01' }))).installments;
+    check('a long first period leaves principal over, which lands on the last installment by default',
+      tot(rl[5]) > tot(rl[2]) + 1, rl.map(tot).join(','));
+    check('or on the first, leaving the last in line with the rest',
+      Math.abs(tot(rf[5]) - tot(rf[2])) <= 0.05 && round(rf.reduce((a, x) => a + x.principal, 0)) === 60000, rf.map(tot).join(','));
+
+    section('capitalized interest on declining balance');
+    await mk('CAPR', { productType: 'DYNAMIC_TERM', method: 'REDUCING', interestType: 'CAPITALIZED', monthlyRate: 1 });
+    const capr = (await T((c) => L.previewSchedule(c, { productId: 'CAPR', principal: 1000, termMonths: 5, disbursedOn: '2026-04-01' }))).installments;
+    check('every installment but the last is interest only; the whole principal falls due at the end, as in Mambu',
+      capr.slice(0, 4).every((x) => x.principal === 0 && x.interest === 10) && capr[4].principal === 1000, JSON.stringify(capr.map((x) => [x.principal, x.interest])));
+
+    section('compound interest with daily rest');
+    const dr = await mk('DR', { productType: 'DYNAMIC_TERM', method: 'REDUCING_EQUAL_INSTALLMENTS', interestType: 'COMPOUND_DAILY_REST', rateFrequency: 'PER_YEAR', monthlyRate: 12, dayCount: 'ACTUAL_365' });
+    check('a product takes daily rest', dr.status === 201, dr.source);
+    const drT = { rate: 12, frequency: 'PER_YEAR', convention: 'ACTUAL_365', interestType: 'COMPOUND_DAILY_REST' };
+    check('thirty days on 100,000 at 12% is 100,000 x ((1 + 0.12/365)^30 - 1)',
+      S.interestBetween(100000, drT, '2026-04-01', '2026-05-01', { exact: true }).toFixed(6) === (100000 * ((1 + 0.12 / 365) ** 30 - 1)).toFixed(6));
+    const pmt = (100000 * (0.12 / 365) / (1 - (1 + 0.12 / 365) ** -(12 / 12 * 365))) * 365 / 12;
+    const drs = (await T((c) => L.previewSchedule(c, { productId: 'DR', principal: 100000, termMonths: 12, disbursedOn: '2026-04-01' }))).installments;
+    check('the payment is PMT(daily, months/12 x 365, -P) x 365/12', round(drs[0].principal + drs[0].interest) === round(pmt), `${round(drs[0].principal + drs[0].interest)} vs ${round(pmt)}`);
+    const drBad = await mk('DRF', { productType: 'FIXED_TERM', method: 'FLAT', interestType: 'COMPOUND_DAILY_REST', monthlyRate: 1 });
+    check('and not on a flat product', drBad.status === 400);
+    const revCmp = await mk('RVC', { productType: 'REVOLVING', method: 'REDUCING', interestType: 'COMPOUND', monthlyRate: 1, revolvingRepaymentMethod: 'PRINCIPAL_PERCENT', revolvingRepaymentValue: 10 });
+    check('compound interest is refused on revolving products, as in Mambu', revCmp.status === 400 && /REVOLVING/.test(revCmp.source), revCmp.source);
+
+    section('BUS/252');
+    const bus = { rate: 10, frequency: 'PER_YEAR', convention: 'BUS_252', interestType: 'COMPOUND' };
+    check('one working day on 10,000 at 10%: 3.78 (Mambu\'s figure)', S.interestBetween(10000, bus, '2022-05-02', '2022-05-03') === 3.78);
+    check('May 2022, 22 working days: 83.55 (Mambu\'s figure)', S.interestBetween(10000, bus, '2022-04-30', '2022-05-31') === 83.55,
+      String(S.interestBetween(10000, bus, '2022-04-30', '2022-05-31')));
+    check('a holiday is not a working day', S.interestBetween(10000, { ...bus, holidays: new Set(['2022-05-02']) }, '2022-04-30', '2022-05-31')
+      === round(10000 * (1.1 ** (21 / 252) - 1)));
+    const busBad = await mk('BUSS', { productType: 'DYNAMIC_TERM', method: 'REDUCING', monthlyRate: 1, dayCount: 'BUS_252' });
+    const busOk = await mk('BUSC', { productType: 'DYNAMIC_TERM', method: 'REDUCING', interestType: 'COMPOUND', rateFrequency: 'PER_YEAR', monthlyRate: 10, dayCount: 'BUS_252' });
+    check('BUS/252 only with compound interest', busBad.status === 400 && busOk.status === 201, `${busBad.status} ${busOk.status} ${busOk.source}`);
+    const busLoan = await disbursed('BUSC', 10000, 12, '2026-04-30');
+    await T((c) => c.query("INSERT INTO holidays (holiday_date, name) VALUES ('2026-05-01', 'Labour Day')"));
+    await T((c) => L.accrueInterest(c, busLoan.id, { valueDate: '2026-05-31', createdBy: 'eod' }));
+    const busDays = S.dayCount('2026-04-30', '2026-05-31', 'BUS_252', new Set(['2026-05-01', '2026-06-17', '2026-04-17']));
+    check('a loan accrues on business days, holidays on the calendar excluded',
+      Number((await loanRow(busLoan.id)).interest_accrued) === round(10000 * (1.1 ** (busDays / 252) - 1)), `${(await loanRow(busLoan.id)).interest_accrued} for ${busDays} days`);
+
+    section('penalties carry their fraction too');
+    await mk('PEN', { productType: 'DYNAMIC_TERM', method: 'REDUCING', monthlyRate: 1, penaltyRate: 0.01, penaltyBasis: 'OVERDUE_PRINCIPAL' });
+    const pl = await disbursed('PEN', 3333.33, 1, '2026-03-01');
+    const dueOn = (await Rd(async (c) => (await c.query('SELECT due_date::text AS d FROM loan_installments WHERE loan_id = $1', [pl.id])).rows[0].d));
+    await T((c) => L.markArrears(c, { asOf: addDays(dueOn, 1) }));
+    const P = require('../src/domain/penalties');
+    for (let d = 1; d <= 30; d += 1) await T((c) => P.accrueForLoan(c, pl.id, { asOf: addDays(dueOn, d) }));
+    await T((c) => P.accrueForLoan(c, pl.id, { asOf: addDays(dueOn, 30) }));
+    check('thirty days at 0.01% a day on 3,333.33 is 10.00, not 9.90, and a rerun adds nothing',
+      Number((await loanRow(pl.id)).penalty_accrued) === 10, String((await loanRow(pl.id)).penalty_accrued));
+
+    section('currency decimals');
+    const set0 = await call('PUT', '/api/accounting/settings', { currencyDecimals: 0 });
+    check('a tenant in a currency without cents sets 0 decimals', set0.status === 200 && Number(set0.body.currency_decimals) === 0, `${set0.status} ${set0.source}`);
+    const whole = (await T((c) => L.previewSchedule(c, { productId: 'DYN', principal: 100000, termMonths: 7, disbursedOn: '2026-04-01' }))).installments;
+    check('schedule amounts are whole units', whole.every((x) => Number.isInteger(x.principal) && Number.isInteger(x.interest))
+      && whole.reduce((a, x) => a + x.principal, 0) === 100000, JSON.stringify(whole.map((x) => [x.principal, x.interest])));
+    const wl = await disbursed('DYN', 10000, 12, '2026-04-01');
+    const wdays = [];
+    for (let d = 1; d <= 30; d += 1) {
+      const r = await T((c) => L.accrueInterest(c, wl.id, { valueDate: addDays('2026-04-01', d), createdBy: 'eod' }));
+      wdays.push(r ? Number(r.amount) : 0);
+    }
+    check('daily accrual posts whole units and still adds up to 100', Number((await loanRow(wl.id)).interest_accrued) === 100
+      && wdays.every((a) => Number.isInteger(a)), wdays.join(','));
+    await call('PUT', '/api/accounting/settings', { currencyDecimals: 2 });
+    check('trial balance balances at the end', (await Rd((c) => acct.trialBalance(c))).balanced);
   } catch (e) {
     fail++; failures.push(`threw: ${e.stack}`);
     console.error(`\nFAILED: ${e.stack}`);
