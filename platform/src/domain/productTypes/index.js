@@ -44,8 +44,8 @@ const { revolving } = require('./revolving');
  *   beforeRepayment(c, l, {asOf, createdBy}, ops)  -> the loan, refreshed
  *   closesWhenPaid                   a zero balance closes the loan
  *   surplusToCreditBalance(l)        an overpayment stays on the loan
- *   installmentScope(asOf)           which installments a payment settles
- *   afterRepayment(c, fresh, {asOf, principal, interest}, ops)  -> redraw
+ *   installmentScope(asOf, l)        which installments a payment settles
+ *   afterRepayment(c, fresh, {asOf, principal, interest, createdBy}, ops)  -> redraw
  *   redrawsOnReversal                a reversal redraws the schedule
  *
  *   interest

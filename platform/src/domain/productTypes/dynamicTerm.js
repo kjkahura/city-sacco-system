@@ -31,7 +31,7 @@ const dynamicTerm = {
   // ---- schedule ------------------------------------------------------------
   /** Redraw on a prepayment when the product says so, or when forced (a later tranche). */
   redrawsOnPrepayment: (l, { force = false } = {}) => force
-    || Boolean(l.prepayment_recalculation && l.prepayment_recalculation !== 'NONE'),
+    || Boolean(l.prepayment_recalculation && l.prepayment_recalculation !== 'NONE' && l.prepayment_allocation !== 'NEXT_INSTALLMENTS'),
   upfrontFeesOnSchedule: false,
   paymentDueFeesByCalendar: true,
   paymentDueHorizon: (date) => date,
@@ -41,15 +41,21 @@ const dynamicTerm = {
 
   // ---- repayment -------------------------------------------------------------
   bringsInterestToDate: true,
-  /** Interest and payment-due fees up to the payment date, so a prepayment pays what it has actually earned. */
+  /**
+   * Interest and payment-due fees up to the payment date, so a prepayment
+   * pays what it has actually earned. Under MANUAL prepayment interest the
+   * interest is applied after the payment instead (afterRepayment).
+   */
   async beforeRepayment(c, l, { asOf, createdBy }, ops) {
-    await ops.accrueInterest(c, l.id, { valueDate: asOf, createdBy });
+    if (l.prepayment_interest !== 'MANUAL') await ops.accrueInterest(c, l.id, { valueDate: asOf, createdBy });
     await ops.fees.applyPaymentDueFees(c, l, asOf);
     return ops.lock(c, l.id);
   },
-  installmentScope: (asOf) => ({ dueBy: asOf }),
+  /** What has fallen due; under NEXT_INSTALLMENTS a prepayment goes on to the next installments in turn. */
+  installmentScope: (asOf, l = {}) => (l.prepayment_allocation === 'NEXT_INSTALLMENTS' ? {} : { dueBy: asOf }),
   /** Redraw the future from the new balance once principal or interest moved. */
-  async afterRepayment(c, fresh, { asOf, principal, interest }, ops) {
+  async afterRepayment(c, fresh, { asOf, principal, interest, createdBy }, ops) {
+    if (fresh.prepayment_interest === 'MANUAL') await ops.accrueInterest(c, fresh.id, { valueDate: asOf, createdBy });
     if (!(principal > 0 || interest > 0)) return null;
     return ops.reschedule(c, fresh, asOf);
   },
