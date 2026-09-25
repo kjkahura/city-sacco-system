@@ -15,6 +15,7 @@ const SEC = require('../domain/securities');
 const FU = require('../domain/funding');
 const RV = require('../domain/revolving');
 const WO = require('../domain/writeOffs');
+const RATES = require('../domain/rates');
 
 const router = express.Router();
 
@@ -63,6 +64,10 @@ router.get('/write-off-requests', requireAuth(), async (req, res, next) => {
     sendPage(res, await withTenantRead(req.tenant.schema_name, (c) => WO.pendingRequests(c, req.query)));
   } catch (e) { next(e); }
 });
+
+// Review every indexed or adjustable loan's rate (the end of day does this).
+router.post('/rates/review', ...tx((c, req, _res, { actor }) =>
+  RATES.reviewAll(c, { date: req.body?.asOf, createdBy: actor }), APPROVER));
 
 router.get('/controls', requireAuth(), async (req, res, next) => {
   try { res.json(await withTenantRead(req.tenant.schema_name, (c) => W.controls(c))); } catch (e) { next(e); }
@@ -282,6 +287,9 @@ router.post('/:id/write-off', ...tx(async (c, req, res, { actor, user }) => {
   return await WO.requestWriteOff(c, req.params.id, { ...req.body, createdBy: actor, user });
 }, TELLER));
 router.get('/:id/write-off', ...read((c, req) => WO.requestsFor(c, req.params.id)));
+router.get('/:id/rates', ...read((c, req) => RATES.historyOf(c, req.params.id)));
+router.post('/:id/rates/review', ...tx((c, req, _res, { actor }) =>
+  RATES.reviewLoan(c, req.params.id, { date: req.body?.asOf, createdBy: actor }).then((x) => x || { changed: false }), APPROVER));
 router.post('/:id/write-off/approve', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
   return await WO.decide(c, req.params.id, { approve: true, note: req.body?.note, createdBy: actor, user });

@@ -6,6 +6,7 @@ const L = require('../domain/loans');
 const P = require('../domain/penalties');
 const F = require('../domain/fees');
 const W = require('../domain/workflow');
+const RATES = require('../domain/rates');
 const P2 = require('../domain/provisioning');
 const CL = require('../domain/close');
 
@@ -43,6 +44,14 @@ async function finish(runId, status, detail = {}, error = null) {
 }
 
 const JOBS = {
+  /**
+   * Review indexed and adjustable loan rates before the night's interest,
+   * so interest from a change date is at the new rate.
+   */
+  async reviewRates(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => RATES.reviewAll(c, { date: businessDate, createdBy: 'EOD' }));
+  },
+
   /** Accrue a period's interest on every active loan. */
   async accrueInterest(tenant, businessDate) {
     return withTenant(tenant.schema_name, async (c) => {
@@ -223,7 +232,7 @@ async function runJob(tenant, job, { businessDate = null, force = false } = {}) 
  * posts, arrears before penalties (penalties read arrears state), and
  * provisioning last because it reads the arrears the others just produced.
  */
-const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'accrueInterest', 'accrueSavings', 'markArrears', 'accruePenalties',
+const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'reviewRates', 'accrueInterest', 'accrueSavings', 'markArrears', 'accruePenalties',
   'applyFees', 'enforceControls', 'provision', 'postAccruals', 'autoClosure'];
 
 async function runAll({ businessDate = null, jobs = DEFAULT_JOBS, force = false } = {}) {

@@ -36,6 +36,8 @@ const ENUMS = {
   method: ['FLAT', 'REDUCING', 'REDUCING_EQUAL_INSTALLMENTS'],
   interest_type: ['SIMPLE', 'CAPITALIZED', 'COMPOUND', 'COMPOUND_DAILY_REST'],
   residual_installment: ['FIRST', 'LAST'],
+  interest_rate_source: ['FIXED', 'INDEX'],
+  rate_review_unit: ['DAYS', 'WEEKS', 'MONTHS'],
   simple_base: ['PRINCIPAL_ONLY', 'PRINCIPAL_AND_INTEREST'],
   interest_posting: ['ON_REPAYMENT', 'ON_DISBURSEMENT'],
   rate_frequency: ['PER_YEAR', 'PER_MONTH', 'PER_WEEK', 'PER_DAY'],
@@ -72,6 +74,9 @@ const FIELDS = {
   repaymentIntervalUnit: 'repayment_interval_unit', repaymentIntervalCount: 'repayment_interval_count',
   fixedDaysOfMonth: 'fixed_days_of_month', shortMonthHandling: 'short_month_handling', nonWorkingDays: 'non_working_days',
   residualInstallment: 'residual_installment',
+  interestRateSource: 'interest_rate_source', indexSourceId: 'index_source_id', rateFloor: 'rate_floor', rateCeiling: 'rate_ceiling',
+  rateReviewCount: 'rate_review_count', rateReviewUnit: 'rate_review_unit', adjustableRates: 'adjustable_rates',
+  allowedIndexSources: 'allowed_index_sources', allowNegativeRate: 'allow_negative_rate',
   firstDueOffsetDays: 'first_due_offset_days', firstDueOffsetMin: 'first_due_offset_min', firstDueOffsetMax: 'first_due_offset_max',
   graceType: 'grace_type', gracePeriods: 'grace_periods', amortizationPeriods: 'amortization_periods', rounding: 'rounding',
   processingFee: 'processing_fee', allowArbitraryFees: 'allow_arbitrary_fees',
@@ -109,7 +114,7 @@ FIELDS.penaltyGraceDays = 'penalty_tolerance_days';
 
 // Settings that change how a loan's interest is worked out. Frozen once a
 // loan exists under the product.
-const FROZEN_WITH_LOANS = ['product_type', 'method', 'interest_type', 'simple_base', 'interest_posting',
+const FROZEN_WITH_LOANS = ['product_type', 'method', 'interest_type', 'simple_base', 'interest_posting', 'interest_rate_source',
   'rate_frequency', 'day_count', 'repayment_interval_unit', 'repayment_interval_count', 'fixed_days_of_month',
   'tax_method', 'funding_enabled', 'funder_allocation'];
 
@@ -129,6 +134,9 @@ const publicProduct = (p) => ({
   repaymentIntervalUnit: p.repayment_interval_unit, repaymentIntervalCount: p.repayment_interval_count,
   fixedDaysOfMonth: p.fixed_days_of_month, shortMonthHandling: p.short_month_handling, nonWorkingDays: p.non_working_days,
   residualInstallment: p.residual_installment,
+  interestRateSource: p.interest_rate_source, indexSourceId: p.index_source_id, rateFloor: num(p.rate_floor), rateCeiling: num(p.rate_ceiling),
+  rateReviewCount: p.rate_review_count, rateReviewUnit: p.rate_review_unit, adjustableRates: p.adjustable_rates,
+  allowedIndexSources: p.allowed_index_sources, allowNegativeRate: p.allow_negative_rate,
   firstDueOffsetDays: p.first_due_offset_days, firstDueOffsetMin: p.first_due_offset_min, firstDueOffsetMax: p.first_due_offset_max,
   graceType: p.grace_type, gracePeriods: p.grace_periods, amortizationPeriods: p.amortization_periods, rounding: p.rounding,
   processingFee: Number(p.processing_fee), allowArbitraryFees: p.allow_arbitrary_fees,
@@ -180,7 +188,7 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
   const problems = [];
   // Null clears a setting that may be unset (the revolving method on a
   // product that is not revolving); the rest must be one of the list.
-  const NULLABLE_ENUMS = ['revolving_repayment_method'];
+  const NULLABLE_ENUMS = ['revolving_repayment_method', 'rate_review_unit'];
   for (const [col, allowed] of Object.entries(ENUMS)) {
     if (cols[col] === undefined) continue;
     if (cols[col] === null && NULLABLE_ENUMS.includes(col)) continue;
@@ -197,6 +205,23 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
     const changed = FROZEN_WITH_LOANS.filter((k) => k !== 'product_type' && cols[k] !== undefined && JSON.stringify(cols[k]) !== JSON.stringify(before[k]));
     if (changed.length) problems.push(`${changed.join(', ')} cannot change while ${loans} loan(s) exist under the product; create a new product`);
   }
+  if (merged.interest_rate_source === 'INDEX' || merged.adjustable_rates) {
+    const what = merged.interest_rate_source === 'INDEX' ? 'an INDEX rate' : 'adjustable rates';
+    if (method === 'FLAT') problems.push(`${what} cannot be FLAT: a flat product's interest is fixed from the start`);
+    if (type === 'INTEREST_FREE') problems.push(`an INTEREST_FREE product cannot take ${what}`);
+    const ids = [...new Set([...(merged.allowed_index_sources || []), ...(merged.index_source_id ? [merged.index_source_id] : [])])];
+    if (ids.length) {
+      const { rows: known } = await c.query('SELECT id FROM index_rate_sources WHERE id = ANY($1)', [ids]);
+      const unknown = ids.filter((x) => !known.some((k) => k.id === x));
+      if (unknown.length) problems.push(`unknown index rate source: ${unknown.join(', ')}`);
+    }
+  }
+  if (merged.interest_rate_source === 'INDEX') {
+    if (!merged.index_source_id) problems.push('an INDEX product needs index_source_id');
+    if (!merged.rate_review_count || !merged.rate_review_unit) problems.push('an INDEX product needs rate_review_count and rate_review_unit');
+  }
+  if (merged.rate_floor !== null && merged.rate_floor !== undefined && merged.rate_ceiling !== null && merged.rate_ceiling !== undefined
+    && Number(merged.rate_floor) > Number(merged.rate_ceiling)) problems.push('rate_floor exceeds rate_ceiling');
   if (['DYNAMIC_TERM', 'TRANCHED', 'REVOLVING'].includes(type) && method === 'FLAT') {
     problems.push(`a ${type} product cannot use the FLAT method; use REDUCING or REDUCING_EQUAL_INSTALLMENTS`);
   }
@@ -230,7 +255,7 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
 
   for (const col of ['accrue_late_interest', 'enforce_deposit_multiplier', 'require_guarantor_cover', 'is_active', 'allow_arbitrary_fees',
     'credit_balance_enabled', 'enable_guarantors', 'enable_collateral', 'tax_on_interest', 'tax_on_fees', 'tax_on_penalties',
-    'funding_enabled', 'lock_funds_at_approval']) {
+    'funding_enabled', 'lock_funds_at_approval', 'adjustable_rates', 'allow_negative_rate']) {
     if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
   }
   const nonNeg = ['monthly_rate', 'rate_min', 'rate_max', 'processing_fee', 'penalty_rate', 'penalty_rate_min', 'penalty_rate_max',
@@ -238,7 +263,11 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
     'min_principal', 'max_principal', 'default_principal', 'charge_cap_percent', 'first_due_offset_days', 'grace_periods',
     'revolving_repayment_value', 'revolving_repayment_floor', 'revolving_repayment_ceiling', 'max_credit_balance', 'tax_rate_percent',
     'org_commission', 'org_commission_min', 'org_commission_max', 'funder_rate_default', 'funder_rate_min', 'funder_rate_max'];
+  // A product whose rate is an index plus a spread may allow a negative
+  // spread (a discount on the index); its rate and band are the spread's.
+  const spreadsMayBeNegative = merged.allow_negative_rate && (merged.interest_rate_source === 'INDEX' || merged.adjustable_rates);
   for (const col of nonNeg) {
+    if (spreadsMayBeNegative && ['monthly_rate', 'rate_min', 'rate_max'].includes(col)) continue;
     if (cols[col] !== undefined && cols[col] !== null && !(Number(cols[col]) >= 0)) problems.push(`${col} must be zero or more`);
   }
   for (const col of ['max_term', 'min_term', 'default_term', 'repayment_interval_count', 'amortization_periods', 'auto_close_paid_off_days', 'auto_lock_arrears_days', 'id_next']) {

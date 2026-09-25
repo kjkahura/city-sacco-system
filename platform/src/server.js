@@ -122,6 +122,7 @@ const savings = require('./routes/savings');
 tenantApi.use('/savings', savings);
 tenantApi.use('/loans', require('./routes/loans'));
 tenantApi.use('/loan-products', require('./routes/loanProducts'));
+tenantApi.use('/index-rates', require('./routes/indexRates'));
 tenantApi.use('/accounting', savings.accounting);
 const branchRoutes = require('./routes/branches');
 tenantApi.use('/branches', branchRoutes.branches);

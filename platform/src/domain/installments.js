@@ -121,8 +121,12 @@ async function previewSchedule(c, { productId, principal, termMonths, monthlyRat
  * is the rest of the period on the new balance, plus whatever had accrued on
  * the old balance and is still unpaid.
  */
-async function reschedule(c, l, asOf, { force = false } = {}) {
-  if (!types.forLoan(l).redrawsOnPrepayment(l, { force })) return null;
+async function reschedule(c, l, asOf, { force = false, rateChange = false } = {}) {
+  // A change of interest rate (./rates) redraws the future of any loan that
+  // has a schedule, fixed term included; a prepayment only where the
+  // product type says so.
+  const type = types.forLoan(l);
+  if (rateChange ? !type.schedulesUpfront : !type.redrawsOnPrepayment(l, { force })) return null;
   const date = ymd(asOf);
   const { rows } = await c.query('SELECT * FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]);
   const past = rows.filter((r) => ymd(r.due_date) <= date);
@@ -136,7 +140,7 @@ async function reschedule(c, l, asOf, { force = false } = {}) {
   const t = inputs.terms;
 
   let fixedShare = null;
-  if (!force && l.prepayment_recalculation === 'REDUCE_NUMBER_OF_INSTALLMENTS') {
+  if (!force && !rateChange && l.prepayment_recalculation === 'REDUCE_NUMBER_OF_INSTALLMENTS') {
     const P = Number(l.principal);
     const n = Number(l.term_months);
     const first = rows[0];
@@ -150,7 +154,10 @@ async function reschedule(c, l, asOf, { force = false } = {}) {
   const amortization = inputs.amortization ? Math.max(future.length, inputs.amortization - past.length) : null;
   let lines = S.planInstallments({
     principal: remaining, terms: t, method: l.method, periods, fixedShare, amortization,
-    rounding: inputs.rounding, extraFirstInterest: Math.max(0, b.interest), decimals: inputs.decimals,
+    // On a fixed-term loan redrawn for a new rate at a due date, the interest
+    // owed belongs to the installments already due; it is not carried in.
+    rounding: inputs.rounding, extraFirstInterest: rateChange && type.basis === 'SCHEDULE' ? 0 : Math.max(0, b.interest),
+    decimals: inputs.decimals,
   });
   if (lines.length > future.length) {
     // More periods than dates: fold the tail into the last dated line.
@@ -171,7 +178,7 @@ async function reschedule(c, l, asOf, { force = false } = {}) {
     'UPDATE loan_accounts SET rescheduled_at = now(), reschedule_count = reschedule_count + 1 WHERE id = $1', [l.id]
   );
   return {
-    recalculation: force ? 'REDUCE_INSTALLMENT_AMOUNT' : l.prepayment_recalculation, remaining, dropped: future.length - installments.length,
+    recalculation: force || rateChange ? 'REDUCE_INSTALLMENT_AMOUNT' : l.prepayment_recalculation, remaining, dropped: future.length - installments.length,
     installments,
   };
 }
