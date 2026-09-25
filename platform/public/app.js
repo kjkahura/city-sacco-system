@@ -1166,7 +1166,7 @@ const PRODUCT_FIELDS = (p = {}) => [
   opt({ label: 'Revolving: maximum credit balance', name: 'maxCreditBalance', type: 'number', step: '0.01', value: p.revolving?.maxCreditBalance ?? '' }),
   opt({ label: 'Revolving: credit balance GL (liability)', name: 'glCreditBalance', value: p.revolving?.glCreditBalance || '200-310' }),
   { label: 'Interest method', name: 'method', options: ['FLAT', 'REDUCING', 'REDUCING_EQUAL_INSTALLMENTS'], value: p.method || 'FLAT' },
-  { label: 'Interest type', name: 'interestType', options: ['SIMPLE', 'CAPITALIZED', 'COMPOUND'], value: p.interestType || 'SIMPLE' },
+  { label: 'Interest type', name: 'interestType', options: ['SIMPLE', 'CAPITALIZED', 'COMPOUND', 'COMPOUND_DAILY_REST'], value: p.interestType || 'SIMPLE' },
   { label: 'Simple interest base', name: 'simpleBase', options: ['PRINCIPAL_ONLY', 'PRINCIPAL_AND_INTEREST'], value: p.simpleBase || 'PRINCIPAL_ONLY' },
   { label: 'Interest applied', name: 'interestPosting', options: ['ON_REPAYMENT', 'ON_DISBURSEMENT'], value: p.interestPosting || 'ON_REPAYMENT' },
   { label: 'Rate quoted', name: 'rateFrequency', options: ['PER_MONTH', 'PER_YEAR', 'PER_WEEK', 'PER_DAY'], value: p.rateFrequency || 'PER_MONTH' },
@@ -1185,6 +1185,7 @@ const PRODUCT_FIELDS = (p = {}) => [
   { label: 'Repayment interval unit', name: 'repaymentIntervalUnit', options: ['MONTHS', 'WEEKS', 'DAYS'], value: p.repaymentIntervalUnit || 'MONTHS' },
   opt({ label: 'Or fixed days of month, comma separated (e.g. 1,15)', name: 'fixedDaysOfMonth', value: (p.fixedDaysOfMonth || []).join(',') }),
   { label: 'Short month handling', name: 'shortMonthHandling', options: ['LAST_DAY', 'FIRST_OF_NEXT'], value: p.shortMonthHandling || 'LAST_DAY' },
+  { label: 'Leftover principal goes on', name: 'residualInstallment', options: ['LAST', 'FIRST'], value: p.residualInstallment || 'LAST' },
   { label: 'Installment on a non-working day', name: 'nonWorkingDays', options: ['MOVE_FORWARD', 'MOVE_BACKWARD', 'DO_NOT_RESCHEDULE', 'EXTEND_SCHEDULE'], value: p.nonWorkingDays || 'MOVE_FORWARD' },
   { label: 'First due date offset, days', name: 'firstDueOffsetDays', type: 'number', value: p.firstDueOffsetDays ?? 0 },
   { label: 'Grace', name: 'graceType', options: ['NONE', 'PRINCIPAL', 'PURE'], value: p.graceType || 'NONE' },
@@ -1227,11 +1228,11 @@ const PRODUCT_FIELDS = (p = {}) => [
   { label: 'Accrued interest reaches the ledger (ACCRUAL only)', name: 'interestAccruedAccounting', options: ['DAILY', 'MONTHLY', 'NONE'], value: p.interestAccruedAccounting || 'DAILY' },
   { label: 'Accrual entries', name: 'accrualGranularity', options: ['PER_ACCOUNT', 'AGGREGATED'], value: p.accrualGranularity || 'PER_ACCOUNT' },
   { label: 'Interest added to what is owed', name: 'interestAccrual', options: ['DAILY', 'MONTHLY', 'NONE'], value: p.interestAccrual || 'DAILY' },
-  { label: 'Day count', name: 'dayCount', options: ['THIRTY_360', 'ACTUAL_365', 'ACTUAL_360', 'ACTUAL_ACTUAL'], value: p.dayCount || 'THIRTY_360' },
+  { label: 'Day count', name: 'dayCount', options: ['THIRTY_360', 'ACTUAL_365', 'ACTUAL_360', 'ACTUAL_ACTUAL', 'BUS_252'], value: p.dayCount || 'THIRTY_360' },
 ];
 
 const PRODUCT_ENUM_FIELDS = ['category', 'idMode', 'initialState', 'productType', 'method', 'interestType', 'simpleBase', 'interestPosting',
-  'rateFrequency', 'prepaymentRecalculation', 'repaymentIntervalUnit', 'shortMonthHandling', 'nonWorkingDays', 'graceType', 'rounding',
+  'rateFrequency', 'prepaymentRecalculation', 'repaymentIntervalUnit', 'shortMonthHandling', 'nonWorkingDays', 'residualInstallment', 'graceType', 'rounding',
   'arrearsCountFrom', 'arrearsNonWorkingDays', 'penaltyBasis', 'chargeCapBase', 'chargeCapMode', 'accountingMethod', 'interestAccrual', 'dayCount',
   'taxMethod', 'funderAllocation', 'interestAccruedAccounting', 'accrualGranularity'];
 const PRODUCT_NUM_FIELDS = ['monthlyRate', 'rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm', 'maxTerm',

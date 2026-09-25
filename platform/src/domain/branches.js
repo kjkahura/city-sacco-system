@@ -162,11 +162,18 @@ async function settings(c) {
   return s;
 }
 
-async function updateSettings(c, { autoClosureEnabled, autoClosureIntervalDays, glSuspense, createdBy } = {}) {
+async function updateSettings(c, { autoClosureEnabled, autoClosureIntervalDays, glSuspense, currencyDecimals, createdBy } = {}) {
   const before = await settings(c);
   if (autoClosureIntervalDays !== undefined && autoClosureIntervalDays !== null
     && !(Number.isInteger(Number(autoClosureIntervalDays)) && Number(autoClosureIntervalDays) >= 1 && Number(autoClosureIntervalDays) <= 366)) {
     throw err('AUTOMATED_ACCOUNTING_CLOSURES_INTERVAL_MUST_BE_1_TO_366_DAYS', 400);
+  }
+  // The currency's minor units, for amounts worked out from a rate
+  // (schedules, interest and penalty accruals). Set from the tenant's
+  // currency when the tenant is created; changeable for a currency whose
+  // cents have gone out of use.
+  if (currencyDecimals !== undefined && !(Number.isInteger(Number(currencyDecimals)) && Number(currencyDecimals) >= 0 && Number(currencyDecimals) <= 4)) {
+    throw err('CURRENCY_DECIMALS_MUST_BE_0_TO_4', 400);
   }
   const enabling = autoClosureEnabled ?? before.auto_closure_enabled;
   const interval = autoClosureIntervalDays ?? before.auto_closure_interval_days;
@@ -177,8 +184,9 @@ async function updateSettings(c, { autoClosureEnabled, autoClosureIntervalDays, 
   }
   const { rows: [after] } = await c.query(
     `UPDATE accounting_settings SET auto_closure_enabled = $1, auto_closure_interval_days = $2,
-       gl_suspense = COALESCE($3, gl_suspense), updated_at = now() WHERE only_row RETURNING *`,
-    [Boolean(enabling), interval || null, glSuspense || null]);
+       gl_suspense = COALESCE($3, gl_suspense), currency_decimals = COALESCE($4, currency_decimals),
+       updated_at = now() WHERE only_row RETURNING *`,
+    [Boolean(enabling), interval || null, glSuspense || null, currencyDecimals === undefined ? null : Number(currencyDecimals)]);
   await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'ACCOUNTING_SETTINGS_CHANGED','accounting_settings','1',$2,$3)`,
     [createdBy || 'SYSTEM', JSON.stringify(before), JSON.stringify(after)]);
   return after;

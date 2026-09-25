@@ -10,7 +10,7 @@ const accruals = require('./accruals');
 const { round2 } = acct;
 const { ymd, isoDate, toUTC, interestBetween } = S;
 const {
-  lock, terms, interestAccrues, booksEntries, post, isMonthEnd,
+  lock, termsFor, interestAccrues, booksEntries, post, isMonthEnd,
 } = require('./ledger');
 const types = require('./productTypes');
 
@@ -64,7 +64,7 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   const fromIso = ymd(from);
   if (date <= fromIso) return null;
 
-  const t = terms(l);
+  const t = await termsFor(c, l);
   const capitalizing = type.capitalizes(l);
   const { rows: installments } = await c.query(
     'SELECT number, principal_due, interest_due, due_date, nominal_due FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]
@@ -100,7 +100,7 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
     exact = type.dailyAccrual(l, t, { base, fromIso, date, installments });
   }
   const carried = Number(l.interest_accrual_carry || 0) + exact;
-  let amt = round2(carried);
+  let amt = S.roundTo(carried, t.decimals);
   let carry = carried - amt;
 
   // A loan in arrears under a charge cap may not be charged past it; what
