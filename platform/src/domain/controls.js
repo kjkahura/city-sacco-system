@@ -28,7 +28,11 @@ const CONTROL_FIELDS = {
   maxDaysUndoClose: 'max_days_undo_close', twoManRule: 'two_man_rule',
   writeOffRequiresApproval: 'write_off_requires_approval',
   lockedPostingRoles: 'locked_posting_roles',
+  customAllocationRoles: 'custom_allocation_roles',
+  disbursementConditionsRoles: 'disbursement_conditions_roles',
 };
+// Role lists where NULL means "any role that may do the underlying action".
+const NULLABLE_ROLE_LISTS = ['custom_allocation_roles', 'disbursement_conditions_roles'];
 const ROLES = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'];
 
 async function updateControls(c, patch, { actor } = {}) {
@@ -42,6 +46,10 @@ async function updateControls(c, patch, { actor } = {}) {
     }
     if (col === 'locked_posting_roles' && (!Array.isArray(patch[k]) || patch[k].some((r) => !ROLES.includes(r)))) {
       throw err(`LOCKED_POSTING_ROLES_LIST_ANY_OF: ${ROLES.join(', ')}`, 400);
+    }
+    if (NULLABLE_ROLE_LISTS.includes(col) && patch[k] !== null
+      && (!Array.isArray(patch[k]) || patch[k].some((r) => !ROLES.includes(r)))) {
+      throw err(`${col.toUpperCase()}_LIST_ANY_OF: ${ROLES.join(', ')} (or null for any)`, 400);
     }
     vals.push(patch[k]);
     sets.push(`${col} = $${vals.length}`);
@@ -136,6 +144,27 @@ async function assertMayPostOnLocked(c, { user = null } = {}) {
   }
 }
 
+/**
+ * Mambu's permission to post repayments with a custom allocation: the roles
+ * the tenant lists, or anyone who may post repayments when it lists none.
+ */
+async function assertMayAllocateCustom(c, { user = null } = {}) {
+  const roles = (await controls(c)).custom_allocation_roles;
+  if (roles === null || roles === undefined) return;
+  if (!user || !roles.includes(user.role)) {
+    throw err(`CUSTOM_ALLOCATION_NOT_PERMITTED: needs one of ${roles.length ? roles.join(', ') : 'the roles the tenant allows (none set)'}`, 403);
+  }
+}
+
+/** Mambu's Set Disbursement Conditions permission, the same way. */
+async function assertMaySetDisbursementConditions(c, { user = null } = {}) {
+  const roles = (await controls(c)).disbursement_conditions_roles;
+  if (roles === null || roles === undefined) return;
+  if (!user || !roles.includes(user.role)) {
+    throw err(`DISBURSEMENT_CONDITIONS_NOT_PERMITTED: needs one of ${roles.length ? roles.join(', ') : 'the roles the tenant allows (none set)'}`, 403);
+  }
+}
+
 /** The tenant's staff with their approval and disbursement limits (Mambu's transaction limits on a user). */
 async function staffLimits(c, tenantId) {
   const { rows } = await c.query(
@@ -177,5 +206,6 @@ async function setUserLimits(c, tenantId, userId, { approvalLimit, disbursementL
 
 module.exports = {
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMayPostOnLocked, CONTROL_FIELDS,
+  assertMayAllocateCustom, assertMaySetDisbursementConditions,
   staffLimits, setUserLimits,
 };

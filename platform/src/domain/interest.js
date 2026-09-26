@@ -67,7 +67,8 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   const t = await termsFor(c, l);
   const capitalizing = type.capitalizes(l);
   const { rows: installments } = await c.query(
-    'SELECT number, principal_due, interest_due, due_date, nominal_due FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]
+    `SELECT number, principal_due, interest_due, due_date, nominal_due, principal_paid, status, payment_holiday, holiday_interest
+     FROM loan_installments WHERE loan_id = $1 ORDER BY number`, [l.id]
   );
 
   // How far this run may go (a dynamic loan stops at maturity unless it
@@ -114,12 +115,26 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   // Tax on interest, where the product charges it: the member owes the
   // gross, the income is the net.
   const tx = tax.split(l, 'INTEREST', amt);
+  // Interest from arrears (Mambu): on a loan that earns interest on its
+  // balance, the part of this interest earned on principal already overdue
+  // (on principal and interest overdue when interest earns interest). It is
+  // a breakdown of the interest, never added to it; the arrears tolerance
+  // does not affect it.
+  let fromArrears = 0;
+  if (type.basis === 'ACTUAL_BALANCE' && !capitalizing && tx.gross > 0 && base > 0) {
+    const late = installments.filter((i) => ymd(i.due_date) <= fromIso && !['PAID', 'GRACE'].includes(i.status));
+    const overduePrincipal = late.reduce((a, i) => a + Math.max(0, Number(i.principal_due) - Number(i.principal_paid || 0)), 0);
+    const onInterestToo = base > S.round2(Number(l.principal_disbursed) + Number(l.principal_capitalized || 0) - Number(l.principal_paid)) + 0.005;
+    const overdueBase = overduePrincipal + (onInterestToo ? late.reduce((a, i) => a + Math.max(0, Number(i.interest_due)), 0) : 0);
+    if (overdueBase > 0) fromArrears = S.roundTo(tx.gross * Math.min(1, overdueBase / base), t.decimals);
+  }
   await c.query(
     `UPDATE loan_accounts SET interest_accrued = interest_accrued + $1, accrued_through = $2::date,
        tax_charged = tax_charged + $4, interest_accrual_carry = $5,
        charges_since_arrears = charges_since_arrears + CASE WHEN status = 'IN_ARREARS' THEN $1 ELSE 0 END,
+       interest_from_arrears_accrued = interest_from_arrears_accrued + $6,
        updated_at = now() WHERE id = $3`,
-    [tx.gross, through, l.id, tx.tax, carry]
+    [tx.gross, through, l.id, tx.tax, carry, fromArrears]
   );
 
   let recorded = null;
@@ -149,6 +164,7 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
       allocation: {
         from: fromIso, through, base, exact, carry, dayCount: t.convention, method: l.interest_accrual,
         interestType: t.interestType, productType: l.product_type, basis: type.basis,
+        ...(fromArrears > 0 ? { interestFromArrears: fromArrears } : {}),
         ...(tx.tax > 0 ? { tax: tx.tax, net: tx.income } : {}),
       },
       createdBy,

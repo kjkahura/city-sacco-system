@@ -5,6 +5,7 @@ const S = require('./schedule');
 const ledger = require('./ledger');
 const types = require('./productTypes');
 const fees = require('./fees');
+const G = require('./eodGuard');
 const { err, round2 } = acct;
 const { ymd, isoDate } = S;
 
@@ -167,26 +168,33 @@ async function apply(c, loanId, { ids = null, applyOn = null, asOf = null, creat
  * set to apply on, or the installment's due date); one whose installment
  * was paid before its due date is skipped.
  */
-async function applyDue(c, { asOf = null, createdBy = 'EOD' } = {}) {
+async function applyDue(c, { asOf = null, createdBy = 'EOD', loanId = null } = {}) {
   const date = asOf ? ymd(asOf) : today();
   const { rows } = await c.query(
     `SELECT p.*, i.status AS installment_status, i.due_date FROM loan_planned_fees p
      JOIN loan_accounts l ON l.id = p.loan_id
      JOIN loan_installments i ON i.loan_id = p.loan_id AND i.number = p.installment_number
-     WHERE p.status = 'PLANNED' AND l.status IN ('ACTIVE', 'IN_ARREARS')
-       AND COALESCE(p.apply_on, i.due_date) <= $1::date
-     ORDER BY p.loan_id, p.installment_number, p.id`, [date]);
+     WHERE p.status = 'PLANNED' AND l.status IN ('ACTIVE', 'IN_ARREARS') AND ${G.EXCLUDED_SQL('l')}
+       AND COALESCE(p.apply_on, i.due_date) <= $1::date AND ($2::uuid IS NULL OR l.id = $2::uuid)
+     ORDER BY p.loan_id, p.installment_number, p.id`, [date, loanId]);
   const out = { due: rows.length, applied: 0, skipped: 0 };
+  const byLoan = new Map();
   for (const p of rows) {
-    if (!p.apply_on && p.installment_status === 'PAID') {
-      await c.query("UPDATE loan_planned_fees SET status = 'SKIPPED', reason = 'INSTALLMENT_PAID', updated_at = now() WHERE id = $1", [p.id]);
-      out.skipped += 1;
-      continue;
-    }
-    await applyNow(c, p, { date: p.apply_on ? ymd(p.apply_on) : ymd(p.due_date), createdBy });
-    out.applied += 1;
+    if (!byLoan.has(p.loan_id)) byLoan.set(p.loan_id, []);
+    byLoan.get(p.loan_id).push(p);
   }
-  return out;
+  const run = await G.eachLoan(c, { job: 'applyPlannedFees', date }, [...byLoan.keys()], async (loanId) => {
+    for (const p of byLoan.get(loanId)) {
+      if (!p.apply_on && p.installment_status === 'PAID') {
+        await c.query("UPDATE loan_planned_fees SET status = 'SKIPPED', reason = 'INSTALLMENT_PAID', updated_at = now() WHERE id = $1", [p.id]);
+        out.skipped += 1;
+        continue;
+      }
+      await applyNow(c, p, { date: p.apply_on ? ymd(p.apply_on) : ymd(p.due_date), createdBy });
+      out.applied += 1;
+    }
+  });
+  return { ...out, ...G.summary(run) };
 }
 
 async function forLoan(c, loanId) {

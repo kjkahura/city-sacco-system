@@ -7,6 +7,8 @@ const { notFound } = require('../lib/http');
 const { pageQuery, sendPage, pageParams } = require('../lib/page');
 const S = require('../domain/savings');
 const acct = require('../domain/accounting');
+const LOANS = require('../domain/loans');
+const LT = require('../domain/loanTransfers');
 
 const router = express.Router();
 const TELLER = ['TENANT_ADMIN', 'MANAGER', 'TELLER'];
@@ -103,8 +105,23 @@ router.post('/:id/interest', ...tx(async (c, req, _res, { actor }) => {
 router.post('/:id/branch', ...tx((c, req, _res, { actor }) =>
   require('../domain/branches').moveAccount(c, { kind: 'SAVINGS', accountId: req.params.id, branchId: req.body?.branchId, createdBy: actor }), APPROVER));
 
+// A repayment of a loan made from this account (any member's loan), as
+// Mambu's Transfer from a deposit account to a loan.
+router.post('/:id/loan-repayments', ...tx(async (c, req, res, { actor }) => {
+  res.status(201);
+  if (!req.body?.loanAccountId) throw acct.err('LOAN_ACCOUNT_REQUIRED', 400);
+  return await LT.repayFromDeposit(c, req.body.loanAccountId, { ...req.body, savingsAccountId: req.params.id, createdBy: actor, user: req.auth });
+}, TELLER));
+
+// Reversing one half of a transfer with a loan (a repayment made from this
+// account, or a disbursement into it) reverses the loan transaction, which
+// reverses both (Mambu: the transfer is reversed from the deposit account).
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
+  const { rows: [t] } = await c.query('SELECT allocation FROM transactions WHERE reference = $1', [req.params.reference]);
+  if (t?.allocation?.loanTransfer?.reference) {
+    return await LOANS.reverseTransaction(c, t.allocation.loanTransfer.reference, { ...req.body, createdBy: actor });
+  }
   return await S.reverseTransaction(c, req.params.reference, { ...req.body, createdBy: actor });
 }, APPROVER));
 

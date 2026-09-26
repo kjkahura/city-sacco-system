@@ -3,9 +3,11 @@
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
+const savings = require('./savings');
 const types = require('./productTypes');
 const { reschedule } = require('./installments');
 const { accrueInterest } = require('./interest');
+const G = require('./eodGuard');
 const { err } = acct;
 const { ymd, isoDate, addInterval, addDays } = S;
 
@@ -257,13 +259,89 @@ async function reviewLoan(c, loanId, { date, createdBy = 'EOD' } = {}) {
 async function reviewAll(c, { date, createdBy = 'EOD' } = {}) {
   const { rows } = await c.query(
     `SELECT DISTINCT l.id FROM loan_accounts l JOIN loan_rate_periods p ON p.loan_id = l.id
-     WHERE l.status IN ('ACTIVE', 'IN_ARREARS')`);
+     WHERE l.status IN ('ACTIVE', 'IN_ARREARS') AND ${G.EXCLUDED_SQL('l')}`);
   const changed = [];
-  for (const r of rows) {
-    const out = await reviewLoan(c, r.id, { date, createdBy });
+  const run = await G.eachLoan(c, { job: 'reviewRates', date: date ? ymd(date) : isoDate(new Date()) }, rows, async (id) => {
+    const out = await reviewLoan(c, id, { date, createdBy });
     if (out) changed.push(out);
+  });
+  return { loans: rows.length, changed: changed.length, changes: changed, ...G.summary(run) };
+}
+
+// --------------------------------------------------------------------------
+// Changing a running loan's rate by hand
+// --------------------------------------------------------------------------
+
+/**
+ * Change a running loan's interest rate (Mambu's Edit Interest Rate), or
+ * the spread of an indexed rate (Edit Interest Spread), from a date: today,
+ * a date to come, or a back date. The change is a new rate period
+ * (loan_rate_periods) from that date; a loan that had none gets one for the
+ * rate it was opened on first, so its history reads from disbursement. The
+ * rate review applies it: at once for a date that has come, at the end of
+ * the day it arrives for a later one. As with any review, a fixed-term loan
+ * takes a new rate at its next due date and its schedule is redrawn from
+ * there. Several changes may be made; the latest period in force wins.
+ *
+ * A change cannot be dated before a repayment on the loan (Mambu), nor
+ * before the day interest has been accrued to: interest already accrued
+ * here stands for Mambu's Interest Applied, which a change may not precede
+ * either. Every change is a LOAN_RATE_CHANGED transaction, non-financial,
+ * as Mambu lists it with the loan's transactions.
+ */
+async function changeRate(c, loanId, { rate = null, spread = null, effectiveFrom = null, note = null, createdBy } = {}) {
+  const l = await ledger.lock(c, loanId);
+  if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`RATE_NOT_CHANGEABLE_IN_STATE_${l.status}`, 409);
+  if (l.product_type === 'INTEREST_FREE') throw err('AN_INTEREST_FREE_LOAN_HAS_NO_RATE', 409);
+  const today = isoDate(new Date());
+  const date = effectiveFrom ? ymd(effectiveFrom) : today;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw err('INVALID_EFFECTIVE_DATE', 400);
+  if (l.disbursed_on && date < ymd(l.disbursed_on)) throw err(`RATE_CHANGE_BEFORE_DISBURSEMENT: ${ymd(l.disbursed_on)}`, 400);
+  const { rows: [paid] } = await c.query(
+    `SELECT max(value_date)::text AS d FROM transactions WHERE loan_account_id = $1 AND kind = 'LOAN_REPAYMENT' AND reversed_by IS NULL`, [l.id]);
+  if (paid?.d && date < paid.d) throw err(`RATE_CHANGE_BEFORE_A_REPAYMENT: the last is dated ${paid.d}`, 409);
+  const accrued = l.accrued_through ? ymd(l.accrued_through) : null;
+  if (accrued && date < accrued) throw err(`RATE_CHANGE_BEFORE_INTEREST_ALREADY_ACCRUED: interest is accrued through ${accrued}`, 409);
+
+  let periods = await periodsOf(c, l.id);
+  if (!periods.length) {
+    await c.query(`INSERT INTO loan_rate_periods (loan_id, valid_from, source, rate) VALUES ($1,$2::date,'FIXED',$3)`,
+      [l.id, ymd(l.disbursed_on), Number(l.monthly_rate)]);
+    await c.query("UPDATE loan_accounts SET rate_plan = 'ADJUSTABLE' WHERE id = $1 AND rate_plan IS NULL", [l.id]);
+    periods = await periodsOf(c, l.id);
   }
-  return { loans: rows.length, changed: changed.length, changes: changed };
+  const active = [...periods].reverse().find((p) => ymd(p.valid_from) <= date) || periods[0];
+  const { rows: [prod] } = await c.query('SELECT rate_min, rate_max, allow_negative_rate FROM loan_products WHERE id = $1', [l.product_id]);
+  let value;
+  if (active.source === 'INDEX') {
+    if (spread === null || spread === undefined || spread === '') throw err('AN_INDEXED_RATE_CHANGES_BY_ITS_SPREAD: give spread', 400);
+    value = Number(spread);
+    if (!Number.isFinite(value)) throw err('INVALID_SPREAD', 400);
+    if (value < 0 && !prod.allow_negative_rate) throw err('NEGATIVE_SPREAD_NOT_ALLOWED_BY_PRODUCT', 400);
+  } else {
+    if (rate === null || rate === undefined || rate === '') throw err('GIVE_THE_NEW_RATE', 400);
+    value = Number(rate);
+    if (!(Number.isFinite(value) && value >= 0)) throw err('INVALID_RATE', 400);
+    if (prod.rate_min !== null && value < Number(prod.rate_min)) throw err(`RATE_BELOW_PRODUCT_MINIMUM: ${prod.rate_min}`, 400);
+    if (prod.rate_max !== null && value > Number(prod.rate_max)) throw err(`RATE_ABOVE_PRODUCT_MAXIMUM: ${prod.rate_max}`, 400);
+  }
+  const before = Number(active.rate);
+  await c.query(
+    `INSERT INTO loan_rate_periods (loan_id, valid_from, source, index_source_id, rate, floor, ceiling, review_count, review_unit)
+     VALUES ($1,$2::date,$3,$4,$5,$6,$7,$8,$9)
+     ON CONFLICT (loan_id, valid_from) DO UPDATE SET rate = EXCLUDED.rate`,
+    [l.id, date, active.source, active.index_source_id, value, active.floor, active.ceiling, active.review_count, active.review_unit]);
+  const applied = date <= today ? await reviewLoan(c, l.id, { date: today, createdBy }) : null;
+  const tx = await savings.record(c, {
+    reference: savings.ref('LRC'), kind: 'LOAN_RATE_CHANGED', memberId: l.member_id, loanAccountId: l.id, amount: 0, valueDate: date,
+    allocation: { source: active.source, [active.source === 'INDEX' ? 'spread' : 'rate']: { from: before, to: value }, effectiveFrom: date,
+      appliedNow: Boolean(applied), ...(applied ? { rateInForce: applied.newRate, takesEffect: applied.effectiveFrom } : {}) },
+    narration: note, createdBy,
+  });
+  await c.query(
+    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_RATE_CHANGED','loan_account',$2,$3,$4)`,
+    [createdBy || 'SYSTEM', l.id, JSON.stringify({ source: active.source, value: before }), JSON.stringify({ value, effectiveFrom: date, note })]);
+  return { loanId: l.id, source: active.source, from: before, to: value, effectiveFrom: date, applied, transaction: tx };
 }
 
 async function historyOf(c, loanId) {
@@ -313,6 +391,6 @@ async function ratesOf(c, sourceId) {
 }
 
 module.exports = {
-  planPeriods, start, reviewLoan, reviewAll, historyOf, rateOn, clampRate, indexRateOn,
+  planPeriods, start, reviewLoan, reviewAll, historyOf, rateOn, clampRate, indexRateOn, changeRate,
   addSource, setIndexRate, sources, ratesOf,
 };

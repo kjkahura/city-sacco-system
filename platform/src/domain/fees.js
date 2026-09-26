@@ -188,7 +188,7 @@ async function disbursementFees(c, l, { amount, selected = [], later = false }) 
  * Dr Fee Receivable, Cr Fee Income.
  */
 async function recordFee(c, l, { productFeeId = null, name, feeType, amount, valueDate, createdBy, settled = false,
-  installmentId = null, glIncome, glReceivable, note = null, taxable = true, allocation = null, amortize = null }) {
+  installmentId = null, glIncome, glReceivable, note = null, taxable = true, allocation = null, amortize = null, booked = true }) {
   const net = round2(amount);
   if (!(net > 0)) return null;
   const date = valueDate ? ymd(valueDate) : today();
@@ -205,7 +205,9 @@ async function recordFee(c, l, { productFeeId = null, name, feeType, amount, val
   if (!settled) {
     const balance = nonScheduled ? 'ns_fees_due' : 'fees_due';
     await c.query(`UPDATE loan_accounts SET ${balance} = ${balance} + $1, tax_charged = tax_charged + $3, updated_at = now() WHERE id = $2`, [amt, l.id, tx.tax]);
-    if (ledger.isAccrual(l)) {
+    // A fee moved from another loan (`booked` false) was recognised there;
+    // the caller moves its receivable.
+    if (ledger.isAccrual(l) && booked) {
       entryId = await ledger.post(c, l, {
         debits: [{ glCode: gl.glReceivable, amount: amt, memberId: l.member_id }],
         credits: tax.incomeCredits(l, tx, deferring ? glDeferred : gl.glIncome, l.member_id),
@@ -346,34 +348,116 @@ function allocationFor(given, fallback) {
   return given;
 }
 
+// A fee may be applied by hand to a loan in any running state, locked
+// included (Mambu: any state but closed; before disbursement the product's
+// disbursement fees are the ones that apply).
+const FEE_STATES = ['ACTIVE', 'IN_ARREARS', 'LOCKED'];
+
+/**
+ * Where and when a fee applied by hand lands. A back date is allowed as far
+ * as the last repayment (Mambu: no repayment entered after the date), never
+ * a future one. `installmentNumber` puts it on that installment (Mambu's
+ * fixed-term option, open to any loan with a schedule), which must not be
+ * paid; otherwise the allocation decides.
+ */
+async function placement(c, l, { valueDate, installmentNumber, allocation }) {
+  const date = valueDate ? ymd(valueDate) : today();
+  if (date > today()) throw err('A_FEE_CANNOT_BE_DATED_IN_THE_FUTURE', 400);
+  if (valueDate && date < today()) {
+    if (l.disbursed_on && date < ymd(l.disbursed_on)) throw err(`FEE_BEFORE_DISBURSEMENT: ${ymd(l.disbursed_on)}`, 400);
+    const { rows: [later] } = await c.query(
+      `SELECT reference, value_date FROM transactions WHERE loan_account_id = $1 AND kind = 'LOAN_REPAYMENT' AND reversed_by IS NULL
+         AND value_date > $2::date LIMIT 1`, [l.id, date]);
+    if (later) throw err(`FEE_BEFORE_A_LATER_REPAYMENT: ${later.reference} is dated ${ymd(later.value_date)}`, 409);
+  }
+  if (installmentNumber === undefined || installmentNumber === null || installmentNumber === '') return { date, installmentId: null };
+  if (allocation === 'NO_ALLOCATION') throw err('A_FEE_ON_AN_INSTALLMENT_IS_ON_THE_SCHEDULE: drop NO_ALLOCATION', 400);
+  const { rows: [i] } = await c.query('SELECT id, status FROM loan_installments WHERE loan_id = $1 AND number = $2', [l.id, Number(installmentNumber)]);
+  if (!i) throw err(`NO_INSTALLMENT_${installmentNumber}`, 404);
+  if (i.status === 'PAID') throw err(`INSTALLMENT_${installmentNumber}_IS_PAID`, 409);
+  return { date, installmentId: i.id };
+}
+
+async function placeOnInstallment(c, row, installmentId) {
+  if (!row || !installmentId) return row;
+  await c.query('UPDATE loan_installments SET fee_due = fee_due + $1, status = CASE WHEN status = \'GRACE\' THEN \'PENDING\' ELSE status END WHERE id = $2', [row.amount, installmentId]);
+  return row;
+}
+
 /**
  * A predefined MANUAL fee, applied by a user. `allocation` chooses, for
  * this application, the schedule (NEXT_INSTALLMENT) or none (NO_ALLOCATION);
  * the fee's own setting otherwise.
  */
-async function applyManualFee(c, loanId, { fee: feeRef, amount = null, note, valueDate, createdBy, allocation }) {
+async function applyManualFee(c, loanId, { fee: feeRef, amount = null, note, valueDate, createdBy, allocation, installmentNumber = null }) {
   const l = await ledger.lock(c, loanId);
-  if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
+  if (!FEE_STATES.includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   const { rows: [fee] } = await c.query(
     `SELECT * FROM loan_product_fees WHERE product_id = $1 AND is_active AND fee_type = 'MANUAL' AND (code = $2 OR id::text = $2)`,
     [l.product_id, String(feeRef)]);
   if (!fee) throw err(`UNKNOWN_MANUAL_FEE: ${feeRef}`, 404);
+  const where = await placement(c, l, { valueDate, installmentNumber, allocation });
   const amt = feeAmount(fee, { principal: await percentBase(c, l), entered: amount });
   const row = await recordFee(c, l, {
-    productFeeId: fee.id, name: fee.name, feeType: 'MANUAL', amount: amt, valueDate, note, createdBy, ...glFor(l, fee), taxable: fee.taxable !== false,
-    allocation: allocationFor(allocation, fee.allocation), amortize: fee,
+    productFeeId: fee.id, name: fee.name, feeType: 'MANUAL', amount: amt, valueDate: where.date, note, createdBy, ...glFor(l, fee), taxable: fee.taxable !== false,
+    allocation: allocationFor(allocation, fee.allocation), amortize: fee, installmentId: where.installmentId,
   });
-  return row;
+  return placeOnInstallment(c, row, where.installmentId);
 }
 
 /** A fee with any name and amount; only if the product allows it. */
-async function applyArbitraryFee(c, loanId, { name, amount, note, valueDate, createdBy, allocation }) {
+async function applyArbitraryFee(c, loanId, { name, amount, note, valueDate, createdBy, allocation, installmentNumber = null }) {
   const l = await ledger.lock(c, loanId);
-  if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
+  if (!FEE_STATES.includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   if (!l.allow_arbitrary_fees) throw err('PRODUCT_DOES_NOT_ALLOW_ARBITRARY_FEES', 409);
   if (!name || !(round2(amount) > 0)) throw err('FEE_NAME_AND_AMOUNT_REQUIRED', 400);
-  return recordFee(c, l, { name: String(name), feeType: 'MANUAL', amount, valueDate, note, createdBy, ...glFor(l, null),
-    allocation: allocationFor(allocation, 'NEXT_INSTALLMENT') });
+  const where = await placement(c, l, { valueDate, installmentNumber, allocation });
+  const row = await recordFee(c, l, { name: String(name), feeType: 'MANUAL', amount, valueDate: where.date, note, createdBy, ...glFor(l, null),
+    allocation: allocationFor(allocation, 'NEXT_INSTALLMENT'), installmentId: where.installmentId });
+  return placeOnInstallment(c, row, where.installmentId);
+}
+
+/**
+ * Adjust a fee (Mambu's Adjust on a Fee Applied transaction): taken back as
+ * if it had never been applied, for a fee applied by mistake or with the
+ * wrong amount. Only a fee nothing has been paid on; its own entry is
+ * reversed (an amortised fee's recognised income first goes back to
+ * deferred), the balance and the installment come down, and the fee's
+ * transaction is marked reversed. To remove what is left of a fee partly
+ * paid, waive it or reduce the balance.
+ */
+async function adjust(c, feeId, { reason = '', createdBy } = {}) {
+  const { rows: [f] } = await c.query('SELECT * FROM loan_fees WHERE id = $1 FOR UPDATE', [feeId]);
+  if (!f) throw err('FEE_NOT_FOUND', 404);
+  if (f.status !== 'DUE') throw err(`FEE_NOT_ADJUSTABLE: ${f.status}`, 409);
+  if (Number(f.paid) > 0) throw err('FEE_PARTLY_PAID: waive it or reduce the balance instead', 409);
+  if (String(f.fee_type).startsWith('DISBURSEMENT_')) throw err('A_DISBURSEMENT_FEE_IS_UNDONE_WITH_THE_DISBURSEMENT', 409);
+  const l = await ledger.lock(c, f.loan_id);
+  if (Number(f.deferred) > 0) await FA.cancel(c, f.id, { createdBy, narration: 'Fee adjusted' });
+  const entry = f.entry_id ? await acct.reverse(c, f.entry_id, `Fee adjusted: ${reason}`, createdBy) : { entryId: null };
+  const { rows: [orig] } = await c.query(
+    "SELECT * FROM transactions WHERE loan_account_id = $1 AND kind = 'LOAN_FEE' AND allocation->>'feeId' = $2 AND reversed_by IS NULL LIMIT 1",
+    [l.id, f.id]);
+  const taxed = Number(orig?.allocation?.tax || 0);
+  const amt = round2(f.amount);
+  const balance = f.non_scheduled ? 'ns_fees_due' : 'fees_due';
+  await c.query(
+    `UPDATE loan_accounts SET ${balance} = ${balance} - $1, tax_charged = tax_charged - $3,
+       charges_since_arrears = GREATEST(0, charges_since_arrears - CASE WHEN status IN ('IN_ARREARS', 'LOCKED') THEN $1 ELSE 0 END),
+       updated_at = now() WHERE id = $2`, [amt, l.id, taxed]);
+  if (f.installment_id) await c.query('UPDATE loan_installments SET fee_due = GREATEST(fee_paid, fee_due - $1) WHERE id = $2', [amt, f.installment_id]);
+  await c.query(
+    `UPDATE loan_fees SET status = 'ADJUSTED', waived_at = now(), waived_by = $1, note = COALESCE(note || ' | ', '') || $2 WHERE id = $3`,
+    [createdBy || 'SYSTEM', `adjusted: ${reason}`, f.id]);
+  const tx = await savings.record(c, {
+    reference: savings.ref('LFA'), kind: 'LOAN_FEE_ADJUSTED', memberId: l.member_id, loanAccountId: l.id,
+    amount: -amt, entryId: entry.entryId, allocation: { feeId: f.id, fee: f.name, reason, reversalOf: orig?.reference || null }, narration: reason, createdBy,
+  });
+  if (orig) await c.query('UPDATE transactions SET reversed_by = $1 WHERE id = $2', [tx.id, orig.id]);
+  await c.query(
+    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_FEE_ADJUSTED','loan_fee',$2,$3,$4)`,
+    [createdBy || 'SYSTEM', f.id, JSON.stringify(f), JSON.stringify({ reason })]);
+  return tx;
 }
 
 /** Waive the unpaid part of a fee, reversing its posting. */
@@ -545,6 +629,6 @@ async function forLoan(c, loanId) {
 module.exports = {
   settlementCredits, writeOffLines, outstanding, percentBase, nextInstallment, planPending, glFor,
   productFees, feeAmount, scheduledFees, disbursementFees, recordFee, placeUpfrontFees,
-  applyPaymentDueFees, applyLateFees, applyManualFee, applyArbitraryFee, waive, settle, resettle,
+  applyPaymentDueFees, applyLateFees, applyManualFee, applyArbitraryFee, waive, adjust, settle, resettle,
   undoDisbursementFees, forLoan,
 };

@@ -194,7 +194,7 @@ const PRODUCT_ONLY = [
   'payment_method', 'allow_prepayments', 'prepayment_interest', 'prepayment_allocation', 'mark_paid_when',
   'interest_prepayment', 'gl_deferred_interest', 'allow_postdated_payments', 'gl_deferred_fee_income',
   'cover_counts_deposits', 'cap_includes_accrued', 'settlement_enabled', 'settlement_product_id', 'settlement_auto_set',
-  'settlement_auto_create', 'settlement_option',
+  'settlement_auto_create', 'settlement_option', 'allow_custom_allocation',
   'arrears_tolerance_floor', 'arrears_count_from', 'arrears_non_working_days',
   'penalty_basis', 'penalty_tolerance_days',
   'charge_cap_percent', 'charge_cap_base', 'charge_cap_mode',
@@ -297,6 +297,68 @@ function settlement(l, arrears = 'CAPITALIZE') {
   };
 }
 
+/**
+ * The settlement of a running loan for a reschedule or a top-up, after
+ * Mambu: the principal outstanding (less what a reschedule writes off when
+ * it reduces the amount, `principal` being the new amount), and of the
+ * interest, fees and penalties owed, what is capitalised onto the new loan
+ * (`capitalize` { interest, fees, penalty }, amounts; or all of them under
+ * CAPITALIZE and none under WRITE_OFF) and what is written off (the rest).
+ * Unpaid late repayment and payment-due fees move to the new loan as fees
+ * (`carryFees`, Mambu's rule) and are neither capitalised nor written off.
+ */
+async function settlementPlan(c, l, { arrears = 'CAPITALIZE', capitalize = null, carryFees = true, principal = null } = {}) {
+  const b = balances(l);
+  const carried = carryFees ? (await c.query(
+    `SELECT f.id, f.name, f.fee_type, f.product_fee_id, round(f.amount - f.paid, 2)::float8 AS left,
+            COALESCE(pf.gl_receivable, NULL) AS gl_receivable
+     FROM loan_fees f LEFT JOIN loan_product_fees pf ON pf.id = f.product_fee_id
+     WHERE f.loan_id = $1 AND f.status = 'DUE' AND NOT f.non_scheduled AND f.fee_type IN ('LATE_REPAYMENT', 'PAYMENT_DUE')
+       AND f.amount > f.paid ORDER BY f.applied_on, f.created_at`, [l.id])).rows : [];
+  let carriedTotal = 0;
+  const moving = [];
+  for (const f of carried) {
+    const take = round2(Math.min(Number(f.left), Math.max(0, round2(b.fees - carriedTotal))));
+    if (!(take > 0)) break;
+    carriedTotal = round2(carriedTotal + take);
+    moving.push({ ...f, left: take });
+  }
+  const pool = {
+    interest: Math.max(0, b.interest),
+    fees: round2(Math.max(0, round2(b.fees - carriedTotal)) + Math.max(0, b.nonScheduledFees)),
+    penalty: Math.max(0, b.penalty),
+  };
+  let cap;
+  if (capitalize && typeof capitalize === 'object') {
+    cap = {};
+    for (const k of ['interest', 'fees', 'penalty']) {
+      const v = capitalize[k] === undefined || capitalize[k] === null ? 0 : round2(capitalize[k]);
+      if (!(v >= 0)) throw err(`CAPITALIZE_AMOUNT_INVALID: ${k}`, 400);
+      if (v > pool[k]) throw err(`CAPITALIZE_EXCEEDS_WHAT_IS_OWED: ${k} owes ${pool[k]}`, 400);
+      cap[k] = v;
+    }
+  } else if (arrears === 'WRITE_OFF') {
+    cap = { interest: 0, fees: 0, penalty: 0 };
+  } else {
+    cap = { ...pool };
+  }
+  const wo = { interest: round2(pool.interest - cap.interest), fees: round2(pool.fees - cap.fees), penalty: round2(pool.penalty - cap.penalty) };
+  let reduce = 0;
+  if (principal !== null && principal !== undefined && principal !== '') {
+    const p = round2(principal);
+    if (!(p > 0)) throw err('INVALID_PRINCIPAL', 400);
+    if (p > b.principal) throw err(`A_RESCHEDULE_KEEPS_OR_REDUCES_THE_PRINCIPAL: outstanding ${b.principal}`, 400);
+    reduce = round2(b.principal - p);
+  }
+  const capitalized = round2(cap.interest + cap.fees + cap.penalty);
+  const writtenOff = round2(wo.interest + wo.fees + wo.penalty);
+  return {
+    balances: b, pool, cap, wo, reduce, carried: moving, carriedTotal, capitalized, writtenOff,
+    principal: round2(b.principal - reduce),
+    amount: round2(b.principal - reduce + capitalized),
+  };
+}
+
 /** The tenant currency's minor units (accounting_settings.currency_decimals). */
 async function currencyDecimals(c) {
   const { rows: [r] } = await c.query('SELECT currency_decimals FROM accounting_settings LIMIT 1');
@@ -331,9 +393,26 @@ async function scheduleInputsFor(c, l) {
   return inputs;
 }
 
+/**
+ * The offset that puts the first due date on the loan's first repayment
+ * date (Mambu's first repayment date, set on the application or at
+ * disbursement): the days between one interval after disbursement and that
+ * date, or, on fixed days of the month, the days to just before it.
+ */
+function firstRepaymentOffset(l, interval, fixedDays) {
+  if (!l.first_repayment_date || !l.disbursed_on) return null;
+  const start = ymd(l.disbursed_on);
+  const target = ymd(l.first_repayment_date);
+  const days = (a, b) => Math.round((toUTC(b) - toUTC(a)) / 86400000);
+  if (Array.isArray(fixedDays) && fixedDays.length) return Math.max(0, days(start, target) - 1);
+  return days(isoDate(S.addInterval(start, interval, 1)), target);
+}
+
 /** The schedule engine's inputs for this loan. */
 function scheduleInputs(l) {
   const e = effective(l);
+  const interval = { unit: l.repayment_interval_unit || 'MONTHS', every: Number(l.repayment_interval_count || 1) };
+  const firstOffset = firstRepaymentOffset(l, interval, l.fixed_days_of_month);
   // Capitalized interest on Declining Balance: every installment but the
   // last is interest only (the interest capitalises on its due date) and
   // the whole principal falls due at the end, as in Mambu.
@@ -341,10 +420,10 @@ function scheduleInputs(l) {
   return {
     terms: terms(l),
     method: l.method,
-    interval: { unit: l.repayment_interval_unit || 'MONTHS', every: Number(l.repayment_interval_count || 1) },
+    interval,
     fixedDays: l.fixed_days_of_month,
     shortMonth: l.short_month_handling || 'LAST_DAY',
-    firstOffsetDays: e.firstDueOffsetDays || 0,
+    firstOffsetDays: firstOffset === null ? (e.firstDueOffsetDays || 0) : firstOffset,
     grace: capitalizedReducing
       ? { type: 'PRINCIPAL', periods: Math.max(0, Number(l.term_months) - 1) }
       : { type: l.grace_type || 'NONE', periods: e.gracePeriods || 0 },
@@ -478,7 +557,7 @@ const isMonthEnd = (d) => {
 
 module.exports = {
   OVERRIDES, effective, overrideSql, resolveOverrides, within,
-  PRODUCT_COLUMNS, lock, read, principalOutstanding, balances, settlement, terms,
+  PRODUCT_COLUMNS, lock, read, principalOutstanding, balances, settlement, settlementPlan, terms,
   scheduleInputs, scheduleInputsFor, termsFor, currencyDecimals, holidaySet, shiftOffClosedDays, closedDays, NON_WORKING_DAY_RULES,
   isAccrual, booksEntries, interestAccrues, paidCredit, creditsFor, writeOffCredit, post,
   interestFor, isMonthEnd, SNAPSHOT_SETTINGS, withSnapshot, settingSql,

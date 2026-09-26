@@ -4,8 +4,11 @@ const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
 const types = require('./productTypes');
+const savings = require('./savings');
+const tax = require('./tax');
+const writeOffs = require('./writeOffs');
 const { buildSchedule, feeLinks, relinkFees } = require('./installments');
-const { err } = acct;
+const { err, round2 } = acct;
 const { ymd, isoDate, toUTC } = S;
 
 /**
@@ -17,9 +20,16 @@ const { ymd, isoDate, toUTC } = S;
  *   editSchedule    replace those installments with new dates, principal,
  *                   interest (fixed term) and fees; principal and fees are
  *                   reallocated, never added or removed
- *   paymentHoliday  give installments nothing due; the loan runs longer by
- *                   as many periods and the interest of the holiday is
- *                   spread over the installments after it
+ *   paymentHoliday  a break in payments, one of Mambu's two kinds:
+ *                   NO_PRINCIPAL_NO_INTEREST, the installments fall due with
+ *                   nothing on them and the loan runs longer by as many
+ *                   periods; PRINCIPAL_NO_INTEREST, they keep their
+ *                   principal and carry no interest. For the first kind the
+ *                   holiday's interest is SPREAD over the installments after
+ *                   it, not charged (NONE), or held (APPLY_LATER) until it is
+ *                   applied (applyHolidayInterest). Interest not charged or
+ *                   held is not accrued through the holiday on a dynamic
+ *                   loan either
  *   changeDueDay    move the next installment and every later one to a new
  *                   day of the month (dynamic term): the next installment's
  *                   interest follows its longer or shorter period, later
@@ -39,6 +49,10 @@ const { ymd, isoDate, toUTC } = S;
  * the number of installments may change within the product's term band,
  * as the term of an application may.
  *
+ * A fixed-term edit that lowers a fee writes the difference off (Mambu's
+ * Fee Due Reduce, the same write-off as Reduce Balance); fees are never
+ * raised by an edit.
+ *
  * Every edit is kept with the schedule before and after (loan_schedule_edits).
  */
 
@@ -49,6 +63,7 @@ const r2 = (n, d) => S.roundTo(n, d);
 async function load(c, loanId, kind, asOf, { forUpdate = true } = {}) {
   const l = await ledger.lock(c, loanId, { forUpdate });
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`SCHEDULE_NOT_EDITABLE_IN_STATE_${l.status}`, 409);
+  if (l.terminated_on) throw err(`LOAN_IS_TERMINATED: undo the termination of ${ymd(l.terminated_on)} to edit its schedule`, 409);
   const type = types.forLoan(l);
   if (!type.schedulesUpfront) throw err('THIS_LOAN_HAS_NO_SCHEDULE_TO_EDIT', 409);
   const allowed = new Set(l.schedule_editing || []);
@@ -76,6 +91,7 @@ async function load(c, loanId, kind, asOf, { forUpdate = true } = {}) {
 const view = (rows) => rows.map((i) => ({
   number: i.number, dueDate: ymd(i.due_date), principal: Number(i.principal_due), interest: Number(i.interest_due),
   fee: Number(i.fee_due), holiday: Boolean(i.payment_holiday),
+  ...(i.holiday_kind ? { holidayKind: i.holiday_kind, holidayInterest: i.holiday_interest } : {}),
 }));
 
 async function replaceTail(c, l, tail, lines) {
@@ -86,10 +102,12 @@ async function replaceTail(c, l, tail, lines) {
     const x = lines[k];
     const nothingDue = !(x.principal > 0) && !(x.interest > 0) && !(x.fee > 0);
     await c.query(
-      `INSERT INTO loan_installments (loan_id, number, due_date, nominal_due, principal_due, interest_due, fee_due, status, payment_holiday)
-       VALUES ($1,$2,$3::date,$4::date,$5,$6,$7,$8,$9)`,
+      `INSERT INTO loan_installments (loan_id, number, due_date, nominal_due, principal_due, interest_due, fee_due, status, payment_holiday,
+         holiday_kind, holiday_interest)
+       VALUES ($1,$2,$3::date,$4::date,$5,$6,$7,$8,$9,$10,$11)`,
       [l.id, start + k, x.dueDate, x.nominalDue || x.dueDate, x.principal, x.interest, x.fee || 0,
-        nothingDue ? 'GRACE' : 'PENDING', Boolean(x.holiday)]);
+        nothingDue ? 'GRACE' : 'PENDING', Boolean(x.holiday), x.holiday ? (x.holidayKind || 'NO_PRINCIPAL_NO_INTEREST') : null,
+        x.holiday ? (x.holidayInterest || 'SPREAD') : null]);
   }
   if (links.length) await relinkFees(c, l.id, links);
   const count = start - 1 + lines.length;
@@ -170,7 +188,8 @@ async function editSchedule(c, loanId, { installments, note = null, asOf = null,
   if (sum(lines, (x) => x.principal) !== sum(tail, (x) => x.principal_due)) {
     throw err(`PRINCIPAL_MUST_STILL_ADD_UP: the installments that can change carry ${sum(tail, (x) => x.principal_due)}`, 400);
   }
-  if (sum(lines, (x) => x.fee) !== sum(tail, (x) => x.fee_due)) {
+  const feeCut = r2(sum(tail, (x) => x.fee_due) - sum(lines, (x) => x.fee), decimals);
+  if (feeCut < 0 || (feeCut > 0 && type.basis !== 'SCHEDULE')) {
     throw err(`FEES_MUST_STILL_ADD_UP: the installments that can change carry ${sum(tail, (x) => x.fee_due)}; apply or waive a fee instead`, 400);
   }
   if (type.basis !== 'SCHEDULE') {
@@ -178,68 +197,164 @@ async function editSchedule(c, loanId, { installments, note = null, asOf = null,
     expectedInterest(lines, { outstanding: sum(tail, (x) => x.principal_due), start, terms: inputs.terms, decimals });
   }
   const before = view(tail);
+  // A fee lowered on a fixed-term schedule: the difference is written off,
+  // from the fees on the installments edited first.
+  let feeWriteOff = null;
+  if (feeCut > 0) {
+    const { rows: onTail } = await c.query('SELECT id FROM loan_fees WHERE installment_id = ANY($1::uuid[]) ORDER BY applied_on, created_at', [tail.map((t) => t.id)]);
+    feeWriteOff = await writeOffs.writeOffCharges(c, l.id, { fees: feeCut, kind: 'REDUCE_BALANCE', reason: note || 'Fee due reduced in a schedule edit',
+      feeIds: onTail.map((f) => f.id), createdBy });
+  }
   await replaceTail(c, l, tail, lines);
   const after = view((await c.query('SELECT * FROM loan_installments WHERE loan_id = $1 AND number >= $2 ORDER BY number', [l.id, tail[0].number])).rows);
   await record(c, l, 'EDIT', before, after, note, createdBy);
-  return { loanId: l.id, before, after };
+  return { loanId: l.id, before, after, ...(feeWriteOff ? { feeDueReduced: feeCut, writeOff: feeWriteOff.reference } : {}) };
 }
 
+const HOLIDAY_KINDS = ['NO_PRINCIPAL_NO_INTEREST', 'PRINCIPAL_NO_INTEREST'];
+const HOLIDAY_INTEREST = ['SPREAD', 'NONE', 'APPLY_LATER'];
+
 /**
- * A payment holiday on `count` installments from installment `from`: they
- * fall due with nothing to pay, the schedule gains `count` installments at
- * the end, and the principal and the holiday's interest are spread over
- * the installments after it (Mambu's payment holiday; the arithmetic is the
- * schedule engine's PURE grace).
+ * A payment holiday on `count` installments from installment `from`
+ * (Mambu's Payment Holidays). Installments already paid on, due, or earning
+ * interest cannot take one.
+ *
+ *   NO_PRINCIPAL_NO_INTEREST  they fall due with nothing to pay, the schedule
+ *                             gains `count` installments at the end, and the
+ *                             principal is spread over the installments after
+ *                             it (the schedule engine's PURE grace). The
+ *                             holiday's interest (`interest`):
+ *        SPREAD       over the installments after it (the default)
+ *        NONE         not charged
+ *        APPLY_LATER  held off the schedule (holiday_interest_pending) until
+ *                     applied with applyHolidayInterest
+ *   PRINCIPAL_NO_INTEREST     they keep their principal and carry no interest;
+ *                             the schedule is not extended
+ *
+ * On a dynamic loan, which earns interest on its balance day by day,
+ * interest that is not charged or is held is also not accrued through the
+ * holiday (./productTypes/dynamicTerm).
  */
-async function paymentHoliday(c, loanId, { from, count = 1, note = null, asOf = null, createdBy } = {}) {
+async function paymentHoliday(c, loanId, { from, count = 1, kind = 'NO_PRINCIPAL_NO_INTEREST', interest = 'SPREAD', note = null, asOf = null, createdBy } = {}) {
   const ctx = await load(c, loanId, 'PAYMENT_HOLIDAYS', asOf);
   const { l, type, head, decimals, inputs } = ctx;
+  if (!HOLIDAY_KINDS.includes(kind)) throw err(`HOLIDAY_KIND_IS_ONE_OF: ${HOLIDAY_KINDS.join(', ')}`, 400);
+  const mode = kind === 'PRINCIPAL_NO_INTEREST' ? 'NONE' : interest;
+  if (!HOLIDAY_INTEREST.includes(mode)) throw err(`HOLIDAY_INTEREST_IS_ONE_OF: ${HOLIDAY_INTEREST.join(', ')}`, 400);
   const n = Number(count);
   if (!(Number.isInteger(n) && n > 0)) throw err('A_PAYMENT_HOLIDAY_NEEDS_A_COUNT', 400);
   const at = ctx.tail.findIndex((i) => i.number === Number(from));
   if (at < 0) throw err(`INSTALLMENT_${from}_CANNOT_TAKE_A_HOLIDAY: it has been paid on, has fallen due or has started to earn interest`, 409);
   const tail = ctx.tail.slice(at);
   const kept = [...head, ...ctx.tail.slice(0, at)];
+  const startOf = kept.length ? ymd(kept[kept.length - 1].nominal_due) : ymd(l.disbursed_on);
+  let lines;
+  let held = 0;
 
-  // The tail's dates, then as many more as the holiday adds, on the interval.
-  const nominal = tail.map((i) => ymd(i.nominal_due));
-  const extra = S.nominalDueDates({ start: nominal[nominal.length - 1], count: n, interval: inputs.interval,
-    fixedDays: inputs.fixedDays, shortMonth: inputs.shortMonth });
-  nominal.push(...extra.map(isoDate));
-  const periods = nominal.map((to, k) => ({
-    from: toUTC(k === 0 ? (kept.length ? ymd(kept[kept.length - 1].nominal_due) : ymd(l.disbursed_on)) : nominal[k - 1]), to: toUTC(to),
-  }));
-  const principal = r2(tail.reduce((a, x) => a + Number(x.principal_due), 0), decimals);
-  const fees = tail.map((x) => Number(x.fee_due));
-  const planned = S.planInstallments({
-    principal, terms: inputs.terms, method: l.method, periods, flatBase: l.method === 'FLAT' ? Number(l.principal) : null,
-    grace: { type: 'PURE', periods: n }, rounding: inputs.rounding, decimals,
-  });
-  const lines = [];
-  for (let k = 0; k < nominal.length; k += 1) {
-    const due = await ledger.shiftOffClosedDays(c, nominal[k], inputs.nonWorkingDays, { notBefore: k ? lines[k - 1].dueDate : null });
-    const p = planned[k] || { principal: 0, interest: 0 };
-    lines.push({
-      dueDate: due, nominalDue: nominal[k], principal: k < n ? 0 : p.principal, interest: k < n ? 0 : p.interest,
-      // A holiday installment's fee moves to the first installment after it.
-      fee: k < n ? 0 : (k === n ? r2(fees.slice(0, n + 1).reduce((a, f) => a + f, 0), decimals) : (fees[k] || 0)),
-      holiday: k < n,
-    });
-  }
-  if (type.basis !== 'SCHEDULE') {
-    // A dynamic loan earns interest through the holiday on its balance; the
-    // installments after it expect that interest and their own.
-    const start = kept.length ? ymd(kept[kept.length - 1].nominal_due) : ymd(l.disbursed_on);
-    const reg = lines.filter((x) => !x.holiday);
-    const holidayInterest = r2(S.interestBetween(principal, inputs.terms, start, lines[n - 1].nominalDue, { exact: true }), decimals);
-    expectedInterest(reg, { outstanding: principal, start: lines[n - 1].nominalDue, terms: inputs.terms, decimals });
-    reg[0].interest = r2(reg[0].interest + holidayInterest, decimals);
+  if (kind === 'PRINCIPAL_NO_INTEREST') {
+    if (n > tail.length) throw err(`ONLY_${tail.length}_INSTALLMENTS_CAN_TAKE_A_HOLIDAY`, 409);
+    lines = tail.map((x, k) => ({
+      dueDate: ymd(x.due_date), nominalDue: ymd(x.nominal_due), principal: Number(x.principal_due),
+      interest: k < n ? 0 : Number(x.interest_due), fee: Number(x.fee_due),
+      holiday: k < n, holidayKind: kind, holidayInterest: 'NONE',
+    }));
+  } else {
+    // The tail's dates, then as many more as the holiday adds, on the interval.
+    const nominal = tail.map((i) => ymd(i.nominal_due));
+    const extra = S.nominalDueDates({ start: nominal[nominal.length - 1], count: n, interval: inputs.interval,
+      fixedDays: inputs.fixedDays, shortMonth: inputs.shortMonth });
+    nominal.push(...extra.map(isoDate));
+    const periods = nominal.map((to, k) => ({ from: toUTC(k === 0 ? startOf : nominal[k - 1]), to: toUTC(to) }));
+    const principal = r2(tail.reduce((a, x) => a + Number(x.principal_due), 0), decimals);
+    const fees = tail.map((x) => Number(x.fee_due));
+    const flatBase = l.method === 'FLAT' ? Number(l.principal) : null;
+    // The interest of the holiday periods, on the balance they start with.
+    const holidayInterest = r2(S.interestBetween(flatBase ?? principal, inputs.terms, startOf, nominal[n - 1], { exact: true }), decimals);
+    // SPREAD: the engine's PURE grace carries it on; otherwise the paying
+    // installments are planned on their own periods only.
+    const planned = mode === 'SPREAD'
+      ? S.planInstallments({ principal, terms: inputs.terms, method: l.method, periods, flatBase, grace: { type: 'PURE', periods: n }, rounding: inputs.rounding, decimals })
+      : [...Array(n).fill({ principal: 0, interest: 0 }),
+        ...S.planInstallments({ principal, terms: inputs.terms, method: l.method, periods: periods.slice(n), flatBase, rounding: inputs.rounding, decimals })];
+    lines = [];
+    for (let k = 0; k < nominal.length; k += 1) {
+      const due = await ledger.shiftOffClosedDays(c, nominal[k], inputs.nonWorkingDays, { notBefore: k ? lines[k - 1].dueDate : null });
+      const p = planned[k] || { principal: 0, interest: 0 };
+      lines.push({
+        dueDate: due, nominalDue: nominal[k], principal: k < n ? 0 : p.principal, interest: k < n ? 0 : p.interest,
+        // A holiday installment's fee moves to the first installment after it.
+        fee: k < n ? 0 : (k === n ? r2(fees.slice(0, n + 1).reduce((a, f) => a + f, 0), decimals) : (fees[k] || 0)),
+        holiday: k < n, holidayKind: kind, holidayInterest: mode,
+      });
+    }
+    if (type.basis !== 'SCHEDULE') {
+      // A dynamic loan's installments after the holiday expect their own
+      // interest, and under SPREAD the holiday's too.
+      const reg = lines.filter((x) => !x.holiday);
+      expectedInterest(reg, { outstanding: principal, start: lines[n - 1].nominalDue, terms: inputs.terms, decimals });
+      if (mode === 'SPREAD') reg[0].interest = r2(reg[0].interest + holidayInterest, decimals);
+    }
+    if (mode === 'APPLY_LATER') held = holidayInterest;
   }
   const before = view(tail);
   await replaceTail(c, l, tail, lines);
+  if (held > 0) await c.query('UPDATE loan_accounts SET holiday_interest_pending = holiday_interest_pending + $2 WHERE id = $1', [l.id, held]);
   const after = view((await c.query('SELECT * FROM loan_installments WHERE loan_id = $1 AND number >= $2 ORDER BY number', [l.id, tail[0].number])).rows);
   await record(c, l, 'PAYMENT_HOLIDAY', before, after, note, createdBy);
-  return { loanId: l.id, holiday: after.filter((x) => x.holiday).map((x) => x.number), before, after };
+  return { loanId: l.id, kind, interest: mode, holiday: after.filter((x) => x.holiday).map((x) => x.number), heldInterest: held, before, after };
+}
+
+/**
+ * Apply interest held from a payment holiday (Mambu applies it through its
+ * API once the holiday is over). On a dynamic loan the amount is booked as
+ * interest now and goes on the current installment; on a fixed-term loan it
+ * is spread over the installments still to come, and the schedule earns it
+ * as they run, as it does all its interest.
+ */
+async function applyHolidayInterest(c, loanId, { amount = null, note = null, createdBy } = {}) {
+  const l = await ledger.lock(c, loanId);
+  if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
+  const pending = round2(l.holiday_interest_pending);
+  if (!(pending > 0)) throw err('NO_HOLIDAY_INTEREST_IS_HELD', 409);
+  const amt = amount === null || amount === undefined || amount === '' ? pending : round2(amount);
+  if (!(amt > 0) || amt > pending) throw err(`HOLIDAY_INTEREST_TO_APPLY_IS_MORE_THAN_NOTHING_AND_AT_MOST: ${pending}`, 400);
+  const date = today();
+  const type = types.forLoan(l);
+  const { rows: open } = await c.query(
+    `SELECT * FROM loan_installments WHERE loan_id = $1 AND status NOT IN ('PAID') AND NOT payment_holiday ORDER BY number`, [l.id]);
+  if (!open.length) throw err('NO_INSTALLMENT_LEFT_TO_CARRY_IT', 409);
+  let tx = null;
+  if (type.basis === 'SCHEDULE') {
+    const coming = open.filter((i) => ymd(i.due_date) > date);
+    const over = coming.length ? coming : [open[open.length - 1]];
+    const decimals = await ledger.currencyDecimals(c);
+    const share = r2(amt / over.length, decimals);
+    for (let k = 0; k < over.length; k += 1) {
+      const part = k === over.length - 1 ? r2(amt - share * (over.length - 1), decimals) : share;
+      await c.query("UPDATE loan_installments SET interest_due = interest_due + $1, status = CASE WHEN status = 'GRACE' THEN 'PENDING' ELSE status END WHERE id = $2", [part, over[k].id]);
+    }
+  } else {
+    // Booked now, as the day's accrual would have been.
+    const t = tax.split(l, 'INTEREST', amt);
+    let entryId = null;
+    if (ledger.interestAccrues(l)) {
+      entryId = await ledger.post(c, l, {
+        debits: [{ glCode: l.gl_interest_rec, amount: t.gross, memberId: l.member_id }],
+        credits: tax.incomeCredits(l, t, l.gl_interest_inc, l.member_id),
+        narration: `Payment holiday interest applied ${l.account_no}`, sourceType: 'LOAN_INTEREST_ACCRUAL', sourceId: l.id, bookingDate: date, createdBy,
+      });
+    }
+    await c.query('UPDATE loan_accounts SET interest_accrued = interest_accrued + $2, tax_charged = tax_charged + $3 WHERE id = $1', [l.id, t.gross, t.tax]);
+    const current = open.find((i) => ymd(i.due_date) >= date) || open[open.length - 1];
+    await c.query("UPDATE loan_installments SET interest_due = interest_due + $1, status = CASE WHEN status = 'GRACE' THEN 'PENDING' ELSE status END WHERE id = $2", [t.gross, current.id]);
+    tx = await savings.record(c, {
+      reference: savings.ref('LI'), kind: 'LOAN_INTEREST_ACCRUAL', memberId: l.member_id, loanAccountId: l.id, amount: t.gross, valueDate: date, entryId,
+      allocation: { method: 'PAYMENT_HOLIDAY', installment: current.number, ...(t.tax > 0 ? { tax: t.tax, net: t.income } : {}) }, narration: note, createdBy,
+    });
+  }
+  await c.query('UPDATE loan_accounts SET holiday_interest_pending = holiday_interest_pending - $2, updated_at = now() WHERE id = $1', [l.id, amt]);
+  await record(c, l, 'PAYMENT_HOLIDAY', [], [{ appliedInterest: amt }], note || 'holiday interest applied', createdBy);
+  return { loanId: l.id, applied: amt, stillHeld: round2(pending - amt), transaction: tx };
 }
 
 /**
@@ -406,4 +521,4 @@ async function editsOf(c, loanId) {
   return rows;
 }
 
-module.exports = { EDITS, editSchedule, paymentHoliday, changeDueDay, editsOf, editable, applicationSchedule, clearApplicationSchedule };
+module.exports = { EDITS, HOLIDAY_KINDS, HOLIDAY_INTEREST, editSchedule, paymentHoliday, applyHolidayInterest, changeDueDay, editsOf, editable, applicationSchedule, clearApplicationSchedule };

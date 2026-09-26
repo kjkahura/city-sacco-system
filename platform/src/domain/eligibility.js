@@ -30,13 +30,19 @@ async function collateralCoverage(c, loanId, { exclude = null } = {}) {
 // --------------------------------------------------------------------------
 
 const OPEN_APPLICATION = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL'];
+// Mambu: guarantors may be added when the loan is created or at any time
+// after, and removed from a running loan when no longer required.
+const TAKES_GUARANTORS = [...OPEN_APPLICATION, 'APPROVED', 'ACTIVE', 'IN_ARREARS', 'LOCKED'];
+const COVER_CHECKED = ['APPROVED', 'ACTIVE', 'IN_ARREARS', 'LOCKED'];
 
-async function addGuarantor(c, loanId, { memberId, amount }) {
+async function addGuarantor(c, loanId, { memberId, amount, createdBy = null }) {
   const l = await lock(c, loanId);
   if (l.enable_guarantors === false) throw err('PRODUCT_DOES_NOT_TAKE_GUARANTORS', 409);
-  if (!OPEN_APPLICATION.includes(l.status)) {
+  if (!TAKES_GUARANTORS.includes(l.status)) {
     throw err(`CANNOT_ADD_GUARANTOR_IN_STATE: ${l.status}`, 409);
   }
+  const { rows: [again] } = await c.query(
+    "SELECT id, status FROM loan_guarantors WHERE loan_id = $1 AND member_id = $2", [l.id, memberId]);
   if (memberId === l.member_id) throw err('MEMBER_CANNOT_GUARANTEE_OWN_LOAN');
   const amt = round2(amount);
   if (!(amt > 0)) throw err('INVALID_PLEDGE_AMOUNT');
@@ -53,18 +59,53 @@ async function addGuarantor(c, loanId, { memberId, amount }) {
     throw err(`GUARANTOR_HAS_INSUFFICIENT_FREE_DEPOSITS: free ${free}, pledged ${amt}`, 409);
   }
 
-  const { rows } = await c.query(
-    `INSERT INTO loan_guarantors (loan_id, member_id, pledged_amount) VALUES ($1,$2,$3) RETURNING *`,
-    [l.id, memberId, amt]
-  );
+  // A guarantor released earlier pledges again on the same row.
+  if (again && again.status === 'PLEDGED') throw err('ALREADY_A_GUARANTOR_ON_THIS_LOAN', 409);
+  const { rows } = again
+    ? await c.query("UPDATE loan_guarantors SET pledged_amount = $2, status = 'PLEDGED', recovered = 0 WHERE id = $1 RETURNING *", [again.id, amt])
+    : await c.query(
+      `INSERT INTO loan_guarantors (loan_id, member_id, pledged_amount) VALUES ($1,$2,$3) RETURNING *`,
+      [l.id, memberId, amt]);
+  if (!OPEN_APPLICATION.includes(l.status)) {
+    await c.query(
+      `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'GUARANTOR_ADDED','loan_guarantor',$2,$3)`,
+      [createdBy || 'SYSTEM', rows[0].id, JSON.stringify({ loan: l.account_no, memberId, amount: amt, status: l.status })]);
+  }
   return rows[0];
 }
 
-async function guarantorCoverage(c, loanId) {
+/**
+ * Take a guarantor off a loan: their pledge is released and their deposits
+ * are free again. On an approved or running loan whose product requires
+ * cover, refused if the loan would then be under it (the principal
+ * outstanding, or the amount approved before disbursement).
+ */
+async function removeGuarantor(c, loanId, guarantorId, { note = null, createdBy } = {}) {
+  const l = await lock(c, loanId);
+  const { rows: [g] } = await c.query('SELECT * FROM loan_guarantors WHERE id = $1 AND loan_id = $2 FOR UPDATE', [guarantorId, l.id]);
+  if (!g) throw err('GUARANTOR_NOT_FOUND_ON_THIS_LOAN', 404);
+  if (g.status !== 'PLEDGED') throw err(`GUARANTOR_NOT_PLEDGED: ${g.status}`, 409);
+  if (!TAKES_GUARANTORS.includes(l.status)) throw err(`CANNOT_REMOVE_GUARANTOR_IN_STATE: ${l.status}`, 409);
+  if (COVER_CHECKED.includes(l.status) && l.require_guarantor_cover) {
+    const outstanding = round2(Number(l.principal_disbursed) + Number(l.principal_capitalized || 0) - Number(l.principal_paid));
+    const e = await checkEligibility(c, { memberId: l.member_id, productId: l.product_id, principal: outstanding > 0 ? outstanding : l.principal,
+      loanId: l.id, excludeGuarantorId: g.id });
+    if (e.rules.guarantorCover === 'BREACHED') {
+      throw err(`REMOVING_THE_GUARANTOR_LEAVES_THE_LOAN_UNDER_COVER: cover ${e.cover} of ${e.coverRequired} required`, 409);
+    }
+  }
+  const { rows: [out] } = await c.query("UPDATE loan_guarantors SET status = 'RELEASED' WHERE id = $1 RETURNING *", [g.id]);
+  await c.query(
+    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'GUARANTOR_REMOVED','loan_guarantor',$2,$3,$4)`,
+    [createdBy || 'SYSTEM', g.id, JSON.stringify(g), JSON.stringify({ note, loan: l.account_no })]);
+  return out;
+}
+
+async function guarantorCoverage(c, loanId, { exclude = null } = {}) {
   const { rows: [r] } = await c.query(
     `SELECT COALESCE(SUM(pledged_amount), 0) AS pledged
-     FROM loan_guarantors WHERE loan_id = $1 AND status = 'PLEDGED'`,
-    [loanId]
+     FROM loan_guarantors WHERE loan_id = $1 AND status = 'PLEDGED' AND ($2::uuid IS NULL OR id <> $2)`,
+    [loanId, exclude]
   );
   return round2(r.pledged);
 }
@@ -88,7 +129,7 @@ async function releaseGuarantors(c, loanId) {
  * separate so a teller can show a member the ceiling before an application
  * is written, and so approval and the preview cannot disagree about it.
  */
-async function checkEligibility(c, { memberId, productId, principal, loanId = null, refinancing = null, excludeCollateralId = null }) {
+async function checkEligibility(c, { memberId, productId, principal, loanId = null, refinancing = null, excludeCollateralId = null, excludeGuarantorId = null }) {
   const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1', [productId]);
   if (!p) throw err('UNKNOWN_LOAN_PRODUCT', 404);
   // A top-up application settles a running loan: that loan's guarantors and
@@ -107,7 +148,7 @@ async function checkEligibility(c, { memberId, productId, principal, loanId = nu
   const ceiling = round2(deposits * Number(p.max_multiplier));
   const carriedPledges = refinancing ? await guarantorCoverage(c, refinancing) : 0;
   const carriedCollateral = refinancing ? await collateralCoverage(c, refinancing) : 0;
-  const pledged = round2((loanId ? await guarantorCoverage(c, loanId) : 0) + carriedPledges);
+  const pledged = round2((loanId ? await guarantorCoverage(c, loanId, { exclude: excludeGuarantorId }) : 0) + carriedPledges);
   const collateral = round2((loanId ? await collateralCoverage(c, loanId, { exclude: excludeCollateralId }) : 0) + carriedCollateral);
   const coverRequired = round2(requested * Number(p.min_cover_percent || 100) / 100);
   // The member's own deposits count towards cover unless the product says
@@ -178,6 +219,6 @@ async function enforceEligibility(c, l) {
 }
 
 module.exports = {
-  OPEN_APPLICATION, addGuarantor, guarantorCoverage, releaseGuarantors, collateralCoverage, assertCovered,
+  OPEN_APPLICATION, TAKES_GUARANTORS, addGuarantor, removeGuarantor, guarantorCoverage, releaseGuarantors, collateralCoverage, assertCovered,
   checkEligibility, enforceEligibility,
 };

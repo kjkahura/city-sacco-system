@@ -24,12 +24,13 @@ const { err, round2 } = acct;
  */
 
 const ledger = require('./ledger');
+const G = require('./eodGuard');
 const eligibility = require('./eligibility');
 const tranches = require('./tranches');
 const funding = require('./funding');
 const securities = require('./securities');
 const {
-  controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse,
+  controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMaySetDisbursementConditions,
 } = require('./controls');
 
 const OPEN = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL'];
@@ -101,7 +102,9 @@ async function assertTopUpStands(c, application) {
   if (!['ACTIVE', 'IN_ARREARS', 'LOCKED'].includes(old.status)) {
     throw err(`REFINANCED_LOAN_NOT_RUNNING: ${old.account_no} is ${old.status}`, 409);
   }
-  const s = ledger.settlement(old, application.refinance_arrears || 'CAPITALIZE');
+  const s = await ledger.settlementPlan(c, old, {
+    arrears: application.refinance_arrears || 'CAPITALIZE', capitalize: application.refinance_capitalize, carryFees: application.refinance_carry_fees !== false,
+  });
   if (!(Number(application.principal) > s.amount)) {
     throw err(`NO_TOP_UP_LEFT: principal ${Number(application.principal)}, settlement of ${old.account_no} ${s.amount}`, 409);
   }
@@ -276,7 +279,99 @@ const COLUMN = {
   purpose: 'purpose', notes: 'notes',
 };
 
-async function amend(c, loanId, patch, { actor } = {}) {
+// --------------------------------------------------------------------------
+// Disbursement details
+// --------------------------------------------------------------------------
+
+const DISBURSEMENT_FIELDS = {
+  expectedDisbursementDate: 'expected_disbursement_date', firstRepaymentDate: 'first_repayment_date',
+  disbursementChannelId: 'disbursement_channel_id', disbursementSavingsAccountId: 'disbursement_savings_account_id',
+};
+const INACTIVE = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED'];
+const isoOrNull = (v, label) => {
+  if (v === null || v === '') return null;
+  const d = String(v).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw err(`INVALID_DATE: ${label}`, 400);
+  return d;
+};
+
+/**
+ * Set or change an application's disbursement details (Mambu's
+ * Disbursement Details): the anticipated disbursement date, the first
+ * repayment date, and the channel or the member's own deposit account the
+ * money will go to. Only on an inactive loan (an application or an approved
+ * loan), only by a user with the tenant's Set Disbursement Conditions
+ * permission when it restricts it, and every change is kept
+ * (loan_disbursement_detail_changes).
+ */
+async function setDisbursementDetails(c, loanId, patch, { actor, user = null, fresh = false } = {}) {
+  const keys = Object.keys(patch || {}).filter((k) => DISBURSEMENT_FIELDS[k] && patch[k] !== undefined);
+  if (!keys.length) return null;
+  const l = await ledger.lock(c, loanId);
+  if (!INACTIVE.includes(l.status)) throw err(`DISBURSEMENT_DETAILS_NOT_EDITABLE_IN_STATE_${l.status}`, 409);
+  await assertMaySetDisbursementConditions(c, { user });
+  const next = {};
+  for (const k of Object.keys(DISBURSEMENT_FIELDS)) {
+    const v = patch[k] !== undefined ? patch[k] : l[DISBURSEMENT_FIELDS[k]];
+    next[k] = v instanceof Date ? ymd(v) : v;
+  }
+  next.expectedDisbursementDate = next.expectedDisbursementDate ? isoOrNull(next.expectedDisbursementDate, 'expectedDisbursementDate') : null;
+  next.firstRepaymentDate = next.firstRepaymentDate ? isoOrNull(next.firstRepaymentDate, 'firstRepaymentDate') : null;
+  if (next.expectedDisbursementDate && next.firstRepaymentDate && next.firstRepaymentDate <= next.expectedDisbursementDate) {
+    throw err('FIRST_REPAYMENT_DATE_MUST_BE_AFTER_THE_DISBURSEMENT_DATE', 400);
+  }
+  if (next.disbursementChannelId) {
+    const { rows: [ch] } = await c.query('SELECT gl_account_code FROM transaction_channels WHERE id = $1 AND is_active', [next.disbursementChannelId]);
+    if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${next.disbursementChannelId}`, 400);
+  }
+  if (next.disbursementSavingsAccountId) {
+    const { rows: [a] } = await c.query(
+      `SELECT a.id, a.member_id, a.status, p.is_funding_account FROM savings_accounts a JOIN savings_products p ON p.id = a.product_id
+       WHERE a.id::text = $1 OR a.account_no = $1`, [String(next.disbursementSavingsAccountId)]);
+    if (!a) throw err('SAVINGS_ACCOUNT_NOT_FOUND', 404);
+    if (a.member_id !== l.member_id) throw err('DISBURSEMENT_ACCOUNT_BELONGS_TO_ANOTHER_MEMBER', 409);
+    if (a.status !== 'ACTIVE' || a.is_funding_account) throw err('DISBURSEMENT_ACCOUNT_MUST_BE_AN_ACTIVE_DEPOSIT_ACCOUNT', 409);
+    next.disbursementSavingsAccountId = a.id;
+  }
+  if (next.disbursementChannelId && next.disbursementSavingsAccountId && keys.includes('disbursementChannelId') && keys.includes('disbursementSavingsAccountId')) {
+    throw err('DISBURSE_THROUGH_A_CHANNEL_OR_INTO_A_DEPOSIT_ACCOUNT_NOT_BOTH', 400);
+  }
+  // The later of the two wins when only one is given.
+  if (keys.includes('disbursementSavingsAccountId') && next.disbursementSavingsAccountId && !keys.includes('disbursementChannelId')) next.disbursementChannelId = null;
+  if (keys.includes('disbursementChannelId') && next.disbursementChannelId && !keys.includes('disbursementSavingsAccountId')) next.disbursementSavingsAccountId = null;
+  const before = Object.fromEntries(Object.entries(DISBURSEMENT_FIELDS).map(([k, col]) => [k, l[col] instanceof Date ? ymd(l[col]) : l[col] ?? null]));
+  const { rows: [out] } = await c.query(
+    `UPDATE loan_accounts SET expected_disbursement_date = $2::date, first_repayment_date = $3::date,
+       disbursement_channel_id = $4, disbursement_savings_account_id = $5, updated_at = now() WHERE id = $1 RETURNING *`,
+    [l.id, next.expectedDisbursementDate, next.firstRepaymentDate, next.disbursementChannelId || null, next.disbursementSavingsAccountId || null]);
+  await c.query(
+    'INSERT INTO loan_disbursement_detail_changes (loan_id, before, after, changed_by) VALUES ($1,$2,$3,$4)',
+    [l.id, JSON.stringify(fresh ? {} : before), JSON.stringify(next), actor || 'SYSTEM']);
+  return out;
+}
+
+async function disbursementDetails(c, loanId) {
+  const l = await ledger.read(c, loanId);
+  const { rows } = await c.query('SELECT * FROM loan_disbursement_detail_changes WHERE loan_id = $1 ORDER BY changed_at, id', [l.id]);
+  return {
+    loanId: l.id,
+    expectedDisbursementDate: l.expected_disbursement_date ? ymd(l.expected_disbursement_date) : null,
+    firstRepaymentDate: l.first_repayment_date ? ymd(l.first_repayment_date) : null,
+    disbursementChannelId: l.disbursement_channel_id || null,
+    disbursementSavingsAccountId: l.disbursement_savings_account_id || null,
+    changes: rows,
+  };
+}
+
+async function amend(c, loanId, patch, { actor, user = null } = {}) {
+  // Disbursement details have their own rules and audit trail.
+  const detailKeys = Object.keys(patch || {}).filter((k) => DISBURSEMENT_FIELDS[k]);
+  if (detailKeys.length) {
+    await setDisbursementDetails(c, loanId, Object.fromEntries(detailKeys.map((k) => [k, patch[k]])), { actor, user });
+    const rest = Object.fromEntries(Object.entries(patch).filter(([k]) => !DISBURSEMENT_FIELDS[k]));
+    if (!Object.keys(rest).filter((k) => COLUMN[k]).length) return (await c.query('SELECT * FROM loan_accounts WHERE id::text = $1 OR account_no = $1', [loanId])).rows[0];
+    patch = rest;
+  }
   const l = await ledger.lock(c, loanId);
   const keys = Object.keys(patch || {}).filter((k) => COLUMN[k]);
   if (!keys.length) throw err('NO_UPDATABLE_FIELDS', 400);
@@ -367,7 +462,7 @@ async function toleranceDeadline(c, due, days, excludeNonWorking) {
  * a percentage of the outstanding principal with a floor, below which a
  * shortfall is a partial payment rather than arrears.
  */
-async function markArrears(c, { asOf = null } = {}) {
+async function markArrears(c, { asOf = null, loanId = null } = {}) {
   const date = asOf || new Date().toISOString().slice(0, 10);
   const { rows: cands } = await c.query(
     `SELECT i.*, l.account_no, l.status AS loan_status, l.arrears_since, l.principal_disbursed, l.principal_capitalized, l.principal_paid,
@@ -380,26 +475,34 @@ async function markArrears(c, { asOf = null } = {}) {
      JOIN loan_accounts l ON l.id = i.loan_id
      JOIN loan_products p ON p.id = l.product_id
      WHERE i.status IN ('PENDING','PARTIALLY_PAID') AND i.due_date < $1::date
-       AND l.status IN ('ACTIVE','IN_ARREARS')
-     ORDER BY i.loan_id, i.number`, [date]);
+       AND l.status IN ('ACTIVE','IN_ARREARS') AND ${G.EXCLUDED_SQL('l')}
+       AND ($2::uuid IS NULL OR l.id = $2::uuid)
+     ORDER BY i.loan_id, i.number`, [date, loanId]);
 
-  const flipped = new Map();
+  // Loan by loan, each on its own (./eodGuard).
+  const byLoan = new Map();
   for (const i of cands) {
-    const deadline = await toleranceDeadline(c, i.due_date, Number(i.tol_days), i.arrears_non_working_days === 'EXCLUDE');
-    if (date <= deadline) continue;
-    const shortfall = round2((i.principal_due - i.principal_paid) + (i.interest_due - i.interest_paid) + (i.fee_due - i.fee_paid));
-    if (shortfall <= 0) continue;
-    if (i.tol_pct !== null || i.tol_floor !== null) {
-      const outstanding = round2(Number(i.principal_disbursed) + Number(i.principal_capitalized) - Number(i.principal_paid));
-      const tolerance = Math.max(i.tol_pct !== null ? outstanding * Number(i.tol_pct) / 100 : 0, Number(i.tol_floor || 0));
-      if (shortfall <= tolerance) continue;
-    }
-    await c.query("UPDATE loan_installments SET status = 'OVERDUE' WHERE id = $1", [i.id]);
-    if (!flipped.has(i.loan_id)) flipped.set(i.loan_id, { account_no: i.account_no, status: i.loan_status, since: ymd(i.due_date), countFrom: i.arrears_count_from, arrears_since: i.arrears_since });
+    if (!byLoan.has(i.loan_id)) byLoan.set(i.loan_id, []);
+    byLoan.get(i.loan_id).push(i);
   }
-
   const out = [];
-  for (const [loanId, f] of flipped) {
+  out.guard = await G.eachLoan(c, { job: 'markArrears', date }, [...byLoan.keys()], async (loanId) => {
+    let f = null;
+    for (const i of byLoan.get(loanId)) {
+      const deadline = await toleranceDeadline(c, i.due_date, Number(i.tol_days), i.arrears_non_working_days === 'EXCLUDE');
+      if (date <= deadline) continue;
+      const shortfall = round2((i.principal_due - i.principal_paid) + (i.interest_due - i.interest_paid) + (i.fee_due - i.fee_paid));
+      if (shortfall <= 0) continue;
+      if (i.tol_pct !== null || i.tol_floor !== null) {
+        const outstanding = round2(Number(i.principal_disbursed) + Number(i.principal_capitalized) - Number(i.principal_paid));
+        const tolerance = Math.max(i.tol_pct !== null ? outstanding * Number(i.tol_pct) / 100 : 0, Number(i.tol_floor || 0));
+        if (shortfall <= tolerance) continue;
+      }
+      await c.query("UPDATE loan_installments SET status = 'OVERDUE' WHERE id = $1", [i.id]);
+      if (!f) f = { account_no: i.account_no, status: i.loan_status, since: ymd(i.due_date), countFrom: i.arrears_count_from, arrears_since: i.arrears_since };
+    }
+    if (!f) return;
+
     // Oldest currently-late installment is the arrears date under
     // OLDEST_LATE; under FIRST_ARREARS the date the loan first went into
     // arrears stands until it is back in good standing.
@@ -415,7 +518,7 @@ async function markArrears(c, { asOf = null } = {}) {
     } else {
       await c.query('UPDATE loan_accounts SET arrears_since = $2::date WHERE id = $1', [loanId, since]);
     }
-  }
+  });
   return out;
 }
 
@@ -479,7 +582,7 @@ async function lockForCap(c, l) {
  * have sat in arrears past the product's limit, and close paid-off loans
  * the product says to close after N days.
  */
-async function enforceControls(c, { asOf = null } = {}) {
+async function enforceControls(c, { asOf = null, loanId = null } = {}) {
   const date = asOf || new Date().toISOString().slice(0, 10);
   const out = { capped: 0, lockedForArrears: 0, closed: 0 };
   // Close dormant accounts (Mambu): a running loan that owes nothing and
@@ -491,9 +594,9 @@ async function enforceControls(c, { asOf = null } = {}) {
             (SELECT max(t.value_date) FROM transactions t WHERE t.loan_account_id = l.id AND t.reversed_by IS NULL) AS last
      FROM loan_accounts l JOIN loan_products p ON p.id = l.product_id
      WHERE l.status = 'ACTIVE' AND p.auto_close_paid_off_days IS NOT NULL AND l.principal_disbursed > 0
-       AND l.credit_balance = 0
+       AND l.credit_balance = 0 AND ${G.EXCLUDED_SQL('l')} AND ($1::uuid IS NULL OR l.id = $1::uuid)
        AND l.principal_disbursed + l.principal_capitalized - l.principal_paid + l.interest_accrued - l.interest_paid
-           + l.fees_due - l.fees_paid + l.penalty_accrued - l.penalty_paid + l.ns_fees_due - l.ns_fees_paid <= 0`);
+           + l.fees_due - l.fees_paid + l.penalty_accrued - l.penalty_paid + l.ns_fees_due - l.ns_fees_paid <= 0`, [loanId]);
   for (const r of idle) {
     if (!r.last) continue;
     const since = Math.floor((new Date(`${date}T00:00:00Z`) - new Date(`${ymd(r.last)}T00:00:00Z`)) / 86400000);
@@ -506,29 +609,30 @@ async function enforceControls(c, { asOf = null } = {}) {
   }
   const { rows } = await c.query(
     `SELECT l.id FROM loan_accounts l JOIN loan_products p ON p.id = l.product_id
-     WHERE l.status = 'IN_ARREARS' AND (p.charge_cap_percent IS NOT NULL OR p.auto_lock_arrears_days IS NOT NULL)`);
-  for (const r of rows) {
-    const l = await ledger.lock(c, r.id);
-    if (l.status !== 'IN_ARREARS') continue;
+     WHERE l.status = 'IN_ARREARS' AND (p.charge_cap_percent IS NOT NULL OR p.auto_lock_arrears_days IS NOT NULL) AND ${G.EXCLUDED_SQL('l')}
+       AND ($1::uuid IS NULL OR l.id = $1::uuid)`, [loanId]);
+  const run = await G.eachLoan(c, { job: 'enforceControls', date }, rows, async (id) => {
+    const l = await ledger.lock(c, id);
+    if (l.status !== 'IN_ARREARS') return;
     const limit = capLimit(l);
     // With cap_includes_accrued, charges accrued and not yet applied count too.
     const charges = Number(l.charges_since_arrears) + (l.cap_includes_accrued ? Number(l.penalty_unapplied || 0) : 0);
-    if (limit !== null && charges >= limit) { await lockForCap(c, l); out.capped += 1; continue; }
+    if (limit !== null && charges >= limit) { await lockForCap(c, l); out.capped += 1; return; }
     if (l.auto_lock_arrears_days !== null && daysInArrears(l, date) >= Number(l.auto_lock_arrears_days)) {
       await c.query(
         `UPDATE loan_accounts SET status = 'LOCKED', locked_at = now(), locked_reason = 'ARREARS', status_before_lock = status, updated_at = now() WHERE id = $1`, [l.id]);
       await history(c, l.id, { from: 'IN_ARREARS', to: 'LOCKED', action: 'LOCK', actor: 'EOD', note: `${l.auto_lock_arrears_days} days in arrears` });
       out.lockedForArrears += 1;
     }
-  }
-  return out;
+  });
+  return { ...out, ...G.summary(run) };
 }
 
 module.exports = {
   assertTopUpStands,
   ACTIONS, ALIASES, OPEN, RUNNING, transition, history, historyOf, previousState,
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMayWriteOff,
-  amend, TERM_FIELDS, NARRATIVE_FIELDS,
+  amend, TERM_FIELDS, NARRATIVE_FIELDS, setDisbursementDetails, disbursementDetails, DISBURSEMENT_FIELDS,
   markArrears, refreshArrears, daysInArrears, toleranceDeadline, freezeSettings, thawSettings, arrearsIndicators,
   capLimit, capAllows, enforceControls,
 };

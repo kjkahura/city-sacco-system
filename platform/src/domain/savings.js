@@ -703,8 +703,13 @@ async function writeOffOverdraft(c, accountId, { narration, createdBy } = {}) {
 
 const REVERSIBLE = ['SAVINGS_DEPOSIT', 'SAVINGS_WITHDRAWAL', 'SAVINGS_TRANSFER', 'SAVINGS_FEE'];
 
-/** Reverse a posted deposit transaction. Never edits the original. */
-async function reverseTransaction(c, reference, { narration = 'Reversal', createdBy } = {}) {
+/**
+ * Reverse a posted deposit transaction. Never edits the original. One half
+ * of a transfer with a loan (a repayment from this account, a disbursement
+ * into it) is reversed with its loan transaction, which reverses both; on
+ * its own (`linked` false) it is refused.
+ */
+async function reverseTransaction(c, reference, { narration = 'Reversal', createdBy, linked = false } = {}) {
   const { rows } = await c.query(
     'SELECT * FROM transactions WHERE reference = $1 FOR UPDATE', [reference]
   );
@@ -713,6 +718,9 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
   if (tx.reversed_by) throw err('TRANSACTION_ALREADY_REVERSED', 409);
   if (!tx.savings_account_id) throw err('NOT_A_SAVINGS_TRANSACTION');
   if (!REVERSIBLE.includes(tx.kind)) throw err(`CANNOT_REVERSE_${tx.kind}`, 409);
+  if (tx.allocation?.loanTransfer && !linked) {
+    throw err(`LINKED_TO_A_LOAN_TRANSACTION: reverse ${tx.allocation.loanTransfer.reference}, which reverses both`, 409);
+  }
 
   const entry = tx.entry_id ? await acct.reverse(c, tx.entry_id, narration, createdBy) : { entryId: null };
   const al = tx.allocation || {};

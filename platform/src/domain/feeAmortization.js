@@ -3,6 +3,7 @@
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
+const G = require('./eodGuard');
 const { err, round2 } = acct;
 const { ymd } = S;
 
@@ -164,13 +165,14 @@ async function openRows(c, loanId, where = '', params = []) {
  * `asOf`. A period on due dates is recognised whole on its end date; a
  * daily one in proportion to the days elapsed.
  */
-async function run(c, { asOf = null, createdBy = 'EOD' } = {}) {
+async function run(c, { asOf = null, createdBy = 'EOD', loanId = null } = {}) {
   const date = asOf ? ymd(asOf) : S.isoDate(new Date());
   const { rows: loans } = await c.query(
-    `SELECT DISTINCT loan_id FROM loan_fee_amortization WHERE status = 'OPEN' AND period_start < $1::date`, [date]);
+    `SELECT DISTINCT loan_id FROM loan_fee_amortization WHERE status = 'OPEN' AND period_start < $1::date
+       AND ${G.EXCLUDED_ID_SQL('loan_id')} AND ($2::uuid IS NULL OR loan_id = $2::uuid)`, [date, loanId]);
   let posted = 0;
   let total = 0;
-  for (const { loan_id: loanId } of loans) {
+  const run = await G.eachLoan(c, { job: 'amortizeFees', date }, loans.map((r) => r.loan_id), async (loanId) => {
     const l = await ledger.lock(c, loanId);
     const closed = await acct.closedThrough(c, l.branch_id || null);
     const byDate = new Map();
@@ -204,8 +206,8 @@ async function run(c, { asOf = null, createdBy = 'EOD' } = {}) {
         total = round2(total + delta);
       }
     }
-  }
-  return { loans: loans.length, periods: posted, recognised: total };
+  });
+  return { loans: loans.length, periods: posted, recognised: total, ...G.summary(run) };
 }
 
 /**

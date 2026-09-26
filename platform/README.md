@@ -1350,6 +1350,154 @@ principal, the same idea as Mambu's drag-and-drop
 A partial repayment walks it. The database refuses an order that does not
 name all four components once.
 
+### Working with loan accounts
+
+After Mambu's "Working with loan accounts" pages.
+
+- **The end of day leaves a broken loan out.** The loan jobs (billing,
+  rate reviews, interest, arrears, penalties, fees, planned fees, fee
+  amortisation, the lending controls) run each loan in its own savepoint.
+  - A loan that throws is rolled back and put on `loan_eod_exclusions` with
+    the job, the business date and the error. The job carries on with the
+    other loans and lists the loans it left out in its result.
+  - From then on every loan job leaves it out, as Mambu does. Postdated
+    payments and settlement transfers wait for it.
+  - A failure on more than a tenth of the loans a job looks at (and at
+    least three) is treated as a fault in the system: the job fails and no
+    loan is left out. Database and connection errors fail the job as before.
+  - `GET /api/loans/eod-exclusions` lists them. `POST /api/loans/:id/eod-include`
+    brings a loan back and runs every loan job it missed up to today. If it
+    still fails, the inclusion is refused and the loan stays out.
+- **Pay-off.** `GET /api/loans/:id/pay-off` quotes the principal and the
+  charges owed on a date; the interest brought to the day is worked out in a
+  savepoint and not booked. `POST /api/loans/:id/pay-off` takes `interest`,
+  `fees` and `penalty`, the amounts collected of each (default: all). What
+  is not collected is written off against the write-off expense as a
+  `LOAN_BALANCE_WRITE_OFF`. The principal is always paid in full, the
+  payment is one repayment through the channel, and the loan closes as
+  CLOSED_REPAID. A revolving loan is closed by it too.
+- **Terminate.** `POST /api/loans/:id/terminate` makes everything owed fall
+  due on the date: the installments not yet due become one installment due
+  that day, carrying all the principal still to come, the interest earned
+  to the day and the fees already applied to them. The loan keeps its
+  state and every running-loan rule; `sub_state` shows TERMINATED.
+  `POST /api/loans/:id/undo-terminate` puts the schedule back while no
+  repayment has been posted since. Mambu offers this for dynamic loans; here
+  it is open to fixed-term, dynamic and interest-free loans, not revolving,
+  tranched or funded ones.
+- **Disbursement details.** An application may carry an anticipated
+  disbursement date, a first repayment date, and the channel or the
+  member's own deposit account the money will go to (on `POST /api/loans`,
+  `PUT /api/loans/:id/disbursement-details`, or `PATCH /api/loans/:id`).
+  Every change is kept in `loan_disbursement_detail_changes`. The tenant may
+  restrict who sets them (`disbursementConditionsRoles` in the controls;
+  blank means any role that edits applications). The first repayment date
+  sets the first due date of the schedule.
+- **Disbursing into a deposit account.** `POST /api/loans/:id/disbursements`
+  with `savingsAccountId`, or with no channel when the details name an
+  account, pays the loan into the member's deposit account: a Disbursement
+  on the loan and a Deposit on the account through the transfer channel
+  (290-210 Loan Transfer Clearing, which nets to nothing). The account must
+  be active, not overdrawn and not a funding account, and both products
+  linked to the ledger or neither. Reversing either half reverses both.
+- **Repayment rules.**
+  - A repayment cannot be dated before one already entered on the loan
+    (Mambu: backdate only where no repayment is entered after the date).
+  - Repayments are reversed newest first.
+  - A custom allocation needs the product's `allowCustomAllocation` (on by
+    default for products set up before this) and, where the tenant lists
+    them, one of the `customAllocationRoles`.
+- **Repayment from a deposit account.** `POST /api/loans/:id/repayments`
+  with `savingsAccountId`, or `POST /api/savings/:id/loan-repayments` with
+  `loanAccountId`: a Withdrawal on the account (any member's, so member A
+  may repay member B's loan) and a Repayment on the loan, each naming the
+  other. The deposit account's own rules stand. Reversing the withdrawal
+  from the savings side reverses both, as Mambu does.
+- **Bulk collection.** `GET /api/loans/collections/sheet` lists what is due:
+  `view=REPAYMENTS` every installment in a date range at its expected
+  amount, or `view=ACCOUNTS` everything due by account as of one date,
+  filtered by branch, product or member; `format=csv` exports it.
+  `POST /api/loans/collections/batches` posts the rows chosen, each in its
+  own savepoint, with the batch's channel, date and reference filling in
+  what a row does not give. One batch runs at a time per tenant. The
+  console prints the sheet and highlights rows changed from their defaults.
+- **Fees applied by hand** may be back dated as far as the last repayment,
+  placed on a chosen installment (`installmentNumber`), and applied to a
+  locked loan.
+- **Adjust, waive and reduce.**
+  - Adjust (`POST /api/loans/fees/:id/adjust`, `POST /api/loans/penalties/:id/adjust`)
+    takes a charge back as if never applied: its entry is reversed and its
+    transaction marked reversed. A fee is adjusted only while nothing has
+    been paid on it; a penalty only before a repayment is entered after it.
+  - Waive stays as before: the unpaid part comes off against income.
+  - Reduce Balance (`POST /api/loans/:id/reduce-balance` with `component`
+    FEE or PENALTY and `newBalance` or `amount`) writes the difference off
+    against the write-off expense. On a fixed-term loan, a schedule edit that
+    lowers a fee does the same (Mambu's Fee Due Reduce).
+- **Changing a running loan's rate.** `POST /api/loans/:id/interest-rate`
+  with `rate` (or `spread` for an indexed loan) and `effectiveFrom`. The
+  change is a new rate period; a loan with none gets one for its opening
+  rate first. A date that has come applies at once, a later one at the end
+  of that day, and a fixed-term loan takes the new rate at its next due
+  date. It cannot be dated before a repayment on the loan, nor before the
+  day interest has been accrued to: accrued interest here stands for
+  Mambu's Interest Applied. Each change is a non-financial
+  `LOAN_RATE_CHANGED` transaction.
+- **Payment holidays** take `kind` NO_PRINCIPAL_NO_INTEREST (the default:
+  nothing due, the term extended) or PRINCIPAL_NO_INTEREST (principal due,
+  no interest, the term unchanged). For the first kind `interest` is
+  SPREAD over the installments after the holiday (the default), NONE, or
+  APPLY_LATER, held on the loan until `POST /api/loans/:id/holiday-interest`
+  applies it: on a dynamic loan booked at once on the current installment,
+  on a fixed-term loan spread over the installments to come. Interest not
+  charged or held does not accrue through the holiday on a dynamic loan.
+- **Revolving installments added by hand.** `POST /api/loans/:id/revolving-installments`
+  with a `dueDate`, on an application or a running loan, after the last
+  installment billed. It is filled on its date like any bill, or marked
+  GRACE when there is nothing to bill. The product's billing dates up to
+  the last date added by hand are skipped and resume after it. One not yet
+  billed may be removed; `GET /api/loans/:id/revolving-schedule` shows them.
+- **Guarantors** may be added to an approved or running loan and removed
+  (`DELETE /api/loans/:id/guarantors/:guarantorId`) when the loan stays
+  covered under its product's rules.
+- **Loan history.** `GET /api/members/:id/loan-history` gives the closed
+  loans with how they closed, the largest amount approved, each loan's
+  on-time repayment rate (installments paid in full on or before their due
+  date, replayed from the repayments that stand), the overall rate, and
+  the completed loan cycles (loans closed with all obligations met). The
+  loan overview shows the cycles too.
+- **Attachments.** `POST /api/loans/:id/attachments` takes a file as JSON
+  (`fileName`, base64 `content`) or as the raw body with the name in the
+  query, up to 10 MB, on Mambu's list of types and name rules; an encrypted
+  PDF is refused because it cannot be scanned. Files are listed, previewed,
+  downloaded, retitled and deleted, and each of those is in the audit log.
+- **Interest from arrears.** On a loan that earns interest on its balance,
+  the part of each accrual earned on overdue principal is kept as interest
+  from arrears (`interest_from_arrears_accrued`). It is a breakdown of the
+  interest, never added to it, it is paid first, and the arrears tolerance
+  does not affect it. The loan overview's `breakdown` shows, for principal,
+  interest, fees and penalties, what is expected, due, paid and outstanding.
+- **Reschedule and refinance.**
+  - `capitalize` { interest, fees, penalty } capitalises those amounts and
+    writes off the rest; `arrears` CAPITALIZE or WRITE_OFF still does all
+    or nothing.
+  - A reschedule may reduce the principal (`principal`, the new amount);
+    the difference is written off.
+  - Unpaid late repayment and payment-due fees move to the new loan as
+    fees (`carryFees`, default true, Mambu's rule) rather than being
+    capitalised or written off.
+  - `keepAccountNo` gives the new loan the old account number; the old loan
+    is renumbered and keeps the number it had in `previous_account_no`.
+  - `POST /api/loans/:newId/undo-restructure` undoes either while the new
+    loan has taken no repayment: the entry is reversed (a top-up's payout
+    too), the charges written off come back, what the new loan booked since
+    is reversed, and fees, guarantors, collateral, deferred fee income and
+    a kept number return. The original runs again and the new loan is
+    Closed (Withdrawn).
+- **Not built from these pages:** solidarity group loans (there are no
+  groups), lines of credit (Mambu's credit arrangements), and the
+  secondary marketplace for funded loans, which Mambu no longer offers.
+
 ## Shares and dividends
 
 Shares are equity, not a deposit. Buying them credits share capital; a
@@ -1481,7 +1629,9 @@ it off and use a CronJob calling the CLI instead.
     the tenant has switched automatic closures on
 
 Each job is idempotent per business date through `platform.job_runs`, so a
-rerun is a no-op rather than a double posting.
+rerun is a no-op rather than a double posting. A loan that breaks a loan job
+is left out of the end of day until it is included again (see "Working with
+loan accounts").
 
 ## Reports read a rollup, not the journal
 

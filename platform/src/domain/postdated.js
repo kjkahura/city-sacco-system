@@ -5,6 +5,7 @@ const S = require('./schedule');
 const ledger = require('./ledger');
 const types = require('./productTypes');
 const loans = require('./loans');
+const G = require('./eodGuard');
 const { err, round2 } = acct;
 const { ymd, isoDate } = S;
 
@@ -132,11 +133,12 @@ async function forLoan(c, loanId) {
  * `asOf`, oldest first, each in its own savepoint so one that fails is
  * recorded as FAILED without undoing the others.
  */
-async function applyDue(c, { asOf = null, createdBy = 'EOD' } = {}) {
+async function applyDue(c, { asOf = null, createdBy = 'EOD', loanId = null } = {}) {
   const date = asOf ? ymd(asOf) : today();
   const { rows } = await c.query(
     `SELECT * FROM loan_postdated_payments WHERE status = 'PENDING' AND value_date <= $1::date
-     ORDER BY value_date, id FOR UPDATE`, [date]);
+       AND ${G.EXCLUDED_ID_SQL('loan_id')} AND ($2::uuid IS NULL OR loan_id = $2::uuid)
+     ORDER BY value_date, id FOR UPDATE`, [date, loanId]);
   const out = { due: rows.length, applied: 0, failed: 0, amount: 0 };
   for (const p of rows) {
     await c.query('SAVEPOINT postdated');

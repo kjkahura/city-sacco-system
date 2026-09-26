@@ -158,6 +158,172 @@ async function writeOff(c, loanId, { narration, createdBy, valueDate } = {}) {
 }
 
 // --------------------------------------------------------------------------
+// Writing off part of a running loan's charges
+// --------------------------------------------------------------------------
+
+const CHARGE_KINDS = ['PAY_OFF', 'REDUCE_BALANCE', 'RESCHEDULE', 'REFINANCE'];
+
+/**
+ * Write off `interest`, `fees` and `penalty` (amounts, each at most what is
+ * owed on it) of a loan that stays on the books until the caller closes it:
+ * the charges left at a pay-off, a fee or penalty balance reduced (Mambu's
+ * Reduce Balance), the charges a reschedule does not capitalise.
+ *
+ * Under accrual each component is cleared from the receivable it sits in
+ * against the write-off expense (a fee against its own write-off account
+ * where it names one); under cash nothing was recognised, so nothing is
+ * booked. The loan's balances come down by the amounts (interest accrued,
+ * fees due, penalties accrued); fees are reduced fee by fee, oldest first,
+ * each keeping what was written off of it, and a fee on an installment
+ * leaves the installment's fee due with it. Every write-off is a
+ * LOAN_BALANCE_WRITE_OFF transaction and a row in loan_balance_adjustments.
+ */
+async function writeOffCharges(c, loanId, { interest = 0, fees: feeAmount = 0, penalty = 0, principal = 0, kind, reason = null, valueDate, createdBy, feeIds = null } = {}) {
+  if (!CHARGE_KINDS.includes(kind)) throw err(`UNKNOWN_WRITE_OFF_KIND: ${kind}`, 500);
+  const l = await lock(c, loanId);
+  const b = balances(l);
+  const amt = { interest: round2(interest || 0), fees: round2(feeAmount || 0), penalty: round2(penalty || 0), principal: round2(principal || 0) };
+  // Principal is written off only by a reschedule that reduces the amount.
+  if (amt.principal > 0 && kind !== 'RESCHEDULE') throw err('ONLY_A_RESCHEDULE_WRITES_OFF_PRINCIPAL', 500);
+  if (amt.principal > Math.max(0, b.principal)) throw err(`WRITE_OFF_EXCEEDS_PRINCIPAL_OUTSTANDING: ${b.principal}`, 409);
+  for (const [k, v] of Object.entries(amt)) if (v < 0) throw err(`WRITE_OFF_AMOUNT_CANNOT_BE_NEGATIVE: ${k}`, 400);
+  if (amt.interest > Math.max(0, b.interest)) throw err(`WRITE_OFF_EXCEEDS_INTEREST_OWED: ${b.interest}`, 409);
+  if (amt.fees > round2(Math.max(0, b.fees) + Math.max(0, b.nonScheduledFees))) throw err(`WRITE_OFF_EXCEEDS_FEES_OWED: ${round2(b.fees + b.nonScheduledFees)}`, 409);
+  if (amt.penalty > Math.max(0, b.penalty)) throw err(`WRITE_OFF_EXCEEDS_PENALTIES_OWED: ${b.penalty}`, 409);
+  const total = round2(amt.interest + amt.fees + amt.penalty + amt.principal);
+  if (!(total > 0)) return null;
+  const date = valueDate ? ymd(valueDate) : today();
+
+  const credits = [];
+  const debits = [];
+  const feeLines = [];
+  if (amt.principal > 0 && booksEntries(l)) credits.push({ glCode: writeOffCredit(l, 'PRINCIPAL'), amount: amt.principal, memberId: l.member_id });
+  if (isAccrual(l)) {
+    if (interestAccrues(l) && amt.interest > 0) credits.push({ glCode: writeOffCredit(l, 'INTEREST'), amount: amt.interest, memberId: l.member_id });
+    if (amt.penalty > 0) credits.push({ glCode: writeOffCredit(l, 'PENALTY'), amount: amt.penalty, memberId: l.member_id });
+  }
+  // Fees, oldest first, each one's receivable and write-off account.
+  let left = amt.fees;
+  let scheduled = 0;
+  let nonScheduled = 0;
+  // The fees named first (a schedule edit's installments), then the rest.
+  const all = await fees.outstanding(c, l, { nonScheduled: null });
+  const firstIds = new Set(feeIds || []);
+  const ordered = [...all.filter((f) => firstIds.has(f.id)), ...all.filter((f) => !firstIds.has(f.id))];
+  for (const f of ordered) {
+    if (!(left > 0)) break;
+    const take = round2(Math.min(left, Number(f.amount) - Number(f.paid)));
+    if (!(take > 0)) continue;
+    left = round2(left - take);
+    feeLines.push({ id: f.id, amount: take });
+    if (f.non_scheduled) nonScheduled = round2(nonScheduled + take); else scheduled = round2(scheduled + take);
+    if (isAccrual(l)) {
+      credits.push({ glCode: f.gl_receivable || l.gl_fee_rec, amount: take, memberId: l.member_id });
+      const wo = f.gl_writeoff || l.gl_writeoff_exp;
+      if (wo !== l.gl_writeoff_exp) debits.push({ glCode: wo, amount: take, memberId: l.member_id });
+    }
+    await c.query(
+      `UPDATE loan_fees SET amount = amount - $2, written_off = written_off + $2,
+         status = CASE WHEN amount - $2 <= paid THEN (CASE WHEN paid > 0 THEN 'PAID' ELSE 'WAIVED' END) ELSE status END,
+         note = COALESCE(note || ' | ', '') || $3
+       WHERE id = $1`, [f.id, take, `written off ${take}${reason ? `: ${reason}` : ''}`]);
+    if (f.installment_id) await c.query('UPDATE loan_installments SET fee_due = GREATEST(fee_paid, fee_due - $1) WHERE id = $2', [take, f.installment_id]);
+  }
+  if (left > 0) scheduled = round2(scheduled + left);   // fees owed with no row: the product's accounts
+  if (left > 0 && isAccrual(l)) credits.push({ glCode: l.gl_fee_rec, amount: left, memberId: l.member_id });
+
+  const booked = round2(credits.reduce((s, x) => s + x.amount, 0));
+  const covered = round2(debits.reduce((s, x) => s + x.amount, 0));
+  if (round2(booked - covered) > 0) debits.push({ glCode: l.gl_writeoff_exp, amount: round2(booked - covered), memberId: l.member_id });
+  const entryId = booked > 0 ? await post(c, l, {
+    debits, credits,
+    narration: `${kind === 'PAY_OFF' ? 'Pay-off' : kind === 'REDUCE_BALANCE' ? 'Balance reduced' : kind === 'RESCHEDULE' ? 'Reschedule' : 'Refinance'}: charges written off ${l.account_no}${reason ? `: ${reason}` : ''}`,
+    sourceType: 'LOAN_WRITE_OFF', sourceId: l.id, bookingDate: date, createdBy,
+  }) : null;
+
+  await c.query(
+    `UPDATE loan_accounts SET interest_accrued = interest_accrued - $2, fees_due = fees_due - $3, ns_fees_due = ns_fees_due - $4,
+       penalty_accrued = penalty_accrued - $5, principal_paid = principal_paid + $6,
+       interest_from_arrears_accrued = GREATEST(interest_from_arrears_paid, interest_from_arrears_accrued - $2),
+       updated_at = now() WHERE id = $1`,
+    [l.id, amt.interest, scheduled, nonScheduled, amt.penalty, amt.principal]);
+  const tx = await savings.record(c, {
+    reference: savings.ref('LBW'), kind: 'LOAN_BALANCE_WRITE_OFF', memberId: l.member_id, loanAccountId: l.id,
+    amount: total, valueDate: date, entryId,
+    allocation: { kind, interest: amt.interest, fees: amt.fees, penalty: amt.penalty, principal: amt.principal, feeRows: feeLines,
+      scheduledFees: scheduled, nonScheduledFees: nonScheduled, reason },
+    narration: reason, createdBy,
+  });
+  await c.query(
+    `INSERT INTO loan_balance_adjustments (loan_id, kind, interest, fees, penalty, principal, value_date, reason, entry_id, transaction_id, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7::date,$8,$9,$10,$11)`,
+    [l.id, kind, amt.interest, amt.fees, amt.penalty, amt.principal, date, reason, entryId, tx.id, createdBy || 'SYSTEM']);
+  return tx;
+}
+
+/**
+ * Undo a charge write-off (an undone reschedule's): its entry is reversed,
+ * the balances and the fees it reduced are restored, and the transaction is
+ * marked reversed.
+ */
+async function undoChargeWriteOff(c, tx, { narration = 'Write-off undone', createdBy } = {}) {
+  if (tx.reversed_by) return null;
+  const a = tx.allocation || {};
+  const entry = tx.entry_id ? await acct.reverse(c, tx.entry_id, narration, createdBy) : { entryId: null };
+  for (const f of a.feeRows || []) {
+    await c.query(
+      `UPDATE loan_fees SET amount = amount + $2, written_off = GREATEST(0, written_off - $2), status = 'DUE' WHERE id = $1`, [f.id, f.amount]);
+    const { rows: [row] } = await c.query('SELECT installment_id FROM loan_fees WHERE id = $1', [f.id]);
+    if (row?.installment_id) await c.query('UPDATE loan_installments SET fee_due = fee_due + $1 WHERE id = $2', [f.amount, row.installment_id]);
+  }
+  const sched = a.scheduledFees !== undefined ? Number(a.scheduledFees) : Number(a.fees || 0);
+  await c.query(
+    `UPDATE loan_accounts SET interest_accrued = interest_accrued + $2, fees_due = fees_due + $3, ns_fees_due = ns_fees_due + $4,
+       penalty_accrued = penalty_accrued + $5, principal_paid = principal_paid - $6, updated_at = now() WHERE id = $1`,
+    [tx.loan_account_id, Number(a.interest || 0), sched, Number(a.nonScheduledFees || 0), Number(a.penalty || 0), Number(a.principal || 0)]);
+  const rev = await savings.record(c, {
+    reference: savings.ref('REV'), kind: 'REVERSAL', memberId: tx.member_id, loanAccountId: tx.loan_account_id,
+    amount: -Number(tx.amount), entryId: entry.entryId, allocation: { reversalOf: tx.reference }, narration, createdBy,
+  });
+  await c.query('UPDATE transactions SET reversed_by = $1 WHERE id = $2', [rev.id, tx.id]);
+  return rev;
+}
+
+/**
+ * Reduce a loan's fee or penalty balance (Mambu's Reduce Balance): the
+ * balance becomes `newBalance` (or comes down by `amount`), and the
+ * difference is written off.
+ */
+async function reduceBalance(c, loanId, { component, newBalance = null, amount = null, reason = null, valueDate = null, createdBy } = {}) {
+  const what = String(component || '').toUpperCase();
+  if (!['FEE', 'PENALTY'].includes(what)) throw err('COMPONENT_IS_FEE_OR_PENALTY', 400);
+  const l = await lock(c, loanId);
+  if (!WRITABLE.includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
+  const b = balances(l);
+  const now = what === 'FEE' ? round2(b.fees + b.nonScheduledFees) : b.penalty;
+  let by;
+  if (newBalance !== null && newBalance !== undefined && newBalance !== '') {
+    const v = round2(newBalance);
+    if (!(v >= 0) || v >= now) throw err(`NEW_BALANCE_MUST_BE_BELOW_THE_CURRENT_ONE: ${now}`, 400);
+    by = round2(now - v);
+  } else {
+    by = round2(amount);
+    if (!(by > 0) || by > now) throw err(`REDUCTION_MUST_BE_MORE_THAN_NOTHING_AND_AT_MOST: ${now}`, 400);
+  }
+  return writeOffCharges(c, l.id, {
+    fees: what === 'FEE' ? by : 0, penalty: what === 'PENALTY' ? by : 0, kind: 'REDUCE_BALANCE',
+    reason: reason || `${what === 'FEE' ? 'Fee' : 'Penalty'} balance reduced`, valueDate, createdBy,
+  });
+}
+
+/** Every charge write-off on a loan. */
+async function chargeWriteOffs(c, loanId) {
+  const l = await ledger.read(c, loanId);
+  const { rows } = await c.query('SELECT * FROM loan_balance_adjustments WHERE loan_id = $1 ORDER BY created_at, id', [l.id]);
+  return rows;
+}
+
+// --------------------------------------------------------------------------
 // Requests and approval
 // --------------------------------------------------------------------------
 
@@ -495,6 +661,7 @@ async function reverse(c, tx, { narration = 'Reversal', createdBy } = {}) {
 }
 
 module.exports = {
+  writeOffCharges, undoChargeWriteOff, chargeWriteOffs, reduceBalance, CHARGE_KINDS,
   writeOff, requestWriteOff, decide, requestsFor, pendingRequests, register,
   recover, recoverFromGuarantor, releaseCall, reverse, SOURCES,
 };

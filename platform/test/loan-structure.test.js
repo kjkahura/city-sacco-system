@@ -111,7 +111,7 @@ const eff = (id) => T(async (c) => ledger.effective(await ledger.lock(c, id)));
     const below = ['accounting', 'schedule', 'tax'];
     check('the graph includes the strategy folder', Boolean(g.productTypes && g['productTypes/revolving']), Object.keys(g).join(','));
     check('ledger stands only on accounting, schedule and tax', [...g.ledger].every((m) => below.includes(m)), [...g.ledger].join(','));
-    const aboveLoans = ['restructure', 'postdated', 'settlement'];
+    const aboveLoans = ['restructure', 'postdated', 'settlement', 'eodExclusions', 'loanClosures', 'loanTransfers', 'collections'];
     check('nothing below loans requires loans', Object.entries(g).every(([n, deps]) => aboveLoans.includes(n) || !deps.has('loans')),
       Object.entries(g).filter(([n, d]) => !aboveLoans.includes(n) && d.has('loans')).map(([n]) => n).join(','));
     const exported = ['lock', 'balances', 'principalOutstanding', 'effective', 'terms', 'isDynamic', 'isRevolving', 'isTranched',

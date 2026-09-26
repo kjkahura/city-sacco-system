@@ -23,6 +23,38 @@ const { ymd, interestBetween } = S;
  * The strategy contract is documented in ./index.js.
  */
 
+/**
+ * The stretches of a payment holiday whose interest is not charged or is
+ * held (holiday_interest NONE or APPLY_LATER): from the end of the period
+ * before each such installment to its own nominal date. Interest does not
+ * accrue in them.
+ */
+function interestFreeWindows(l, installments) {
+  const out = [];
+  let prev = l.disbursed_on ? ymd(l.disbursed_on) : null;
+  for (const i of installments) {
+    const to = ymd(i.nominal_due || i.due_date);
+    if (i.payment_holiday && (i.holiday_interest === 'NONE' || i.holiday_interest === 'APPLY_LATER') && prev) out.push([prev, to]);
+    prev = to;
+  }
+  return out;
+}
+
+/** [from, to] less the windows, as the stretches left. */
+function outside(fromIso, toIso, windows) {
+  let parts = [[fromIso, toIso]];
+  for (const [a, b] of windows) {
+    const next = [];
+    for (const [x, y] of parts) {
+      if (b <= x || a >= y) { next.push([x, y]); continue; }
+      if (a > x) next.push([x, a]);
+      if (b < y) next.push([b, y]);
+    }
+    parts = next;
+  }
+  return parts;
+}
+
 const dynamicTerm = {
   ...fixedTerm,
   type: 'DYNAMIC_TERM',
@@ -78,8 +110,12 @@ const dynamicTerm = {
       || (t.interestType === 'SIMPLE' && l.simple_base === 'PRINCIPAL_AND_INTEREST');
     return round2(ledger.principalOutstanding(l) + (onInterestToo ? unpaidInterest : 0));
   },
-  dailyAccrual: (l, t, { base, fromIso, date }) => interestBetween(base, t, fromIso, date, { exact: true }),
+  dailyAccrual(l, t, { base, fromIso, date, installments = [] }) {
+    const windows = interestFreeWindows(l, installments);
+    if (!windows.length) return interestBetween(base, t, fromIso, date, { exact: true });
+    return outside(fromIso, date, windows).reduce((a, [x, y]) => a + interestBetween(base, t, x, y, { exact: true }), 0);
+  },
   capitalizes: (l) => l.interest_type === 'CAPITALIZED',
 };
 
-module.exports = { dynamicTerm };
+module.exports = { dynamicTerm, interestFreeWindows, outside };

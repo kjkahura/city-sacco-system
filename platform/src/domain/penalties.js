@@ -7,6 +7,7 @@ const L = require('./ledger');
 const W = require('./workflow');
 const { pageQuery } = require('../lib/page');
 const S = require('./schedule');
+const G = require('./eodGuard');
 const { err, round2 } = acct;
 
 /**
@@ -211,19 +212,19 @@ async function accrueAll(c, { asOf = null, createdBy = 'EOD' } = {}) {
     `SELECT DISTINCT l.id FROM loan_accounts l
      JOIN loan_products p ON p.id = l.product_id
      LEFT JOIN loan_installments i ON i.loan_id = l.id AND i.status NOT IN ('PAID', 'GRACE') AND i.due_date < $1::date
-     WHERE l.status IN ('ACTIVE', 'IN_ARREARS', 'LOCKED')
+     WHERE l.status IN ('ACTIVE', 'IN_ARREARS', 'LOCKED') AND ${G.EXCLUDED_SQL('l')}
        AND ((${L.overrideSql('penaltyRate')} > 0 AND ${L.settingSql('penalty_basis')} <> 'NONE' AND i.id IS NOT NULL)
             OR l.penalty_unapplied > 0)`,
     [date]
   );
   let charged = 0;
   let total = 0;
-  for (const r of rows) {
-    const out = await accrueForLoan(c, r.id, { asOf: date, createdBy });
+  const run = await G.eachLoan(c, { job: 'accruePenalties', date }, rows, async (id) => {
+    const out = await accrueForLoan(c, id, { asOf: date, createdBy });
     charged += out.length;
     total = round2(total + out.reduce((s, x) => s + Number(x.amount), 0));
-  }
-  return { loansConsidered: rows.length, chargesCreated: charged, total };
+  });
+  return { loansConsidered: rows.length, chargesCreated: charged, total, ...G.summary(run) };
 }
 
 /**
@@ -322,6 +323,41 @@ async function waive(c, chargeId, { reason = '', createdBy } = {}) {
 }
 
 /**
+ * Adjust a penalty (Mambu's Adjust on a Penalty Applied transaction): taken
+ * back as applied by mistake. Mambu allows it only before a repayment is
+ * entered, so a charge with a repayment on or after its date is refused
+ * (waive it or reduce the balance instead). The posting is reversed and the
+ * charge kept, marked adjusted; its days count as charged, as a waived
+ * charge's do, so the next run does not charge them again.
+ */
+async function adjust(c, chargeId, { reason = '', createdBy } = {}) {
+  const { rows: [ch] } = await c.query('SELECT * FROM penalty_charges WHERE id = $1 FOR UPDATE', [chargeId]);
+  if (!ch) throw err('PENALTY_CHARGE_NOT_FOUND', 404);
+  if (ch.waived_at || ch.adjusted_at) throw err('PENALTY_ALREADY_WAIVED_OR_ADJUSTED', 409);
+  if (ch.reversed_at) throw err('PENALTY_CHARGE_WAS_RECALCULATED', 409);
+  if (ch.forfeited || !(Number(ch.amount) > 0)) throw err('PENALTY_CHARGE_WAS_FORFEITED', 409);
+  const { rows: [paid] } = await c.query(
+    `SELECT reference FROM transactions WHERE loan_account_id = $1 AND kind = 'LOAN_REPAYMENT' AND reversed_by IS NULL
+       AND value_date >= $2::date LIMIT 1`, [ch.loan_id, ch.charged_on]);
+  if (paid) throw err(`PENALTY_ADJUSTED_ONLY_BEFORE_A_REPAYMENT: ${paid.reference} was entered after it; waive it or reduce the balance`, 409);
+  const l = await L.lock(c, ch.loan_id);
+  const entry = ch.entry_id ? await acct.reverse(c, ch.entry_id, `Penalty adjusted: ${reason}`, createdBy) : { entryId: null };
+  await c.query('UPDATE penalty_charges SET adjusted_at = now(), adjusted_by = $1, waived_at = now(), waived_by = $1 WHERE id = $2',
+    [createdBy || 'SYSTEM', ch.id]);
+  await c.query(
+    `UPDATE loan_accounts SET penalty_accrued = penalty_accrued - $1, tax_charged = tax_charged - $3,
+       charges_since_arrears = GREATEST(0, charges_since_arrears - $1), updated_at = now() WHERE id = $2`,
+    [ch.amount, l.id, Number(ch.tax || 0)]);
+  await c.query(
+    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'PENALTY_ADJUSTED','penalty_charge',$2,$3,$4)`,
+    [createdBy || 'SYSTEM', ch.id, JSON.stringify(ch), JSON.stringify({ reason })]);
+  return savings.record(c, {
+    reference: savings.ref('LPA'), kind: 'LOAN_PENALTY_ADJUSTED', memberId: l.member_id, loanAccountId: l.id,
+    amount: -Number(ch.amount), entryId: entry.entryId, allocation: { chargeId: ch.id, chargedOn: ymd(ch.charged_on), reason }, narration: reason, createdBy,
+  });
+}
+
+/**
  * Every penalty charged on one loan. One row per installment per day, so a
  * loan two years in arrears has hundreds; paged for that reason.
  */
@@ -339,4 +375,4 @@ async function forLoan(c, loanId, { offset = 0, limit = 50 } = {}) {
   );
 }
 
-module.exports = { accrueForLoan, accrueAll, waive, forLoan, daysLate, countDays, dailyRate, chargedThrough, reverseAfter, changeRate, rateChanges };
+module.exports = { accrueForLoan, accrueAll, waive, adjust, forLoan, daysLate, countDays, dailyRate, chargedThrough, reverseAfter, changeRate, rateChanges };

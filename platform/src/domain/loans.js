@@ -187,6 +187,8 @@ async function apply(c, params, { refinance = null, settles = refinance?.of || n
   for (const k of collateral || []) await securities.addCollateral(c, rows[0].id, { ...k, createdBy });
   // A settlement deposit account, where the product sets or creates one.
   await settlementLinks.autoLink(c, rows[0], { createdBy });
+  // Disbursement details given with the application (./workflow).
+  await workflow.setDisbursementDetails(c, rows[0].id, params, { actor: createdBy, user: params.user || null, fresh: true });
   return (await c.query('SELECT * FROM loan_accounts WHERE id = $1', [rows[0].id])).rows[0];
 }
 
@@ -223,7 +225,7 @@ async function postUnlinked(c, l, entry, { cash, funded = null, extra = [] }) {
  * The schedule is drawn on the resulting principal. Under ON_DISBURSEMENT
  * posting the schedule's whole interest is applied at once.
  */
-async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narration, createdBy, user = null, fees: selectedFees = [], tranche = null, branchId: tellerBranch = null, shiftAdjustableInterestPeriods } = {}) {
+async function disburse(c, loanId, { amount, channelId = null, valueDate, narration, createdBy, user = null, fees: selectedFees = [], tranche = null, branchId: tellerBranch = null, shiftAdjustableInterestPeriods, firstRepaymentDate = null, transfer = null } = {}) {
   let l = await lock(c, loanId);
   const type = types.forLoan(l);
   const first = l.status === 'APPROVED';
@@ -232,6 +234,19 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
   // A top-up application pays out by settling the loan it refinances.
   if (l.refinance_of) throw err('TOP_UP_APPLICATION_DISBURSES_THROUGH_REFINANCE', 409);
   const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  // The channel given, else the one in the disbursement details, else bank.
+  channelId = channelId || (first && l.disbursement_channel_id) || 'bank';
+  // The first repayment date: given now (which needs the Set Disbursement
+  // Conditions permission, as changing the details does), else the one in
+  // the disbursement details; either way after the disbursement date.
+  if (first && firstRepaymentDate) {
+    await controls.assertMaySetDisbursementConditions(c, { user });
+    await c.query('UPDATE loan_accounts SET first_repayment_date = $2::date WHERE id = $1', [l.id, ymd(firstRepaymentDate)]);
+    l = await lock(c, l.id);
+  }
+  if (first && l.first_repayment_date && ymd(l.first_repayment_date) <= date) {
+    throw err(`FIRST_REPAYMENT_DATE_NOT_AFTER_DISBURSEMENT: ${ymd(l.first_repayment_date)}`, 409);
+  }
   // An indexed or adjustable rate is set from its periods on the day.
   if (first && l.rate_plan) {
     await rates.start(c, l, { date, shift: shiftAdjustableInterestPeriods, createdBy });
@@ -341,6 +356,7 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
     entryId, narration, createdBy,
     allocation: {
       paidOut, deducted: plan.deducted, capitalized: plan.capitalized, upfront: plan.upfront,
+      ...(transfer ? { transfer } : {}),
       fromCreditBalance: fromCredit, tranche: plannedTranche ? plannedTranche.number : undefined,
       funded: funded ? funded.debits.map((d) => ({ glCode: d.glCode, amount: d.amount })) : undefined,
     },
@@ -472,7 +488,22 @@ function customPaid(custom, amount, due) {
   return paid;
 }
 
-async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy, branchId: tellerBranch = null, allocationOrder = null, customAllocation = null, user = null } = {}) {
+/**
+ * The value date a repayment may carry: not before a repayment already on
+ * the loan (Mambu: backdate only where no repayment is entered after the
+ * date; reverse the later ones first).
+ */
+async function assertNoLaterRepayment(c, loanId, asOf) {
+  const { rows: [later] } = await c.query(
+    `SELECT reference, value_date FROM transactions WHERE loan_account_id = $1 AND kind = 'LOAN_REPAYMENT'
+       AND reversed_by IS NULL AND value_date > $2::date ORDER BY value_date DESC LIMIT 1`, [loanId, asOf]);
+  if (later) {
+    throw err(`REPAYMENT_BEFORE_A_LATER_ONE: ${later.reference} is dated ${ymd(later.value_date)}; `
+      + 'reverse it first or date this one on or after it', 409);
+  }
+}
+
+async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy, branchId: tellerBranch = null, allocationOrder = null, customAllocation = null, user = null, internal = false } = {}) {
   let l = await lock(c, loanId);
   const type = types.forLoan(l);
   // A locked loan takes repayments only from a user whose role may post on
@@ -486,6 +517,13 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
 
   const asOf = valueDate ? ymd(valueDate) : isoDate(new Date());
+  await assertNoLaterRepayment(c, l.id, asOf);
+  // A custom allocation needs the product to allow it and the user the
+  // permission (Mambu). A pay-off allocates its own amounts (`internal`).
+  if (customAllocation !== null && customAllocation !== undefined && !internal) {
+    if (l.allow_custom_allocation === false) throw err('PRODUCT_DOES_NOT_ALLOW_CUSTOM_REPAYMENT_ALLOCATION', 409);
+    await controls.assertMayAllocateCustom(c, { user });
+  }
   // A repayment dated before penalties already charged: the unpaid ones
   // after its date are taken back and worked out again up to its date on
   // what was owed then; after the payment, the days since are charged
@@ -525,7 +563,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     custom = customPaid(customAllocation, left, { ...due, NON_SCHEDULED_FEE: b.nonScheduledFees });
     nsPaid = custom.NON_SCHEDULED_FEE;
   }
-  if (l.allow_prepayments === false) {
+  if (l.allow_prepayments === false && !internal) {
     const { rows: [pd] } = await c.query(
       `SELECT COALESCE(sum(principal_due - principal_paid), 0) AS p FROM loan_installments
        WHERE loan_id = $1 AND due_date <= $2::date AND status NOT IN ('PAID', 'GRACE')`, [l.id, asOf]);
@@ -622,14 +660,18 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     ? await post(c, l, repayEntry)
     : await postUnlinked(c, l, repayEntry, { cash: cashLeg, extra: [...(distributed ? distributed.credits : []), ...surplusCredits] });
 
+  // Interest from arrears is part of the interest and is paid first
+  // (Mambu): the interest this payment settles goes to it before the rest.
+  const fromArrears = round2(Math.max(0, Math.min(interest, Number(l.interest_from_arrears_accrued || 0) - Number(l.interest_from_arrears_paid || 0))));
   await c.query(
     `UPDATE loan_accounts SET
        penalty_paid = penalty_paid + $1, fees_paid = fees_paid + $2,
        interest_paid = interest_paid + $3, principal_paid = principal_paid + $4,
        credit_balance = credit_balance + $6, interest_prepaid = interest_prepaid + $7, ns_fees_paid = ns_fees_paid + $8,
+       interest_from_arrears_paid = interest_from_arrears_paid + $9,
        updated_at = now()
      WHERE id = $5`,
-    [penalty, feesPaid, interest, principal, l.id, toCreditBalance, prepaidInterest, nsPaid]
+    [penalty, feesPaid, interest, principal, l.id, toCreditBalance, prepaidInterest, nsPaid, fromArrears]
   );
   if (surplusAccount) {
     await c.query(
@@ -671,6 +713,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     allocation: {
       penalty, fees: feesPaid, interest, principal, surplus,
       ...(prepaidInterest > 0 ? { prepaidInterest } : {}),
+      ...(fromArrears > 0 ? { interestFromArrears: fromArrears } : {}),
       ...(nsPaid > 0 ? { nonScheduledFees: nsPaid } : {}),
       ...(custom ? { custom: true } : {}),
       ...(toCreditBalance > 0 ? { creditBalance: toCreditBalance } : {}),
@@ -732,12 +775,35 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
   if (tx.reversed_by) throw err('TRANSACTION_ALREADY_REVERSED', 409);
   if (!tx.loan_account_id) throw err('NOT_A_LOAN_TRANSACTION');
   if (tx.kind === 'LOAN_WRITE_OFF' || tx.kind === 'LOAN_RECOVERY') return writeOffs.reverse(c, tx, { narration, createdBy });
+  if (!['LOAN_REPAYMENT', 'LOAN_DISBURSEMENT'].includes(tx.kind)) throw err(`CANNOT_REVERSE_${tx.kind}`, 409);
+  if (tx.kind === 'LOAN_REPAYMENT') {
+    // Repayments come off newest first (Mambu reverts the last repayment):
+    // reversing an earlier one would reallocate the later ones silently.
+    const { rows: [later] } = await c.query(
+      `SELECT reference FROM transactions WHERE loan_account_id = $1 AND kind = 'LOAN_REPAYMENT' AND reversed_by IS NULL AND id <> $2
+         AND (value_date > $3::date OR (value_date = $3::date AND created_at > $4))
+       ORDER BY value_date DESC, created_at DESC LIMIT 1`, [tx.loan_account_id, tx.id, tx.value_date, tx.created_at]);
+    if (later) throw err(`REVERSE_THE_LATER_REPAYMENT_FIRST: ${later.reference}`, 409);
+    const { rows: [t] } = await c.query('SELECT terminated_on FROM loan_accounts WHERE id = $1', [tx.loan_account_id]);
+    if (t?.terminated_on && ymd(tx.value_date) < ymd(t.terminated_on)) {
+      throw err(`UNDO_THE_TERMINATION_FIRST: the loan was terminated on ${ymd(t.terminated_on)}, after this repayment`, 409);
+    }
+  }
+  // A transfer from or to a deposit account: the deposit side is reversed
+  // with it. For a disbursement into a deposit account that comes first, so
+  // money the member has already taken out stops the reversal.
+  const linked = a0(tx).transfer?.savingsReference || null;
+  if (linked && tx.kind === 'LOAN_DISBURSEMENT') await savings.reverseTransaction(c, linked, { narration, createdBy, linked: true });
 
   const entry = tx.entry_id ? await acct.reverse(c, tx.entry_id, narration, createdBy) : { entryId: null };
   const a = tx.allocation || {};
 
   if (tx.kind === 'LOAN_REPAYMENT') {
     if (a.prepaidInterest > 0) await unwindPrepaidInterest(c, tx, a.prepaidInterest, { narration, createdBy });
+    if (a.interestFromArrears > 0) {
+      await c.query('UPDATE loan_accounts SET interest_from_arrears_paid = GREATEST(0, interest_from_arrears_paid - $1) WHERE id = $2',
+        [a.interestFromArrears, tx.loan_account_id]);
+    }
     // A payment that closed the loan: the fee income its closure recognised goes back to deferred.
     const { rows: [was] } = await c.query('SELECT status FROM loan_accounts WHERE id = $1', [tx.loan_account_id]);
     if (was.status === 'CLOSED_REPAID') await FA.undoClosure(c, tx.loan_account_id, { createdBy, narration });
@@ -833,14 +899,17 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
     await workflow.history(c, tx.loan_account_id, { from: 'ACTIVE', to: 'APPROVED', action: 'UNDO_DISBURSE', actor: createdBy, note: narration });
   }
 
+  if (linked && tx.kind === 'LOAN_REPAYMENT') await savings.reverseTransaction(c, linked, { narration, createdBy, linked: true });
+
   const rev = await savings.record(c, {
     reference: savings.ref('REV'), kind: 'REVERSAL', memberId: tx.member_id,
     loanAccountId: tx.loan_account_id, amount: -tx.amount, entryId: entry.entryId,
-    allocation: { reversalOf: tx.reference }, narration, createdBy,
+    allocation: { reversalOf: tx.reference, ...(linked ? { alsoReversed: linked } : {}) }, narration, createdBy,
   });
   await c.query('UPDATE transactions SET reversed_by = $1 WHERE id = $2', [rev.id, tx.id]);
   return rev;
 }
+const a0 = (tx) => tx.allocation || {};
 
 /**
  * Mark overdue installments and flip loans into arrears, honouring each
@@ -854,7 +923,7 @@ async function markArrears(c, { asOf = null } = {}) {
 
 module.exports = {
   // Lifecycle, defined here.
-  apply, changeState, disburse, repay, writeOff, reverseTransaction, markArrears,
+  apply, changeState, disburse, repay, writeOff, reverseTransaction, markArrears, assertNoLaterRepayment,
   fillPattern, nextAccountNo,
 
   // Re-exported so existing callers keep one import.
