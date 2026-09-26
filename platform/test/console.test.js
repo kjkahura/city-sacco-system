@@ -248,6 +248,32 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('a custom repayment puts the money where the teller says', custom.rows[0]?.allocation?.custom === true && Number(custom.rows[0].allocation.principal) === 100,
       JSON.stringify(custom.rows[0]?.allocation));
 
+    section('lending controls');
+    await page.click('nav button[data-view=controls]');
+    await page.waitForSelector('#controls-kv');
+    check('the controls page shows the tenant\'s controls and each user\'s limits',
+      /none/.test(await page.textContent('#locked-roles')) && (await page.locator('[data-limits]').count()) >= 1);
+    await page.click('#ctl-edit');
+    await page.waitForSelector('dialog[open]');
+    await page.selectOption('dialog[open] select[name=lock_MANAGER]', 'true');
+    await page.selectOption('dialog[open] select[name=twoManRule]', 'true');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /MANAGER/.test(document.querySelector('#locked-roles')?.textContent || ''));
+    const savedCtl = await T((c) => c.query('SELECT locked_posting_roles, two_man_rule FROM lending_controls WHERE id = 1'));
+    check('changing them saves them', savedCtl.rows[0].locked_posting_roles.includes('MANAGER') && savedCtl.rows[0].two_man_rule === true,
+      JSON.stringify(savedCtl.rows[0]));
+    await T((c) => c.query('UPDATE lending_controls SET two_man_rule = false WHERE id = 1'));
+    await page.click('[data-limits]');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=approvalLimit]', '500000');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /500,000/.test(document.querySelector('main').textContent));
+    check('a user\'s approval limit can be set', true);
+    await T((c) => c.query("UPDATE platform.users SET approval_limit = NULL, disbursement_limit = NULL WHERE email = 'admin@uitest.local'"));
+    await page.click('#ctl-run');
+    await page.waitForSelector('#controls-run');
+    check('the controls can be run from the page, with what they did', /Locked at the cap/.test(await page.textContent('#controls-run')));
+
     section('reports');
     await page.click('nav button[data-view=reports]');
     await page.waitForSelector('#r-out table');

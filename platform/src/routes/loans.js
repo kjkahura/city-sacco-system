@@ -22,6 +22,7 @@ const PF = require('../domain/plannedFees');
 const FA = require('../domain/feeAmortization');
 const SL = require('../domain/settlementLinks');
 const SETTLE = require('../domain/settlement');
+const CTL = require('../domain/controls');
 
 const router = express.Router();
 
@@ -80,6 +81,12 @@ router.get('/controls', requireAuth(), async (req, res, next) => {
 });
 router.patch('/controls', ...tx((c, req, _res, { actor }) => W.updateControls(c, req.body, { actor }), ['TENANT_ADMIN']));
 router.post('/controls/run', ...tx((c, req) => W.enforceControls(c, req.body), APPROVER));
+// Each user's approval and disbursement limits.
+router.get('/controls/users', requireAuth(...APPROVER), async (req, res, next) => {
+  try { res.json(await withTenantRead(req.tenant.schema_name, (c) => CTL.staffLimits(c, req.tenant.id))); } catch (e) { next(e); }
+});
+router.patch('/controls/users/:userId', ...tx((c, req, _res, { actor }) =>
+  CTL.setUserLimits(c, req.tenant.id, req.params.userId, req.body || {}, { actor }), ['TENANT_ADMIN']));
 
 // --- list and read --------------------------------------------------------
 

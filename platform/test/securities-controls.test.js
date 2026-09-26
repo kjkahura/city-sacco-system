@@ -183,6 +183,20 @@ const accrue = (id, on) => T((c) => L.accrueInterest(c, id, { valueDate: on, cre
     await throws('the end of day and other automatic postings still cannot', () => T((c) => L.repay(c, lk.id, { amount: 10, channelId: 'cash', valueDate: '2026-01-10', createdBy: 'EOD' })),
       (e) => /LOAN_IS_LOCKED/.test(e.message));
 
+    section('transaction limits per user');
+    let users = (await call('GET', '/api/loans/controls/users')).body;
+    const admin = users.find((u) => u.email === 'admin@secctltest.local');
+    check('the tenant\'s staff are listed with their limits', admin && admin.approvalLimit === null && admin.role === 'TENANT_ADMIN');
+    check('a negative limit is refused', (await call('PATCH', `/api/loans/controls/users/${admin.id}`, { approvalLimit: -1 })).status === 400);
+    r = await call('PATCH', `/api/loans/controls/users/${admin.id}`, { approvalLimit: 1000 });
+    check('a limit is set', r.status === 200 && r.body.approvalLimit === 1000, `${r.status} ${r.reason}`);
+    const { m: limM } = await member({ deposit: 50000 });
+    const big = (await call('POST', '/api/loans', { memberId: limM.id, productId: 'CAPH', principal: 5000, termMonths: 3 })).body;
+    r = await call('POST', `/api/loans/${big.id}/approve`, {});
+    check('and approval above it is refused for that user', r.status === 403 && /ABOVE_YOUR_APPROVAL_LIMIT/.test(r.reason), `${r.status} ${r.reason}`);
+    r = await call('PATCH', `/api/loans/controls/users/${admin.id}`, { approvalLimit: null });
+    check('a blank limit lifts it', r.status === 200 && r.body.approvalLimit === null);
+
     section('a cap-locked loan accrues and is charged when unlocked');
     const { m: hm } = await member();
     const hl = await disbursed(hm.id, 'CAPH', 3000, 3, '2026-01-01');
