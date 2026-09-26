@@ -484,9 +484,9 @@ async function loansView() {
 const LOAN_ACTIONS = {
   PARTIAL_APPLICATION: [['request-approval', 'Request approval'], ['amend', 'Amend terms'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
   PENDING_APPROVAL: [['approve', 'Approve'], ['set-incomplete', 'Send back'], ['amend', 'Amend terms'], ['planned-fee', 'Plan a fee'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
-  APPROVED: [['disburse', 'Disburse'], ['planned-fee', 'Plan a fee'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['undo-approve', 'Undo approval'], ['withdraw', 'Withdraw'], ['notes', 'Notes']],
-  ACTIVE: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['postdate-all', 'Postdate installments'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['due-day', 'Change due day'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
-  IN_ARREARS: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  APPROVED: [['disburse', 'Disburse'], ['planned-fee', 'Plan a fee'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['undo-approve', 'Undo approval'], ['withdraw', 'Withdraw'], ['notes', 'Notes']],
+  ACTIVE: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['postdate-all', 'Postdate installments'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['due-day', 'Change due day'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  IN_ARREARS: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
   LOCKED: [['unlock', 'Unlock'], ['penalty-rate', 'Change penalty rate'], ['reschedule', 'Reschedule'], ['write-off', 'Write off'], ['notes', 'Notes']],
   CLOSED_WRITTEN_OFF: [['recovery', 'Post recovery'], ['guarantor-recovery', 'Recover from guarantor'], ['release-call', 'Release guarantor call'], ['notes', 'Notes']],
   CLOSED_REJECTED: [['undo-reject', 'Undo rejection']],
@@ -535,6 +535,7 @@ async function loanDetail(row) {
     if (a === 'postdate' || a === 'postdate-all') return fixedTerm && l.allow_postdated_payments;
     if (a === 'penalty-rate') return l.penalty_basis && l.penalty_basis !== 'NONE';
     if (a === 'planned-fee') return drawsSchedule || tranched;
+    if (a === 'settlement') return Boolean(l.settlement_enabled);
     if (a === 'due-day') return (l.schedule_editing || []).includes('PAYMENT_DATES') && ['DYNAMIC_TERM', 'TRANCHED'].includes(l.product_type);
     return true;
   });
@@ -567,6 +568,7 @@ async function loanDetail(row) {
         ${Number(l.interest_prepaid) > 0 ? `<dt>Interest paid in advance</dt><dd id="interest-prepaid">${money(l.interest_prepaid)}</dd>` : ''}
         ${Number(l.ns_fees_due) > 0 ? `<dt>Fees outside the schedule</dt><dd id="ns-fees">${money(Number(l.ns_fees_due) - Number(l.ns_fees_paid))} of ${money(l.ns_fees_due)}</dd>` : ''}
         ${Number(l.penalty_unapplied) > 0 ? `<dt>Penalty accrued, not yet applied</dt><dd id="penalty-unapplied">${money(l.penalty_unapplied)}</dd>` : ''}
+        ${l.settlement_account_no ? `<dt>Settlement account</dt><dd id="settlement-account">${esc(l.settlement_account_no)} · ${esc(String(l.settlement_option || '').toLowerCase().replace(/_/g, ' '))}</dd>` : ''}
         ${l.days_late ? `<dt>Days late</dt><dd id="days-late">${l.days_late}</dd><dt>Days in arrears</dt><dd id="days-in-arrears">${l.days_in_arrears}</dd>` : ''}
         ${l.penalty_rate !== null && l.penalty_basis && l.penalty_basis !== 'NONE' ? `<dt>Penalty rate</dt><dd id="penalty-rate">${esc(l.penalty_rate)}% · ${esc(l.penalty_basis.toLowerCase().replace(/_/g, ' '))}</dd>` : ''}
         ${l.postdated_pending ? `<dt>Postdated payments pending</dt><dd>${l.postdated_pending}</dd>` : ''}
@@ -849,6 +851,14 @@ async function loanDetail(row) {
       const parts = Object.fromEntries(['penalty', 'fee', 'interest', 'principal', 'nonScheduledFee'].map((k) => [k, Number(d[k] || 0)]).filter(([, v]) => v > 0));
       const amount = Math.round(Object.values(parts).reduce((x, v) => x + v, 0) * 100) / 100;
       res = await api('POST', `/api/loans/${id}/repayments`, { amount, channelId: d.channelId, customAllocation: parts });
+    }
+    if (a === 'settlement') {
+      const d = await ask([
+        { label: `Deposit account number${l.settlement_account_no ? ` (now ${l.settlement_account_no}; blank to unlink)` : ''}`, name: 'account', value: l.settlement_account_no || '', required: false },
+      ], `Settlement account for ${l.account_no}`);
+      if (!d) return;
+      res = d.account ? await api('PUT', `/api/loans/${id}/settlement-account`, { savingsAccountId: d.account.trim() })
+        : await api('DELETE', `/api/loans/${id}/settlement-account`);
     }
     if (a === 'penalty-rate') {
       const d = await ask([
@@ -1430,7 +1440,9 @@ const PRODUCT_FIELDS = (p = {}) => [
   { label: 'Allow arbitrary fees', name: 'allowArbitraryFees', options: ['false', 'true'], value: String(p.allowArbitraryFees ?? false) },
   { label: 'Times own deposits a member may borrow', name: 'maxMultiplier', type: 'number', step: '0.1', value: p.maxMultiplier ?? 3 },
   { label: 'Enforce that multiplier at approval', name: 'enforceDepositMultiplier', options: ['true', 'false'], value: String(p.enforceDepositMultiplier ?? true) },
-  { label: 'Require guarantor cover at approval', name: 'requireGuarantorCover', options: ['true', 'false'], value: String(p.requireGuarantorCover ?? false) },
+  { label: 'Require securities cover (checked at approval and disbursement)', name: 'requireGuarantorCover', options: ['true', 'false'], value: String(p.requireGuarantorCover ?? false) },
+  { label: 'Cover required, % of the loan', name: 'minCoverPercent', type: 'number', step: '0.01', value: p.minCoverPercent ?? 100 },
+  { label: 'Member\'s own deposits count towards cover', name: 'coverCountsDeposits', options: ['true', 'false'], value: String(p.coverCountsDeposits ?? true) },
   { label: 'Securities: guarantors', name: 'enableGuarantors', options: ['true', 'false'], value: String(p.securities?.guarantors ?? true) },
   { label: 'Securities: collateral assets', name: 'enableCollateral', options: ['false', 'true'], value: String(p.securities?.collateral ?? false) },
   opt({ label: 'Tax rate, percent (blank: no tax)', name: 'taxRatePercent', type: 'number', step: '0.0001', value: p.tax?.ratePercent ?? '' }),
@@ -1462,6 +1474,13 @@ const PRODUCT_FIELDS = (p = {}) => [
   { label: 'Cap base', name: 'chargeCapBase', options: ['OUTSTANDING_PRINCIPAL', 'ORIGINAL_PRINCIPAL'], value: p.chargeCapBase || 'OUTSTANDING_PRINCIPAL' },
   { label: 'Cap mode', name: 'chargeCapMode', options: ['HARD', 'SOFT'], value: p.chargeCapMode || 'HARD' },
   opt({ label: 'Lock after days in arrears (blank: never)', name: 'autoLockArrearsDays', type: 'number', value: p.autoLockArrearsDays ?? '' }),
+  { label: 'Count accrued, unapplied charges towards the cap', name: 'capIncludesAccrued', options: ['false', 'true'], value: String(p.capIncludesAccrued ?? false) },
+  opt({ label: 'Close a loan that owes nothing after days (blank: never)', name: 'autoClosePaidOffDays', type: 'number', value: p.autoClosePaidOffDays ?? '' }),
+  { label: 'Settlement deposit accounts', name: 'settlementEnabled', options: ['false', 'true'], value: String(p.settlement?.enabled ?? false) },
+  opt({ label: 'Settlement deposit product (blank: any)', name: 'settlementProductId', value: p.settlement?.productId || '' }),
+  { label: 'Auto-set the member\'s account of that product', name: 'settlementAutoSet', options: ['false', 'true'], value: String(p.settlement?.autoSet ?? false) },
+  { label: 'Auto-create one when there is none', name: 'settlementAutoCreate', options: ['false', 'true'], value: String(p.settlement?.autoCreate ?? false) },
+  { label: 'Settlement transfers', name: 'settlementOption', options: ['FULL_DUES', 'PARTIAL', 'NONE'], value: p.settlement?.option || 'FULL_DUES' },
   { label: 'Accounting (fixed once loans exist; use Change accounting method)', name: 'accountingMethod', options: ['ACCRUAL', 'CASH', 'NONE'], value: p.accountingMethod || 'ACCRUAL' },
   { label: 'Accrued interest reaches the ledger (ACCRUAL only)', name: 'interestAccruedAccounting', options: ['DAILY', 'MONTHLY', 'NONE'], value: p.interestAccruedAccounting || 'DAILY' },
   { label: 'Accrual entries', name: 'accrualGranularity', options: ['PER_ACCOUNT', 'AGGREGATED'], value: p.accrualGranularity || 'PER_ACCOUNT' },
@@ -1489,23 +1508,25 @@ const PRODUCT_ENUM_FIELDS = ['category', 'idMode', 'initialState', 'productType'
   'rateFrequency', 'prepaymentRecalculation', 'repaymentIntervalUnit', 'shortMonthHandling', 'nonWorkingDays', 'residualInstallment', 'graceType', 'rounding',
   'arrearsCountFrom', 'arrearsNonWorkingDays', 'penaltyBasis', 'chargeCapBase', 'chargeCapMode', 'accountingMethod', 'interestAccrual', 'dayCount',
   'taxMethod', 'funderAllocation', 'interestAccruedAccounting', 'accrualGranularity', 'interestRateSource', 'rateReviewUnit',
-  'paymentMethod', 'prepaymentInterest', 'prepaymentAllocation', 'markPaidWhen', 'interestPrepayment'];
+  'paymentMethod', 'prepaymentInterest', 'prepaymentAllocation', 'markPaidWhen', 'interestPrepayment', 'settlementOption'];
 const PRODUCT_NUM_FIELDS = ['monthlyRate', 'rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm', 'maxTerm',
   'repaymentIntervalCount', 'firstDueOffsetDays', 'gracePeriods', 'amortizationPeriods', 'processingFee', 'maxMultiplier',
   'arrearsToleranceDays', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'penaltyRate', 'penaltyToleranceDays',
   'chargeCapPercent', 'autoLockArrearsDays', 'maxTranches', 'revolvingRepaymentValue', 'revolvingRepaymentFloor', 'revolvingRepaymentCeiling',
   'maxCreditBalance', 'taxRatePercent', 'orgCommission', 'funderRateDefault', 'funderRateMin', 'funderRateMax',
   'rateFloor', 'rateCeiling', 'rateReviewCount',
-  'arrearsToleranceDaysMin', 'arrearsToleranceDaysMax', 'arrearsTolerancePercentMin', 'arrearsTolerancePercentMax'];
+  'arrearsToleranceDaysMin', 'arrearsToleranceDaysMax', 'arrearsTolerancePercentMin', 'arrearsTolerancePercentMax',
+  'minCoverPercent', 'autoClosePaidOffDays'];
 const PRODUCT_BOOL_FIELDS = ['accrueLateInterest', 'allowArbitraryFees', 'enforceDepositMultiplier', 'requireGuarantorCover',
   'creditBalanceEnabled', 'enableGuarantors', 'enableCollateral', 'taxOnInterest', 'taxOnFees', 'taxOnPenalties', 'fundingEnabled', 'lockFundsAtApproval',
-  'adjustableRates', 'allowNegativeRate', 'allowPrepayments', 'allowPostdatedPayments'];
+  'adjustableRates', 'allowNegativeRate', 'allowPrepayments', 'allowPostdatedPayments', 'coverCountsDeposits', 'capIncludesAccrued',
+  'settlementEnabled', 'settlementAutoSet', 'settlementAutoCreate'];
 // Optional numbers that a blank field sets back to "unset".
 const PRODUCT_NULLABLE = ['rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm',
   'amortizationPeriods', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'chargeCapPercent', 'autoLockArrearsDays',
   'maxTranches', 'revolvingRepaymentValue', 'revolvingRepaymentFloor', 'revolvingRepaymentCeiling', 'maxCreditBalance', 'taxRatePercent',
   'orgCommission', 'funderRateDefault', 'funderRateMin', 'funderRateMax', 'rateFloor', 'rateCeiling', 'rateReviewCount',
-  'arrearsToleranceDaysMin', 'arrearsToleranceDaysMax', 'arrearsTolerancePercentMin', 'arrearsTolerancePercentMax'];
+  'arrearsToleranceDaysMin', 'arrearsToleranceDaysMax', 'arrearsTolerancePercentMin', 'arrearsTolerancePercentMax', 'autoClosePaidOffDays'];
 
 function productBody(d) {
   const out = { name: d.name, idPattern: d.idPattern };
@@ -1522,6 +1543,7 @@ function productBody(d) {
     out.fixedDaysOfMonth = d.fixedDaysOfMonth.trim() ? d.fixedDaysOfMonth.split(',').map((x) => Number(x.trim())).filter(Boolean) : null;
   }
   if (d.revolvingRepaymentMethod !== undefined) out.revolvingRepaymentMethod = d.revolvingRepaymentMethod || null;
+  if (d.settlementProductId !== undefined) out.settlementProductId = d.settlementProductId.trim() ? d.settlementProductId.trim().toUpperCase() : null;
   // Mappings go only where the settings use them: a product refuses an
   // account it would never post to.
   const linked = out.accountingMethod !== 'NONE';
@@ -1605,7 +1627,8 @@ async function productDetail(p0) {
         <dt>Penalty</dt><dd>${p.penaltyBasis === 'NONE' ? 'none' : `${p.penaltyRate}% a day on ${esc(p.penaltyBasis)}, after ${p.penaltyToleranceDays} days`}</dd>
         <dt>Cap on charges</dt><dd>${p.chargeCapPercent === null ? 'none set' : `${p.chargeCapPercent}% of ${esc(p.chargeCapBase)}, ${esc(p.chargeCapMode)}`}</dd>
         <dt>Auto lock</dt><dd>${p.autoLockArrearsDays === null ? 'never' : `after ${p.autoLockArrearsDays} days in arrears`}</dd>
-        <dt>Eligibility</dt><dd>${p.maxMultiplier}× deposits${p.enforceDepositMultiplier ? '' : ' (not enforced)'}${p.requireGuarantorCover ? `, ${p.minCoverPercent}% cover` : ''}</dd>
+        <dt>Eligibility</dt><dd>${p.maxMultiplier}× deposits${p.enforceDepositMultiplier ? '' : ' (not enforced)'}${p.requireGuarantorCover ? `, ${p.minCoverPercent}% cover${p.coverCountsDeposits === false ? ' from guarantees and collateral only' : ' counting own deposits'}, at approval and disbursement` : ''}</dd>
+        <dt>Settlement accounts</dt><dd id="p-settlement">${p.settlement?.enabled ? `${p.settlement.productId ? esc(p.settlement.productId) : 'any deposit product'} · ${esc(p.settlement.option.toLowerCase().replace(/_/g, ' '))}${p.settlement.autoSet ? ' · auto-set' : ''}${p.settlement.autoCreate ? ' · auto-create' : ''}` : 'not linked'}</dd>
         <dt>Accounting</dt><dd>${esc(p.accountingMethod)}${p.accountingMethod === 'ACCRUAL' ? ` · accrued interest to the ledger ${esc(p.interestAccruedAccounting)}, ${esc(p.accrualGranularity.toLowerCase().replace('_', ' '))}` : ''}</dd>
         <dt>GL rules</dt><dd>${p.accountingRules.length ? p.accountingRules.map((r) => `${esc(r.resource)} ${esc(r.glCode || '(default)')}`).join(' · ') : 'none: not linked to accounting'}</dd>
         <dt>Allocation</dt><dd>${p.allocationOrder.join(' → ')}</dd>

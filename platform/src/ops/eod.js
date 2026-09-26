@@ -9,6 +9,7 @@ const W = require('../domain/workflow');
 const RATES = require('../domain/rates');
 const PDP = require('../domain/postdated');
 const PF = require('../domain/plannedFees');
+const SETTLE = require('../domain/settlement');
 const FA = require('../domain/feeAmortization');
 const P2 = require('../domain/provisioning');
 const CL = require('../domain/close');
@@ -106,6 +107,15 @@ const JOBS = {
       }
       return { loans: rows.length, paymentDueApplied: due, lateFeesApplied: late };
     });
+  },
+
+  /**
+   * Take what linked loans owe from their settlement deposit accounts.
+   * After the night's interest and postdated payments, before arrears, so
+   * a loan paid this way on its due date is never marked late.
+   */
+  async collectSettlements(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => SETTLE.run(c, { asOf: businessDate, createdBy: 'EOD' }));
   },
 
   /**
@@ -259,7 +269,7 @@ async function runJob(tenant, job, { businessDate = null, force = false } = {}) 
  * posts, arrears before penalties (penalties read arrears state), and
  * provisioning last because it reads the arrears the others just produced.
  */
-const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'reviewRates', 'accrueInterest', 'applyPostdatedPayments', 'accrueSavings', 'applyPlannedFees', 'markArrears', 'accruePenalties',
+const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'reviewRates', 'accrueInterest', 'applyPostdatedPayments', 'accrueSavings', 'applyPlannedFees', 'collectSettlements', 'markArrears', 'accruePenalties',
   'applyFees', 'amortizeFees', 'enforceControls', 'provision', 'postAccruals', 'autoClosure'];
 
 async function runAll({ businessDate = null, jobs = DEFAULT_JOBS, force = false } = {}) {

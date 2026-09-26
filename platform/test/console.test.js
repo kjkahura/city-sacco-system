@@ -305,7 +305,8 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForSelector('#p-edit');
     const detailText = await page.textContent('main');
     check('a product opens to its settings, in words',
-      /Fixed term/.test(detailText) && /every 1 months/.test(detailText) && /Cap on charges/.test(detailText) && /none set/.test(detailText));
+      /Fixed term/.test(detailText) && /every 1 months/.test(detailText) && /Cap on charges/.test(detailText) && /none set/.test(detailText)
+      && /Settlement accounts/.test(detailText));
     await page.click('#p-edit');
     await page.waitForSelector('dialog[open]');
     await page.fill('dialog[open] input[name=monthlyRate]', '1.25');

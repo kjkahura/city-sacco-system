@@ -193,6 +193,8 @@ const PRODUCT_ONLY = [
   'grace_type', 'rounding', 'non_working_days', 'residual_installment', 'schedule_editing',
   'payment_method', 'allow_prepayments', 'prepayment_interest', 'prepayment_allocation', 'mark_paid_when',
   'interest_prepayment', 'gl_deferred_interest', 'allow_postdated_payments', 'gl_deferred_fee_income',
+  'cover_counts_deposits', 'cap_includes_accrued', 'settlement_enabled', 'settlement_product_id', 'settlement_auto_set',
+  'settlement_auto_create', 'settlement_option',
   'arrears_tolerance_floor', 'arrears_count_from', 'arrears_non_working_days',
   'penalty_basis', 'penalty_tolerance_days',
   'charge_cap_percent', 'charge_cap_base', 'charge_cap_mode',
