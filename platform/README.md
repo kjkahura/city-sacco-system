@@ -724,6 +724,21 @@ write-off, the window for undoing a closure, and the two-man rule, all off
 by default; and whether a write-off needs a second person's approval, on
 by default.
 
+Each user's limits are listed by `GET /api/loans/controls/users`
+(TENANT_ADMIN, MANAGER) and set by
+`PATCH /api/loans/controls/users/:userId` with `approvalLimit` and
+`disbursementLimit` (TENANT_ADMIN; null lifts a limit). Every change is in
+the audit log.
+
+**In the console** the Controls page shows these controls and each user's
+limits:
+
+- A tenant administrator can change the controls, including the roles that
+  may post on locked loans, and each user's limits.
+- "Run now" runs the end-of-day controls on the spot (locking at the cap
+  or after days in arrears, closing loans that owe nothing) and shows what
+  they did.
+
 A LOCKED loan applies no interest, fees or penalties while it is locked,
 but keeps accruing them. They are applied at the first run after it is
 unlocked, whatever the lock was for (Mambu). It takes repayments only from

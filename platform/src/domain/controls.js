@@ -136,6 +136,46 @@ async function assertMayPostOnLocked(c, { user = null } = {}) {
   }
 }
 
+/** The tenant's staff with their approval and disbursement limits (Mambu's transaction limits on a user). */
+async function staffLimits(c, tenantId) {
+  const { rows } = await c.query(
+    `SELECT id, email, full_name, role, status, approval_limit, disbursement_limit FROM platform.users
+     WHERE tenant_id = $1 AND role <> 'MEMBER' ORDER BY role, email`, [tenantId]);
+  return rows.map((u) => ({
+    id: u.id, email: u.email, name: u.full_name, role: u.role, status: u.status,
+    approvalLimit: u.approval_limit === null ? null : Number(u.approval_limit),
+    disbursementLimit: u.disbursement_limit === null ? null : Number(u.disbursement_limit),
+  }));
+}
+
+/**
+ * Set a user's limits. Null lifts a limit (the user's role then decides);
+ * a number is the largest loan they may approve, or disburse at once.
+ */
+async function setUserLimits(c, tenantId, userId, { approvalLimit, disbursementLimit } = {}, { actor } = {}) {
+  const { rows: [u] } = await c.query(
+    'SELECT id, email, approval_limit, disbursement_limit FROM platform.users WHERE id::text = $1 AND tenant_id = $2 FOR UPDATE', [userId, tenantId]);
+  if (!u) throw err('USER_NOT_FOUND', 404);
+  const sets = [];
+  const vals = [];
+  for (const [given, col] of [[approvalLimit, 'approval_limit'], [disbursementLimit, 'disbursement_limit']]) {
+    if (given === undefined) continue;
+    if (given !== null && !(Number(given) >= 0)) throw err(`${col.toUpperCase()}_MUST_BE_ZERO_OR_MORE`, 400);
+    vals.push(given === null ? null : round2(given));
+    sets.push(`${col} = $${vals.length}`);
+  }
+  if (!sets.length) throw err('NO_UPDATABLE_FIELDS', 400);
+  vals.push(u.id);
+  const { rows: [after] } = await c.query(
+    `UPDATE platform.users SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING id, email, approval_limit, disbursement_limit`, vals);
+  await c.query(
+    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'USER_LIMITS_CHANGED','user',$2,$3,$4)`,
+    [actor || 'SYSTEM', String(u.id), JSON.stringify({ approvalLimit: u.approval_limit, disbursementLimit: u.disbursement_limit }),
+      JSON.stringify({ approvalLimit: after.approval_limit, disbursementLimit: after.disbursement_limit })]);
+  return (await staffLimits(c, tenantId)).find((x) => x.id === u.id);
+}
+
 module.exports = {
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMayPostOnLocked, CONTROL_FIELDS,
+  staffLimits, setUserLimits,
 };
