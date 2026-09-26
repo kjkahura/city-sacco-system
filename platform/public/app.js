@@ -483,11 +483,11 @@ async function loansView() {
 
 const LOAN_ACTIONS = {
   PARTIAL_APPLICATION: [['request-approval', 'Request approval'], ['amend', 'Amend terms'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
-  PENDING_APPROVAL: [['approve', 'Approve'], ['set-incomplete', 'Send back'], ['amend', 'Amend terms'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
-  APPROVED: [['disburse', 'Disburse'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['undo-approve', 'Undo approval'], ['withdraw', 'Withdraw'], ['notes', 'Notes']],
-  ACTIVE: [['repay', 'Post repayment'], ['postdate', 'Postdated payment'], ['postdate-all', 'Postdate installments'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['due-day', 'Change due day'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
-  IN_ARREARS: [['repay', 'Post repayment'], ['postdate', 'Postdated payment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
-  LOCKED: [['unlock', 'Unlock'], ['reschedule', 'Reschedule'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  PENDING_APPROVAL: [['approve', 'Approve'], ['set-incomplete', 'Send back'], ['amend', 'Amend terms'], ['planned-fee', 'Plan a fee'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
+  APPROVED: [['disburse', 'Disburse'], ['planned-fee', 'Plan a fee'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['undo-approve', 'Undo approval'], ['withdraw', 'Withdraw'], ['notes', 'Notes']],
+  ACTIVE: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['postdate-all', 'Postdate installments'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['due-day', 'Change due day'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  IN_ARREARS: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
+  LOCKED: [['unlock', 'Unlock'], ['penalty-rate', 'Change penalty rate'], ['reschedule', 'Reschedule'], ['write-off', 'Write off'], ['notes', 'Notes']],
   CLOSED_WRITTEN_OFF: [['recovery', 'Post recovery'], ['guarantor-recovery', 'Recover from guarantor'], ['release-call', 'Release guarantor call'], ['notes', 'Notes']],
   CLOSED_REJECTED: [['undo-reject', 'Undo rejection']],
   CLOSED_WITHDRAWN: [['undo-withdraw', 'Undo withdrawal']],
@@ -496,7 +496,7 @@ const BAD_STATES = ['IN_ARREARS', 'LOCKED', 'CLOSED_WRITTEN_OFF'];
 
 async function loanDetail(row) {
   const id = row.account_no;
-  const [loan, schedule, txs, pens, fees, hist, tranches, collateral, funding, woReqs, postdated] = await Promise.all([
+  const [loan, schedule, txs, pens, fees, hist, tranches, collateral, funding, woReqs, postdated, planned, amort] = await Promise.all([
     api('GET', `/api/loans/${id}`),
     api('GET', `/api/loans/${id}/schedule`),
     api('GET', `/api/loans/${id}/transactions?limit=25`),
@@ -508,6 +508,8 @@ async function loanDetail(row) {
     api('GET', `/api/loans/${id}/funding`),
     api('GET', `/api/loans/${id}/write-off`),
     api('GET', `/api/loans/${id}/postdated-payments`),
+    api('GET', `/api/loans/${id}/planned-fees`),
+    api('GET', `/api/loans/${id}/fee-amortization`),
   ]);
   if (!loan.ok) throw new Error(loan.error);
   const l = loan.body;
@@ -531,6 +533,8 @@ async function loanDetail(row) {
     if (a === 'edit-schedule') return drawsSchedule && (l.schedule_editing || []).some((x) => shapeEdits.includes(x) && (!application || x !== 'FEES'));
     if (a === 'product-schedule') return Boolean(appSchedule?.body?.custom);
     if (a === 'postdate' || a === 'postdate-all') return fixedTerm && l.allow_postdated_payments;
+    if (a === 'penalty-rate') return l.penalty_basis && l.penalty_basis !== 'NONE';
+    if (a === 'planned-fee') return drawsSchedule || tranched;
     if (a === 'due-day') return (l.schedule_editing || []).includes('PAYMENT_DATES') && ['DYNAMIC_TERM', 'TRANCHED'].includes(l.product_type);
     return true;
   });
@@ -561,6 +565,10 @@ async function loanDetail(row) {
           ${l.next_billing_on ? `<dt>Next billing</dt><dd>${day(l.next_billing_on)}</dd>` : ''}` : ''}
         ${Number(l.tax_charged) > 0 ? `<dt>Of which tax</dt><dd>${money(l.tax_charged)}</dd>` : ''}
         ${Number(l.interest_prepaid) > 0 ? `<dt>Interest paid in advance</dt><dd id="interest-prepaid">${money(l.interest_prepaid)}</dd>` : ''}
+        ${Number(l.ns_fees_due) > 0 ? `<dt>Fees outside the schedule</dt><dd id="ns-fees">${money(Number(l.ns_fees_due) - Number(l.ns_fees_paid))} of ${money(l.ns_fees_due)}</dd>` : ''}
+        ${Number(l.penalty_unapplied) > 0 ? `<dt>Penalty accrued, not yet applied</dt><dd id="penalty-unapplied">${money(l.penalty_unapplied)}</dd>` : ''}
+        ${l.days_late ? `<dt>Days late</dt><dd id="days-late">${l.days_late}</dd><dt>Days in arrears</dt><dd id="days-in-arrears">${l.days_in_arrears}</dd>` : ''}
+        ${l.penalty_rate !== null && l.penalty_basis && l.penalty_basis !== 'NONE' ? `<dt>Penalty rate</dt><dd id="penalty-rate">${esc(l.penalty_rate)}% · ${esc(l.penalty_basis.toLowerCase().replace(/_/g, ' '))}</dd>` : ''}
         ${l.postdated_pending ? `<dt>Postdated payments pending</dt><dd>${l.postdated_pending}</dd>` : ''}
         ${l.arrears_since ? `<dt>In arrears since</dt><dd>${day(l.arrears_since)}</dd>` : ''}
         ${l.rate_plan ? `<dt>Rate in force</dt><dd id="rate-plan">${esc(l.monthly_rate)}% · ${l.rate_plan === 'INDEX' ? 'index plus spread, reviewed' : 'adjustable periods'}</dd>` : ''}
@@ -583,6 +591,22 @@ async function loanDetail(row) {
     { label: 'Interest', num: true, value: (i) => money(i.interest) },
     { label: 'Fees', num: true, value: (i) => money(i.fee) },
   ], appSchedule.body.installments))}</div>` : ''}
+    ${(planned.body || []).length ? card('Planned fees', table([
+    { label: 'Installment', key: 'installment_number' },
+    { label: 'Due', value: (p) => (p.due_date ? day(p.due_date) : '') },
+    { label: 'Fee', key: 'name' },
+    { label: 'Amount', num: true, value: (p) => money(p.amount) },
+    { label: 'Apply on', value: (p) => (p.apply_on ? day(p.apply_on) : '') },
+    { label: 'Status', value: (p) => `${p.status}${p.reason ? `: ${p.reason}` : ''}` },
+    { label: '', html: true, value: (p) => (p.status === 'PLANNED' ? `<button class="link" data-apply-planned="${p.id}">apply now</button> <button class="link" data-edit-planned="${p.id}">edit</button> <button class="link" data-drop-planned="${p.id}">delete</button>` : '') },
+  ], planned.body)) : ''}
+    ${(amort.body || []).length ? card('Fee amortisation', table([
+    { label: 'Fee', key: 'fee_name' },
+    { label: 'Period', value: (a) => `${day(a.period_start)} to ${day(a.period_end)}` },
+    { label: 'Amount', num: true, value: (a) => money(a.amount) },
+    { label: 'Recognised', num: true, value: (a) => money(a.recognised) },
+    { label: 'Status', key: 'status' },
+  ], amort.body)) : ''}
     ${(postdated.body || []).length ? card('Postdated payments', table([
     { label: 'Value date', value: (p) => day(p.value_date) },
     { label: 'Amount', num: true, value: (p) => money(p.amount) },
@@ -596,7 +620,7 @@ async function loanDetail(row) {
     { label: 'Due', value: (i) => day(i.due_date) },
     { label: 'Principal', num: true, value: (i) => money(i.principal_due) },
     { label: 'Interest', num: true, value: (i) => money(i.interest_due) },
-    { label: 'Fees', num: true, value: (i) => money(i.fee_due) },
+    { label: 'Fees', num: true, value: (i) => `${money(i.fee_due)}${Number(i.planned_fees) > 0 ? ` + ${money(i.planned_fees)} planned` : ''}` },
     { label: 'Paid', num: true, value: (i) => money(Number(i.principal_paid) + Number(i.interest_paid) + Number(i.fee_paid)) },
     { label: 'Status', key: 'status' },
   ], schedule.body || [], { empty: 'Not disbursed yet' }))}
@@ -653,6 +677,28 @@ async function loanDetail(row) {
     if (!d) return;
     const res = await api('POST', `/api/loans/collateral/${btn.dataset.release}/release`, { note: d.note });
     toast(res.ok ? 'Released' : res.error, !res.ok);
+    if (res.ok) loanDetail(row);
+  }));
+  view().querySelectorAll('[data-apply-planned]').forEach((btn) => btn.addEventListener('click', async () => {
+    const res = await api('POST', `/api/loans/${id}/planned-fees/apply`, { ids: [Number(btn.dataset.applyPlanned)] });
+    toast(res.ok ? 'Planned fee applied' : res.error, !res.ok);
+    if (res.ok) loanDetail(row);
+  }));
+  view().querySelectorAll('[data-edit-planned]').forEach((btn) => btn.addEventListener('click', async () => {
+    const p = (planned.body || []).find((x) => String(x.id) === btn.dataset.editPlanned);
+    const d = await ask([
+      { label: 'Installment', name: 'installment', type: 'number', value: p.installment_number },
+      { label: 'Amount', name: 'amount', type: 'number', step: '0.01', value: p.amount },
+      { label: 'Apply on (blank: the due date)', name: 'applyOn', type: 'date', value: p.apply_on ? String(p.apply_on).slice(0, 10) : '', required: false },
+    ], 'Edit planned fee');
+    if (!d) return;
+    const res = await api('PATCH', `/api/loans/planned-fees/${p.id}`, { installment: Number(d.installment), amount: Number(d.amount), applyOn: d.applyOn || null });
+    toast(res.ok ? 'Planned fee changed' : res.error, !res.ok);
+    if (res.ok) loanDetail(row);
+  }));
+  view().querySelectorAll('[data-drop-planned]').forEach((btn) => btn.addEventListener('click', async () => {
+    const res = await api('DELETE', `/api/loans/planned-fees/${btn.dataset.dropPlanned}`);
+    toast(res.ok ? 'Planned fee deleted' : res.error, !res.ok);
     if (res.ok) loanDetail(row);
   }));
   view().querySelectorAll('[data-cancel-postdated]').forEach((btn) => btn.addEventListener('click', async () => {
@@ -763,12 +809,14 @@ async function loanDetail(row) {
         { label: 'Fee code (leave blank for an arbitrary fee)', name: 'fee', value: '', required: false },
         { label: 'Name (arbitrary fee)', name: 'name', value: '', required: false },
         { label: 'Amount (if the fee leaves it open)', name: 'amount', type: 'number', step: '0.01', required: false },
+        { label: 'Goes on', name: 'allocation', options: ['FEE_SETTING', 'NEXT_INSTALLMENT', 'NO_ALLOCATION'], value: 'FEE_SETTING' },
         { label: 'Note', name: 'note', required: false },
       ], 'Apply fee');
       if (!d) return;
       res = await api('POST', `/api/loans/${id}/fees`, {
         fee: d.fee ? d.fee.toUpperCase() : undefined, name: d.name || undefined,
-        amount: d.amount ? Number(d.amount) : undefined, note: d.note });
+        amount: d.amount ? Number(d.amount) : undefined, note: d.note,
+        allocation: d.allocation === 'FEE_SETTING' ? undefined : d.allocation });
     }
     if (a === 'reschedule' || a === 'refinance') {
       const d = await ask([
@@ -787,6 +835,41 @@ async function loanDetail(row) {
         return loanDetail({ account_no: res.body.application.account_no });
       }
       if (res.ok) { toast(`New loan ${res.body.newLoan.account_no} opened`); return loanDetail({ account_no: res.body.newLoan.account_no }); }
+    }
+    if (a === 'custom-repay') {
+      const d = await ask([
+        { label: `Penalty (owed ${money(b.penalty)})`, name: 'penalty', type: 'number', step: '0.01', value: 0 },
+        { label: `Fees (owed ${money(b.fees)})`, name: 'fee', type: 'number', step: '0.01', value: 0 },
+        { label: `Interest (owed ${money(b.interest)})`, name: 'interest', type: 'number', step: '0.01', value: 0 },
+        { label: `Principal (owed ${money(b.principal)})`, name: 'principal', type: 'number', step: '0.01', value: 0 },
+        { label: `Fees outside the schedule (owed ${money(b.nonScheduledFees || 0)})`, name: 'nonScheduledFee', type: 'number', step: '0.01', value: 0 },
+        { label: 'Channel', name: 'channelId', value: 'cash' },
+      ], `Custom repayment on ${l.account_no}`);
+      if (!d) return;
+      const parts = Object.fromEntries(['penalty', 'fee', 'interest', 'principal', 'nonScheduledFee'].map((k) => [k, Number(d[k] || 0)]).filter(([, v]) => v > 0));
+      const amount = Math.round(Object.values(parts).reduce((x, v) => x + v, 0) * 100) / 100;
+      res = await api('POST', `/api/loans/${id}/repayments`, { amount, channelId: d.channelId, customAllocation: parts });
+    }
+    if (a === 'penalty-rate') {
+      const d = await ask([
+        { label: 'New penalty rate', name: 'rate', type: 'number', step: '0.001', value: l.penalty_rate ?? '' },
+        { label: 'Note', name: 'note', required: false },
+      ], `Change the penalty rate of ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/penalty-rate`, { rate: Number(d.rate), note: d.note || undefined });
+    }
+    if (a === 'planned-fee') {
+      const d = await ask([
+        { label: 'Installment number', name: 'installment', type: 'number' },
+        { label: 'Manual fee code (blank for an arbitrary fee)', name: 'fee', required: false },
+        { label: 'Name (arbitrary fee)', name: 'name', required: false },
+        { label: 'Amount (blank: the fee\'s own)', name: 'amount', type: 'number', step: '0.01', required: false },
+        { label: 'Apply on (blank: the installment\'s due date)', name: 'applyOn', type: 'date', required: false },
+      ], `Plan a fee on ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/planned-fees`, {
+        installment: Number(d.installment), fee: d.fee ? d.fee.toUpperCase() : undefined, name: d.name || undefined,
+        amount: d.amount ? Number(d.amount) : undefined, applyOn: d.applyOn || undefined });
     }
     if (a === 'edit-schedule') {
       const e = await api('GET', `/api/loans/${id}/schedule/editable`);
@@ -1364,11 +1447,15 @@ const PRODUCT_FIELDS = (p = {}) => [
   opt({ label: 'Funder rate maximum', name: 'funderRateMax', type: 'number', step: '0.0001', value: p.funding?.funderRateMax ?? '' }),
   { label: 'Lock funders\' money at approval', name: 'lockFundsAtApproval', options: ['true', 'false'], value: String(p.funding?.lockFundsAtApproval ?? true) },
   { label: 'Arrears tolerance, days', name: 'arrearsToleranceDays', type: 'number', value: p.arrearsToleranceDays ?? 0 },
+  opt({ label: 'Arrears tolerance days, minimum for a loan', name: 'arrearsToleranceDaysMin', type: 'number', value: p.arrearsToleranceDaysMin ?? '' }),
+  opt({ label: 'Arrears tolerance days, maximum for a loan', name: 'arrearsToleranceDaysMax', type: 'number', value: p.arrearsToleranceDaysMax ?? '' }),
   opt({ label: 'Arrears tolerance, % of outstanding', name: 'arrearsTolerancePercent', type: 'number', step: '0.001', value: p.arrearsTolerancePercent ?? '' }),
+  opt({ label: 'Arrears tolerance %, minimum for a loan', name: 'arrearsTolerancePercentMin', type: 'number', step: '0.001', value: p.arrearsTolerancePercentMin ?? '' }),
+  opt({ label: 'Arrears tolerance %, maximum for a loan', name: 'arrearsTolerancePercentMax', type: 'number', step: '0.001', value: p.arrearsTolerancePercentMax ?? '' }),
   opt({ label: 'with a floor of', name: 'arrearsToleranceFloor', type: 'number', step: '0.01', value: p.arrearsToleranceFloor ?? '' }),
   { label: 'Count days in arrears from', name: 'arrearsCountFrom', options: ['OLDEST_LATE', 'FIRST_ARREARS'], value: p.arrearsCountFrom || 'OLDEST_LATE' },
   { label: 'Non-working days in tolerance', name: 'arrearsNonWorkingDays', options: ['INCLUDE', 'EXCLUDE'], value: p.arrearsNonWorkingDays || 'INCLUDE' },
-  { label: 'Penalty, percent per day', name: 'penaltyRate', type: 'number', step: '0.001', value: p.penaltyRate ?? 0 },
+  { label: 'Penalty rate, % a day (on outstanding principal: per the interest rate period)', name: 'penaltyRate', type: 'number', step: '0.001', value: p.penaltyRate ?? 0 },
   { label: 'Penalty basis', name: 'penaltyBasis', options: ['OVERDUE_ALL', 'OVERDUE_PRINCIPAL', 'OVERDUE_PRINCIPAL_INTEREST', 'OUTSTANDING_PRINCIPAL', 'NONE'], value: p.penaltyBasis || 'OVERDUE_ALL' },
   { label: 'Penalty tolerance, days', name: 'penaltyToleranceDays', type: 'number', value: p.penaltyToleranceDays ?? 0 },
   opt({ label: 'Cap on charges, % of principal (blank: none)', name: 'chargeCapPercent', type: 'number', step: '0.001', value: p.chargeCapPercent ?? '' }),
@@ -1408,7 +1495,8 @@ const PRODUCT_NUM_FIELDS = ['monthlyRate', 'rateMin', 'rateMax', 'minPrincipal',
   'arrearsToleranceDays', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'penaltyRate', 'penaltyToleranceDays',
   'chargeCapPercent', 'autoLockArrearsDays', 'maxTranches', 'revolvingRepaymentValue', 'revolvingRepaymentFloor', 'revolvingRepaymentCeiling',
   'maxCreditBalance', 'taxRatePercent', 'orgCommission', 'funderRateDefault', 'funderRateMin', 'funderRateMax',
-  'rateFloor', 'rateCeiling', 'rateReviewCount'];
+  'rateFloor', 'rateCeiling', 'rateReviewCount',
+  'arrearsToleranceDaysMin', 'arrearsToleranceDaysMax', 'arrearsTolerancePercentMin', 'arrearsTolerancePercentMax'];
 const PRODUCT_BOOL_FIELDS = ['accrueLateInterest', 'allowArbitraryFees', 'enforceDepositMultiplier', 'requireGuarantorCover',
   'creditBalanceEnabled', 'enableGuarantors', 'enableCollateral', 'taxOnInterest', 'taxOnFees', 'taxOnPenalties', 'fundingEnabled', 'lockFundsAtApproval',
   'adjustableRates', 'allowNegativeRate', 'allowPrepayments', 'allowPostdatedPayments'];
@@ -1416,7 +1504,8 @@ const PRODUCT_BOOL_FIELDS = ['accrueLateInterest', 'allowArbitraryFees', 'enforc
 const PRODUCT_NULLABLE = ['rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm',
   'amortizationPeriods', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'chargeCapPercent', 'autoLockArrearsDays',
   'maxTranches', 'revolvingRepaymentValue', 'revolvingRepaymentFloor', 'revolvingRepaymentCeiling', 'maxCreditBalance', 'taxRatePercent',
-  'orgCommission', 'funderRateDefault', 'funderRateMin', 'funderRateMax', 'rateFloor', 'rateCeiling', 'rateReviewCount'];
+  'orgCommission', 'funderRateDefault', 'funderRateMin', 'funderRateMax', 'rateFloor', 'rateCeiling', 'rateReviewCount',
+  'arrearsToleranceDaysMin', 'arrearsToleranceDaysMax', 'arrearsTolerancePercentMin', 'arrearsTolerancePercentMax'];
 
 function productBody(d) {
   const out = { name: d.name, idPattern: d.idPattern };
@@ -1444,7 +1533,7 @@ function productBody(d) {
 }
 
 const FEE_FIELDS = (f = {}) => [
-  { label: 'Code', name: 'code', value: f.code || '' },
+  opt({ label: 'Code (blank: made from the name)', name: 'code', value: f.code || '' }),
   { label: 'Name', name: 'name', value: f.name || '' },
   { label: 'When', name: 'feeType', options: ['MANUAL', 'DISBURSEMENT_DEDUCTED', 'DISBURSEMENT_CAPITALIZED', 'DISBURSEMENT_UPFRONT', 'PAYMENT_DUE', 'LATE_REPAYMENT'], value: f.feeType || 'MANUAL' },
   { label: 'How much', name: 'calculation', options: ['FLAT', 'PERCENT_OF_AMOUNT', 'FLAT_PER_INSTALLMENT', 'PERCENT_PER_INSTALLMENT', 'PERCENT_OF_INSTALLMENT_PRINCIPAL'], value: f.calculation || 'FLAT' },
@@ -1456,6 +1545,14 @@ const FEE_FIELDS = (f = {}) => [
   opt({ label: 'Fee income GL (blank: product default)', name: 'glIncome', value: f.glIncome || '' }),
   opt({ label: 'Fee receivable GL (blank: product default)', name: 'glReceivable', value: f.glReceivable || '' }),
   opt({ label: 'Fee write-off GL (blank: product default)', name: 'glWriteOff', value: f.glWriteOff || '' }),
+  { label: 'Manual fee goes on (schedule allocation)', name: 'allocation', options: ['NEXT_INSTALLMENT', 'NO_ALLOCATION'], value: f.allocation || 'NEXT_INSTALLMENT' },
+  { label: 'Amortise the income (accrual)', name: 'amortizationProfile', options: ['NONE', 'STRAIGHT_LINE', 'SUM_OF_YEARS_DIGITS', 'EFFECTIVE_INTEREST_RATE'], value: f.amortizationProfile || 'NONE' },
+  { label: 'Amortisation frequency', name: 'amortizationFrequency', options: ['INSTALLMENT_DUE_DATES', 'INSTALLMENT_DUE_DATES_DAILY', 'CUSTOM_INTERVAL'], value: f.amortizationFrequency || 'INSTALLMENT_DUE_DATES' },
+  opt({ label: 'Custom interval: every', name: 'amortizationIntervalCount', type: 'number', value: f.amortizationIntervalCount ?? '' }),
+  { label: 'Custom interval unit', name: 'amortizationIntervalUnit', options: ['MONTHS', 'WEEKS', 'DAYS', 'YEARS'], value: f.amortizationIntervalUnit || 'MONTHS' },
+  opt({ label: 'Custom interval: number of intervals', name: 'amortizationIntervals', type: 'number', value: f.amortizationIntervals ?? '' }),
+  { label: 'On reschedule or refinance', name: 'amortizationOnReschedule', options: ['END_ON_ORIGINAL', 'CONTINUE_ON_NEW'], value: f.amortizationOnReschedule || 'END_ON_ORIGINAL' },
+  opt({ label: 'Deferred fee income GL (blank: product default)', name: 'glDeferredIncome', value: f.glDeferredIncome || '' }),
   { label: 'Active', name: 'isActive', options: ['true', 'false'], value: String(f.isActive ?? true) },
 ];
 function feeBody(d) {
@@ -1465,6 +1562,11 @@ function feeBody(d) {
     amount: num(d.amount), percent: num(d.percent), minAmount: num(d.minAmount), maxAmount: num(d.maxAmount),
     required: d.required === 'true', isActive: d.isActive === 'true',
     glIncome: d.glIncome || null, glReceivable: d.glReceivable || null, glWriteOff: d.glWriteOff || null,
+    allocation: d.allocation || undefined, amortizationProfile: d.amortizationProfile || undefined,
+    amortizationFrequency: d.amortizationFrequency || undefined,
+    amortizationIntervalCount: num(d.amortizationIntervalCount), amortizationIntervals: num(d.amortizationIntervals),
+    amortizationIntervalUnit: d.amortizationFrequency === 'CUSTOM_INTERVAL' ? d.amortizationIntervalUnit : null,
+    amortizationOnReschedule: d.amortizationOnReschedule || undefined, glDeferredIncome: d.glDeferredIncome || null,
   };
 }
 

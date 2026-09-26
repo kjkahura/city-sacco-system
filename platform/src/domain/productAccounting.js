@@ -44,6 +44,7 @@ const LOAN = {
   penaltyReceivable:  { column: 'gl_penalty_rec',  types: ['ASSET'],     when: (p) => p.accounting_method === 'ACCRUAL' },
   taxesPayable:       { column: 'gl_tax_payable',  types: ['LIABILITY'], when: (p) => loanTaxed(p) },
   deferredInterest:   { column: 'gl_deferred_interest', types: ['LIABILITY'], when: (p) => Boolean(p.interest_prepayment) && p.interest_prepayment !== 'NONE' },
+  deferredFeeIncome:  { column: 'gl_deferred_fee_income', types: ['LIABILITY'], when: (p) => p.accounting_method === 'ACCRUAL', optional: true },
   creditBalance:      { column: 'gl_credit_balance', types: ['LIABILITY'], when: (p) => p.product_type === 'REVOLVING' && p.credit_balance_enabled },
 };
 
@@ -151,7 +152,7 @@ async function validate(c, kind, merged, explicit = {}) {
 
 /** Check a fee's own GL accounts (income, receivable, write-off). */
 async function validateFeeAccounts(c, fee) {
-  const checks = [['gl_income', ['INCOME', 'LIABILITY']], ['gl_receivable', ['ASSET']], ['gl_writeoff', ['EXPENSE']]]
+  const checks = [['gl_income', ['INCOME', 'LIABILITY']], ['gl_receivable', ['ASSET']], ['gl_writeoff', ['EXPENSE']], ['gl_deferred_income', ['LIABILITY']]]
     .filter(([col]) => fee[col]);
   const gls = await glAccounts(c, checks.map(([col]) => fee[col]));
   return checks.map(([col, types]) => glProblem(col, fee[col], gls.find((g) => g.code === fee[col]), types)).filter(Boolean);

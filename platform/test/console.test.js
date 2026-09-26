@@ -188,7 +188,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
 
     section('schedule editing and postdated payments');
     const { appNo, runNo, runId } = await T(async (c) => {
-      await c.query("UPDATE loan_products SET schedule_editing = ARRAY['PAYMENT_DATES','PRINCIPAL','INTEREST'], allow_postdated_payments = true WHERE id = 'NL01'");
+      await c.query("UPDATE loan_products SET schedule_editing = ARRAY['PAYMENT_DATES','PRINCIPAL','INTEREST'], allow_postdated_payments = true, allow_arbitrary_fees = true WHERE id = 'NL01'");
       const ms = (await c.query("SELECT id FROM members WHERE member_no IN ('M0002','M0003') ORDER BY member_no")).rows;
       const a = await L.apply(c, { memberId: ms[0].id, productId: 'NL01', principal: 12000, termMonths: 3, createdBy: 'test' });
       const sav = await S.open(c, { memberId: ms[1].id });
@@ -228,6 +228,25 @@ const T = (fn) => withTenant(SCHEMA, fn);
       (await page.locator('section:has(h2:text("Postdated payments")) tbody tr').count()) === 3
       && (await page.locator('[data-cancel-postdated]').count()) === 3,
       `${await page.locator('section:has(h2:text("Postdated payments")) tbody tr').count()} ${await page.locator('[data-cancel-postdated]').count()}`);
+
+    await page.click('button[data-action=planned-fee]');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=installment]', '3');
+    await page.fill('dialog[open] input[name=name]', 'Site visit');
+    await page.fill('dialog[open] input[name=amount]', '100');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForSelector('section:has(h2:text("Planned fees")) tbody tr');
+    check('a fee can be planned on an installment and is listed with apply, edit and delete',
+      (await page.locator('[data-apply-planned]').count()) === 1 && (await page.textContent('section:has(h2:text("Schedule")) tbody')).includes('planned'));
+    await page.click('button[data-action=custom-repay]');
+    await page.waitForSelector('dialog[open]');
+    await page.fill('dialog[open] input[name=principal]', '100');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => !document.querySelector('dialog[open]'));
+    await page.waitForTimeout(300);
+    const custom = await T((c) => c.query("SELECT allocation FROM transactions WHERE loan_account_id = $1 AND kind = 'LOAN_REPAYMENT' ORDER BY created_at DESC LIMIT 1", [runId]));
+    check('a custom repayment puts the money where the teller says', custom.rows[0]?.allocation?.custom === true && Number(custom.rows[0].allocation.principal) === 100,
+      JSON.stringify(custom.rows[0]?.allocation));
 
     section('reports');
     await page.click('nav button[data-view=reports]');

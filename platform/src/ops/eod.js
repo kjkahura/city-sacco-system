@@ -8,6 +8,8 @@ const F = require('../domain/fees');
 const W = require('../domain/workflow');
 const RATES = require('../domain/rates');
 const PDP = require('../domain/postdated');
+const PF = require('../domain/plannedFees');
+const FA = require('../domain/feeAmortization');
 const P2 = require('../domain/provisioning');
 const CL = require('../domain/close');
 
@@ -104,6 +106,20 @@ const JOBS = {
       }
       return { loans: rows.length, paymentDueApplied: due, lateFeesApplied: late };
     });
+  },
+
+  /**
+   * Planned fees whose date has come: on their installment's due date, or
+   * the date they were set to apply on. Before markArrears, so a planned
+   * fee falls due with its installment.
+   */
+  async applyPlannedFees(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => PF.applyDue(c, { asOf: businessDate, createdBy: 'EOD' }));
+  },
+
+  /** Recognise the fee income each amortisation period has earned. */
+  async amortizeFees(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => FA.run(c, { asOf: businessDate, createdBy: 'EOD' }));
   },
 
   /**
@@ -243,8 +259,8 @@ async function runJob(tenant, job, { businessDate = null, force = false } = {}) 
  * posts, arrears before penalties (penalties read arrears state), and
  * provisioning last because it reads the arrears the others just produced.
  */
-const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'reviewRates', 'accrueInterest', 'applyPostdatedPayments', 'accrueSavings', 'markArrears', 'accruePenalties',
-  'applyFees', 'enforceControls', 'provision', 'postAccruals', 'autoClosure'];
+const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'reviewRates', 'accrueInterest', 'applyPostdatedPayments', 'accrueSavings', 'applyPlannedFees', 'markArrears', 'accruePenalties',
+  'applyFees', 'amortizeFees', 'enforceControls', 'provision', 'postAccruals', 'autoClosure'];
 
 async function runAll({ businessDate = null, jobs = DEFAULT_JOBS, force = false } = {}) {
   const { rows: tenants } = await pool.query(

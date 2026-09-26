@@ -81,9 +81,11 @@ const OVERRIDES = {
   },
   arrearsToleranceDays: {
     column: 'arrears_tolerance_days', mode: 'INHERIT', label: 'ARREARS_TOLERANCE_DAYS', fallback: 0,
+    band: ['arrears_tolerance_days_min', 'arrears_tolerance_days_max'],
   },
   arrearsTolerancePercent: {
     column: 'arrears_tolerance_percent', mode: 'INHERIT', label: 'ARREARS_TOLERANCE_PERCENT', fallback: null,
+    band: ['arrears_tolerance_percent_min', 'arrears_tolerance_percent_max'],
   },
   revolvingRepaymentValue: {
     column: 'revolving_repayment_value', mode: 'INHERIT', label: 'REVOLVING_REPAYMENT_VALUE', fallback: 0,
@@ -190,7 +192,7 @@ const PRODUCT_ONLY = [
   'repayment_interval_unit', 'repayment_interval_count', 'fixed_days_of_month', 'short_month_handling',
   'grace_type', 'rounding', 'non_working_days', 'residual_installment', 'schedule_editing',
   'payment_method', 'allow_prepayments', 'prepayment_interest', 'prepayment_allocation', 'mark_paid_when',
-  'interest_prepayment', 'gl_deferred_interest', 'allow_postdated_payments',
+  'interest_prepayment', 'gl_deferred_interest', 'allow_postdated_payments', 'gl_deferred_fee_income',
   'arrears_tolerance_floor', 'arrears_count_from', 'arrears_non_working_days',
   'penalty_basis', 'penalty_tolerance_days',
   'charge_cap_percent', 'charge_cap_base', 'charge_cap_mode',
@@ -226,8 +228,23 @@ async function lock(c, loanId, { forUpdate = true } = {}) {
     [loanId]
   );
   if (!rows.length) throw err('LOAN_NOT_FOUND', 404);
-  return rows[0];
+  return withSnapshot(rows[0]);
 }
+
+/**
+ * The product settings frozen on the loan at approval (settings_snapshot):
+ * the penalty method and tolerance and the arrears floor and counting
+ * rules. They stand in for the product's own, so a later change to the
+ * product reaches only loans still pending.
+ */
+const SNAPSHOT_SETTINGS = ['penalty_basis', 'penalty_tolerance_days', 'arrears_tolerance_floor', 'arrears_count_from', 'arrears_non_working_days'];
+function withSnapshot(l) {
+  const snap = l.settings_snapshot;
+  if (snap && typeof snap === 'object') for (const k of SNAPSHOT_SETTINGS) if (Object.prototype.hasOwnProperty.call(snap, k)) l[k] = snap[k];
+  return l;
+}
+/** SQL for a snapshot setting's value, for set-based queries over loans `l` joined to products `p`. */
+const settingSql = (col, loan = 'l', product = 'p') => `COALESCE((${loan}.settings_snapshot->>'${col}')${['penalty_tolerance_days'].includes(col) ? '::int' : col === 'arrears_tolerance_floor' ? '::numeric' : ''}, ${product}.${col})`;
 
 /** The same read without the row lock, for quotes in a read-only transaction. */
 const read = (c, loanId) => lock(c, loanId, { forUpdate: false });
@@ -240,9 +257,12 @@ function balances(l) {
   const interest = round2(l.interest_accrued - l.interest_paid);
   const fees = round2(l.fees_due - l.fees_paid);
   const penalty = round2(l.penalty_accrued - l.penalty_paid);
+  // Fees applied with no allocation to the schedule: owed, but outside the
+  // fees due, and paid only by a custom repayment.
+  const nonScheduledFees = round2(Number(l.ns_fees_due || 0) - Number(l.ns_fees_paid || 0));
   return {
-    principal, interest, fees, penalty,
-    total: round2(principal + interest + fees + penalty),
+    principal, interest, fees, penalty, nonScheduledFees,
+    total: round2(principal + interest + fees + penalty + nonScheduledFees),
   };
 }
 
@@ -267,7 +287,7 @@ function terms(l) {
  */
 function settlement(l, arrears = 'CAPITALIZE') {
   const b = balances(l);
-  const charges = round2(b.interest + b.fees + b.penalty);
+  const charges = round2(b.interest + b.fees + b.penalty + b.nonScheduledFees);
   const capitalized = arrears === 'CAPITALIZE' ? charges : 0;
   return {
     balances: b, charges, capitalized, writtenOff: arrears === 'WRITE_OFF' ? charges : 0,
@@ -459,5 +479,5 @@ module.exports = {
   PRODUCT_COLUMNS, lock, read, principalOutstanding, balances, settlement, terms,
   scheduleInputs, scheduleInputsFor, termsFor, currencyDecimals, holidaySet, shiftOffClosedDays, closedDays, NON_WORKING_DAY_RULES,
   isAccrual, booksEntries, interestAccrues, paidCredit, creditsFor, writeOffCredit, post,
-  interestFor, isMonthEnd,
+  interestFor, isMonthEnd, SNAPSHOT_SETTINGS, withSnapshot, settingSql,
 };

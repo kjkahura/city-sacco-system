@@ -125,9 +125,10 @@ const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0
     const inst1 = await Rd(async (c) => (await c.query(
       'SELECT * FROM loan_installments WHERE loan_id = $1 AND number = 1', [loan.id])).rows[0]);
     const arrears = round(inst1.principal_due + inst1.interest_due + inst1.fee_due);
-    check('penalty is the rate on the overdue amount, not the whole loan',
-      Number(charged[0].amount) === round(arrears * 0.005),
-      `${charged[0].amount} vs ${round(arrears * 0.005)} on arrears ${arrears}`);
+    // The first charge after the grace covers all ten late days.
+    check('penalty is the rate on the overdue amount, not the whole loan, for each late day since the due date',
+      Number(charged[0].amount) === round(arrears * 0.005 * 10) && Number(charged[0].days_charged) === 10,
+      `${charged[0].amount} vs ${round(arrears * 0.005 * 10)} on arrears ${arrears}`);
     check('days late recorded', charged[0].days_late === 10, String(charged[0].days_late));
     await assertBalanced('penalty accrual');
 
