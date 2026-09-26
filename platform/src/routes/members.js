@@ -5,6 +5,7 @@ const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const { apiError, notFound, badRequest, paginate, withPaginationHeaders, applyFilterCriteria } = require('../lib/http');
 const { pageQuery, sendPage } = require('../lib/page');
+const HIST = require('../domain/loanHistory');
 
 const router = express.Router();
 
@@ -73,6 +74,14 @@ router.get('/:id', requireAuth(), async (req, res, next) => {
       return (await c.query(sql, [req.params.id])).rows[0];
     });
     return row ? res.json(row) : notFound(res, 'member');
+  } catch (e) { next(e); }
+});
+
+// The member's loan history: closed loans, the largest approved, on-time
+// repayment rates and completed loan cycles (./loanHistory).
+router.get('/:id/loan-history', requireAuth(), async (req, res, next) => {
+  try {
+    res.json(await withTenantRead(req.tenant.schema_name, (c) => HIST.forMember(c, req.params.id)));
   } catch (e) { next(e); }
 });
 

@@ -82,6 +82,35 @@ async function api(method, path, body, { retry = true } = {}) {
   return out;
 }
 
+/** A file sent as the raw request body (an attachment), with the session's headers. */
+async function apiRaw(method, path, bytes, type) {
+  const headers = { 'content-type': type || 'application/octet-stream' };
+  if (S.tenant) headers['x-tenant'] = S.tenant;
+  if (S.access) headers.authorization = `Bearer ${S.access}`;
+  const res = await fetch(path, { method, headers, body: bytes });
+  let payload = null;
+  try { payload = await res.json(); } catch { /* empty body */ }
+  return { ok: res.ok, status: res.status, body: payload, error: res.ok ? null : (payload?.errors?.[0]?.errorReason || `HTTP ${res.status}`) };
+}
+
+/** Fetch a file with the session's headers and open it (preview) or save it. */
+async function openFile(path, name, { save = false } = {}) {
+  const headers = {};
+  if (S.tenant) headers['x-tenant'] = S.tenant;
+  if (S.access) headers.authorization = `Bearer ${S.access}`;
+  const res = await fetch(path, { headers });
+  if (!res.ok) return toast(`HTTP ${res.status}`, true);
+  const url = URL.createObjectURL(await res.blob());
+  if (save) {
+    const a = document.createElement('a');
+    a.href = url; a.download = name || 'file'; document.body.appendChild(a); a.click(); a.remove();
+  } else {
+    window.open(url, '_blank', 'noopener');
+  }
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  return null;
+}
+
 async function refreshSession() {
   const r = await fetch('/api/auth/refresh', {
     method: 'POST',
@@ -405,11 +434,13 @@ async function membersView() {
 }
 
 async function memberDetail(m) {
-  const [savings, loans, shares] = await Promise.all([
+  const [savings, loans, shares, history] = await Promise.all([
     api('GET', `/api/savings?memberId=${m.id}&limit=50`),
     api('GET', `/api/loans?memberId=${m.id}&limit=50`),
     api('GET', '/api/shares?limit=200'),
+    api('GET', `/api/members/${m.id}/loan-history`),
   ]);
+  const h = history.body || {};
   const myShares = (shares.body || []).filter((s) => s.member_id === m.id);
 
   view().innerHTML = `
@@ -438,7 +469,18 @@ async function memberDetail(m) {
     { label: 'Status', key: 'status' },
     { label: 'Principal', num: true, value: (l) => money(l.principal) },
     { label: 'Outstanding', num: true, value: (l) => money(Number(l.principal_disbursed) + Number(l.principal_capitalized || 0) - l.principal_paid) },
-  ], loans.body || [], { onRow: true, empty: 'No loans' }))}`;
+  ], loans.body || [], { onRow: true, empty: 'No loans' }))}
+    ${history.ok ? `<div id="loan-history">${card('Loan history', `<dl class="kv">
+        <dt>Completed loan cycles</dt><dd id="cycles">${h.completedLoanCycles}</dd>
+        <dt>Largest loan approved</dt><dd>${h.maxLoanSize === null ? '—' : money(h.maxLoanSize)}</dd>
+        <dt>On-time repayment rate</dt><dd id="on-time">${h.overallOnTimeRate === null ? '—' : `${h.overallOnTimeRate}%`}</dd></dl>
+      ${table([
+    { label: 'Account', value: (x) => `${x.accountNo}${x.maxLoanSize ? ' (largest)' : ''}` },
+    { label: 'Amount', num: true, value: (x) => money(x.amount) },
+    { label: 'Closed', value: (x) => day(x.closedOn) },
+    { label: 'How', value: (x) => String(x.closedAs).toLowerCase().replace(/_/g, ' ') },
+    { label: 'On time', num: true, value: (x) => (x.onTimeRate === null ? '' : `${x.onTimeRate}%`) },
+  ], h.closedLoans || [], { empty: 'No closed loans' })}`)}</div>` : ''}`;
 
   $('#back').addEventListener('click', membersView);
   wireRows(loans.body || [], loanDetail);
@@ -463,6 +505,8 @@ async function loansView() {
     'CLOSED_WRITTEN_OFF', 'CLOSED_RESCHEDULED', 'CLOSED_REFINANCED', 'CLOSED_REJECTED', 'CLOSED_WITHDRAWN'].map((s) =>
     `<option ${s === loanState.status ? 'selected' : ''} value="${s}">${s || 'Any'}</option>`).join('')}
       </select></label>
+      <span class="spacer"></span>
+      <button id="collection-sheet" class="secondary">Collection sheet</button>
     </div>
     ${table([
     { label: 'Account', key: 'account_no' },
@@ -479,18 +523,100 @@ async function loansView() {
   $('#l-status').addEventListener('change', (e) => {
     loanState.status = e.target.value; loanState.offset = 0; loansView();
   });
+  $('#collection-sheet').addEventListener('click', () => collectionsView());
 }
 
+// --------------------------------------------------------------------------
+// Bulk repayment collection
+// --------------------------------------------------------------------------
+
+const collectState = { view: 'REPAYMENTS', from: '', to: '', asOf: '', productId: '', branchId: '' };
+
+async function collectionsView(result = null) {
+  const q = collectState;
+  const d0 = q.from || today();
+  const qs = new URLSearchParams(q.view === 'REPAYMENTS' ? { view: q.view, from: d0, to: q.to || d0 } : { view: q.view, asOf: q.asOf || today() });
+  if (q.productId) qs.set('productId', q.productId);
+  if (q.branchId) qs.set('branchId', q.branchId);
+  const r = await api('GET', `/api/loans/collections/sheet?${qs}`);
+  if (!r.ok) throw new Error(r.error);
+  const rows = r.body.rows;
+  view().innerHTML = `
+    <button class="secondary" id="back">← Loans</button>
+    <h1>Collection sheet</h1>
+    <div class="toolbar no-print">
+      <label>View<select id="c-view">${['REPAYMENTS', 'ACCOUNTS'].map((v) => `<option ${v === q.view ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+      ${q.view === 'REPAYMENTS' ? `<label>From<input id="c-from" type="date" value="${esc(d0)}"></label><label>To<input id="c-to" type="date" value="${esc(q.to || d0)}"></label>`
+    : `<label>As of<input id="c-asof" type="date" value="${esc(q.asOf || today())}"></label>`}
+      <label>Product<input id="c-product" value="${esc(q.productId)}" size="8"></label>
+      <button id="c-filter" class="secondary">Filter</button>
+      <span class="spacer"></span>
+      <button id="c-print" class="secondary">Print</button>
+      <button id="c-csv" class="secondary">Export CSV</button>
+      <button id="c-post">Post selected</button>
+    </div>
+    ${result ? `<p class="notice" id="batch-result">Batch posted: ${result.posted} of ${result.rows} for ${money(result.amount)}${result.failed ? `; ${result.failed} failed: ${result.results.filter((x) => x.status === 'FAILED').map((x) => `${esc(x.loanId)} ${esc(x.error)}`).join('; ')}` : ''}</p>` : ''}
+    <div id="collection-rows">${rows.length ? `<table><thead><tr><th class="no-print"><input type="checkbox" id="c-all" checked></th><th>Member</th><th>Account</th>
+      <th>${q.view === 'REPAYMENTS' ? 'Installment' : 'Installments due'}</th><th>Due</th><th class="num">Expected</th><th>Date paid</th><th class="num">Amount paid</th></tr></thead><tbody>
+      ${rows.map((x, k) => `<tr data-k="${k}"><td class="no-print"><input type="checkbox" class="c-pick" checked></td>
+        <td>${esc(x.member_no)} ${esc(x.member_name)}</td><td>${esc(x.account_no)}</td>
+        <td>${q.view === 'REPAYMENTS' ? x.number : x.installments_due}</td><td>${esc(q.view === 'REPAYMENTS' ? x.due_date : r.body.asOf)}</td>
+        <td class="num">${money(x.expected)}</td>
+        <td><input type="date" class="c-date" value="${esc(x.datePaid)}"></td>
+        <td class="num"><input type="number" step="0.01" class="c-amount" value="${x.amountPaid}"></td></tr>`).join('')}
+      </tbody></table><p class="hint">Total expected ${money(r.body.total)}. A row changed from its defaults is highlighted.</p>` : '<p class="hint">Nothing due for these filters</p>'}</div>`;
+
+  $('#back').addEventListener('click', loansView);
+  const read = () => {
+    q.view = $('#c-view').value;
+    if ($('#c-from')) { q.from = $('#c-from').value; q.to = $('#c-to').value; }
+    if ($('#c-asof')) q.asOf = $('#c-asof').value;
+    q.productId = $('#c-product').value.trim();
+  };
+  $('#c-view').addEventListener('change', () => { read(); collectionsView(); });
+  $('#c-filter').addEventListener('click', () => { read(); collectionsView(); });
+  $('#c-print').addEventListener('click', () => window.print());
+  $('#c-csv').addEventListener('click', () => openFile(`/api/loans/collections/sheet?${qs}&format=csv`, 'collection-sheet.csv', { save: true }));
+  $('#c-all')?.addEventListener('change', (e) => view().querySelectorAll('.c-pick').forEach((c) => { c.checked = e.target.checked; }));
+  view().querySelectorAll('tr[data-k]').forEach((tr) => tr.querySelectorAll('input.c-date, input.c-amount').forEach((inp) => inp.addEventListener('input', () => {
+    const x = rows[Number(tr.dataset.k)];
+    tr.classList.toggle('changed', $('.c-date', tr).value !== x.datePaid || Number($('.c-amount', tr).value) !== x.amountPaid);
+  })));
+  $('#c-post').addEventListener('click', async () => {
+    const picked = [...view().querySelectorAll('tr[data-k]')].filter((tr) => $('.c-pick', tr).checked).map((tr) => {
+      const x = rows[Number(tr.dataset.k)];
+      return { loanId: x.loan_id, amount: Number($('.c-amount', tr).value), valueDate: $('.c-date', tr).value || undefined };
+    }).filter((x) => x.amount > 0);
+    if (!picked.length) return toast('Choose at least one row with an amount', true);
+    const total = Math.round(picked.reduce((a, x) => a + x.amount, 0) * 100) / 100;
+    const d = await ask([
+      { label: 'Channel for the batch', name: 'channelId', value: 'cash' },
+      opt({ label: 'Receipt or cheque reference', name: 'reference' }),
+    ], `Post ${picked.length} repayments for ${money(total)}`);
+    if (!d) return;
+    const res = await api('POST', '/api/loans/collections/batches', { rows: picked, channelId: d.channelId, reference: d.reference || undefined });
+    if (!res.ok) return toast(res.error, true);
+    toast(`${res.body.posted} posted${res.body.failed ? `, ${res.body.failed} failed` : ''}`, res.body.failed > 0);
+    collectionsView(res.body);
+  });
+}
+
+const RUNNING_EXTRAS = [['repay-deposit', 'Repay from deposit'], ['pay-off', 'Pay off'], ['terminate', 'Terminate'], ['undo-terminate', 'Undo terminate'],
+  ['rate', 'Change interest rate'], ['reduce-balance', 'Reduce balance'], ['holiday-interest', 'Apply holiday interest'],
+  ['revolving-installment', 'Add installment'], ['guarantor', 'Add guarantor'], ['undo-restructure', 'Undo reschedule or top-up'], ['attach', 'Attach document']];
 const LOAN_ACTIONS = {
-  PARTIAL_APPLICATION: [['request-approval', 'Request approval'], ['amend', 'Amend terms'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
-  PENDING_APPROVAL: [['approve', 'Approve'], ['set-incomplete', 'Send back'], ['amend', 'Amend terms'], ['planned-fee', 'Plan a fee'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
-  APPROVED: [['disburse', 'Disburse'], ['planned-fee', 'Plan a fee'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['undo-approve', 'Undo approval'], ['withdraw', 'Withdraw'], ['notes', 'Notes']],
-  ACTIVE: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['postdate-all', 'Postdate installments'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['due-day', 'Change due day'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
-  IN_ARREARS: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ['notes', 'Notes']],
-  LOCKED: [['unlock', 'Unlock'], ['penalty-rate', 'Change penalty rate'], ['reschedule', 'Reschedule'], ['write-off', 'Write off'], ['notes', 'Notes']],
-  CLOSED_WRITTEN_OFF: [['recovery', 'Post recovery'], ['guarantor-recovery', 'Recover from guarantor'], ['release-call', 'Release guarantor call'], ['notes', 'Notes']],
-  CLOSED_REJECTED: [['undo-reject', 'Undo rejection']],
-  CLOSED_WITHDRAWN: [['undo-withdraw', 'Undo withdrawal']],
+  PARTIAL_APPLICATION: [['request-approval', 'Request approval'], ['amend', 'Amend terms'], ['disbursement-details', 'Disbursement details'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['guarantor', 'Add guarantor'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['revolving-installment', 'Add installment'], ['attach', 'Attach document'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
+  PENDING_APPROVAL: [['approve', 'Approve'], ['set-incomplete', 'Send back'], ['amend', 'Amend terms'], ['disbursement-details', 'Disbursement details'], ['planned-fee', 'Plan a fee'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['guarantor', 'Add guarantor'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['revolving-installment', 'Add installment'], ['attach', 'Attach document'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
+  APPROVED: [['disburse', 'Disburse'], ['disbursement-details', 'Disbursement details'], ['planned-fee', 'Plan a fee'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['guarantor', 'Add guarantor'], ['revolving-installment', 'Add installment'], ['attach', 'Attach document'], ['undo-approve', 'Undo approval'], ['withdraw', 'Withdraw'], ['notes', 'Notes']],
+  ACTIVE: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['postdate-all', 'Postdate installments'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['due-day', 'Change due day'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ...RUNNING_EXTRAS, ['notes', 'Notes']],
+  IN_ARREARS: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ...RUNNING_EXTRAS, ['notes', 'Notes']],
+  LOCKED: [['unlock', 'Unlock'], ['fee', 'Apply fee'], ['pay-off', 'Pay off'], ['reduce-balance', 'Reduce balance'], ['penalty-rate', 'Change penalty rate'], ['reschedule', 'Reschedule'], ['write-off', 'Write off'], ['guarantor', 'Add guarantor'], ['undo-restructure', 'Undo reschedule or top-up'], ['attach', 'Attach document'], ['notes', 'Notes']],
+  CLOSED_WRITTEN_OFF: [['recovery', 'Post recovery'], ['guarantor-recovery', 'Recover from guarantor'], ['release-call', 'Release guarantor call'], ['attach', 'Attach document'], ['notes', 'Notes']],
+  CLOSED_REPAID: [['attach', 'Attach document']],
+  CLOSED_RESCHEDULED: [['attach', 'Attach document']],
+  CLOSED_REFINANCED: [['attach', 'Attach document']],
+  CLOSED_REJECTED: [['undo-reject', 'Undo rejection'], ['attach', 'Attach document']],
+  CLOSED_WITHDRAWN: [['undo-withdraw', 'Undo withdrawal'], ['attach', 'Attach document']],
 };
 const BAD_STATES = ['IN_ARREARS', 'LOCKED', 'CLOSED_WRITTEN_OFF'];
 
@@ -513,6 +639,13 @@ async function loanDetail(row) {
   ]);
   if (!loan.ok) throw new Error(loan.error);
   const l = loan.body;
+  const [guarantors, attachments, revSched, details] = await Promise.all([
+    api('GET', `/api/loans/${id}/guarantors`),
+    api('GET', `/api/loans/${id}/attachments`),
+    l.product_type === 'REVOLVING' ? api('GET', `/api/loans/${id}/revolving-schedule`) : Promise.resolve({ ok: false }),
+    ['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED'].includes(l.status) ? api('GET', `/api/loans/${id}/disbursement-details`) : Promise.resolve({ ok: false }),
+  ]);
+  const bd = l.breakdown || {};
   const APPLICATION_STATES = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED'];
   const application = APPLICATION_STATES.includes(l.status);
   const drawsSchedule = !['REVOLVING', 'TRANCHED'].includes(l.product_type);
@@ -537,8 +670,15 @@ async function loanDetail(row) {
     if (a === 'planned-fee') return drawsSchedule || tranched;
     if (a === 'settlement') return Boolean(l.settlement_enabled);
     if (a === 'due-day') return (l.schedule_editing || []).includes('PAYMENT_DATES') && ['DYNAMIC_TERM', 'TRANCHED'].includes(l.product_type);
+    if (a === 'terminate') return !l.terminated_on && ['FIXED_TERM', 'DYNAMIC_TERM', 'INTEREST_FREE'].includes(l.product_type);
+    if (a === 'undo-terminate') return Boolean(l.terminated_on);
+    if (a === 'rate') return l.product_type !== 'INTEREST_FREE';
+    if (a === 'holiday-interest') return Number(l.holiday_interest_pending) > 0;
+    if (a === 'revolving-installment') return revolving;
+    if (a === 'undo-restructure') return Boolean(l.parent_loan_id);
     return true;
   });
+  if (l.eod_excluded) actions.unshift(['eod-include', 'Include in the end of day']);
   const outstanding = Number(l.principal_disbursed) + Number(l.principal_capitalized || 0) - Number(l.principal_paid);
 
   view().innerHTML = `
@@ -547,6 +687,8 @@ async function loanDetail(row) {
       ${l.locked_reason ? `<span class="badge warn">locked: ${esc(l.locked_reason)}</span>` : ''}</h1>
     <p class="hint">${esc(l.first_name)} ${esc(l.last_name)} · ${esc(l.member_no)} · product ${esc(l.product_id)} · ${esc(l.product_type || '')}
       ${l.purpose ? ` · ${esc(l.purpose)}` : ''}${l.parent_account_no ? ` · replaces ${esc(l.parent_account_no)}` : ''}</p>
+    ${l.eod_excluded ? `<p class="notice" id="eod-excluded">Left out of the end of day since ${day(l.eod_excluded.since)}: ${esc(l.eod_excluded.job)} failed on it (${esc(l.eod_excluded.error)}). Nothing is accrued or charged until it is included again.</p>` : ''}
+    ${l.terminated_on ? `<p class="notice" id="terminated">Terminated on ${day(l.terminated_on)}: everything owed fell due that day.</p>` : ''}
     ${woPending ? `<p class="notice" id="wo-pending">Write-off of ${money(woPending.amount_at_request)} requested by ${esc(woPending.requested_by)}, dated ${day(woPending.value_date)}: ${esc(woPending.reason)}. Another manager approves it.</p>` : ''}
     ${l.refinance_of && !l.parent_loan_id ? `<p class="notice" id="top-up-quote">Top-up of ${esc(l.refinances_account_no)}: on disbursement this loan settles it and pays the rest to the member.</p>` : ''}
     ${l.notes ? `<p class="hint">${esc(l.notes)}</p>` : ''}
@@ -577,6 +719,10 @@ async function loanDetail(row) {
         ${l.written_off_on ? `<dt>Written off</dt><dd>${money(l.written_off_amount)} on ${day(l.written_off_on)} by ${esc(l.written_off_by || '')}</dd>
           <dt>Recovered since</dt><dd>${money(l.recovered)}</dd>
           <dt>Still to recover</dt><dd id="wo-left">${money(Number(l.written_off_amount) - Number(l.recovered))}</dd>` : ''}
+        ${bd.interestFromArrears && bd.interestFromArrears.accrued > 0 ? `<dt>Interest from arrears due</dt><dd id="interest-from-arrears">${money(bd.interestFromArrears.due)} of ${money(bd.interestFromArrears.accrued)}</dd>` : ''}
+        ${Number(l.holiday_interest_pending) > 0 ? `<dt>Holiday interest held</dt><dd id="holiday-held">${money(l.holiday_interest_pending)}</dd>` : ''}
+        ${l.previous_account_no ? `<dt>Previously numbered</dt><dd>${esc(l.previous_account_no)}</dd>` : ''}
+        <dt>Member's completed loan cycles</dt><dd id="loan-cycles">${l.completed_loan_cycles ?? 0}</dd>
         ${l.approved_by ? `<dt>Approved by</dt><dd>${esc(l.approved_by)}</dd>` : ''}
         ${l.disbursed_by ? `<dt>Disbursed by</dt><dd>${esc(l.disbursed_by)}</dd>` : ''}
       </dl>`)}
@@ -586,6 +732,23 @@ async function loanDetail(row) {
     { label: 'Amount', num: true, value: (t) => money(t.amount) },
   ], txs.body || [], { empty: 'None yet' }))}
     </div>
+    ${bd.principal && Number(l.principal_disbursed) > 0 ? `<div id="breakdown">${card('Due and paid', table([
+    { label: '', key: 'k' },
+    { label: 'Expected', num: true, value: (x) => (x.expected === undefined ? '' : money(x.expected)) },
+    { label: 'Due now', num: true, value: (x) => money(x.due) },
+    { label: 'Paid', num: true, value: (x) => money(x.paid) },
+    { label: 'Outstanding', num: true, value: (x) => money(x.outstanding) },
+  ], [['Principal', bd.principal], ['Interest', bd.interest], ['Fees', bd.fees], ['Penalties', bd.penalty]].map(([k, x]) => ({ k, ...x }))))}</div>` : ''}
+    ${details.ok ? `<div id="disbursement-details">${card('Disbursement details', `<dl class="kv">
+        <dt>Anticipated disbursement</dt><dd>${day(details.body.expectedDisbursementDate) || '—'}</dd>
+        <dt>First repayment</dt><dd>${day(details.body.firstRepaymentDate) || 'from the product'}</dd>
+        <dt>Paid out</dt><dd>${details.body.disbursementSavingsAccountId ? 'into the member\'s deposit account' : esc(details.body.disbursementChannelId || 'channel chosen at disbursement')}</dd>
+        <dt>Changes</dt><dd>${details.body.changes.length}</dd></dl>`)}</div>` : ''}
+    ${revSched.ok ? `<div id="revolving-schedule">${card('Installments added by hand', `${table([
+    { label: 'Due', value: (x) => day(x.dueDate) },
+    { label: 'Status', key: 'status' },
+    { label: '', html: true, value: (x) => `<button class="link" data-drop-installment="${x.id}">remove</button>` },
+  ], revSched.body.addedByHand, { empty: 'None to come' })}<p class="hint">Next product billing date: ${day(revSched.body.nextProductBilling) || '—'}</p>`)}</div>` : ''}
     ${appSchedule?.ok ? `<div id="application-schedule">${card(appSchedule.body.custom ? 'Schedule edited on the application (as if disbursed today)' : 'Schedule if disbursed today', table([
     { label: '#', key: 'number' },
     { label: 'Due', value: (i) => day(i.dueDate) },
@@ -634,14 +797,29 @@ async function loanDetail(row) {
     { label: 'Amount', num: true, value: (f) => money(f.amount) },
     { label: 'Paid', num: true, value: (f) => money(f.paid) },
     { label: 'Status', key: 'status' },
-    { label: '', html: true, value: (f) => (f.status === 'DUE' ? `<button class="link" data-waive-fee="${f.id}">waive</button>` : '') },
+    { label: '', html: true, value: (f) => (f.status === 'DUE' ? `<button class="link" data-waive-fee="${f.id}">waive</button>${Number(f.paid) === 0 && !String(f.fee_type).startsWith('DISBURSEMENT_') ? ` <button class="link" data-adjust-fee="${f.id}">adjust</button>` : ''}` : '') },
   ], fees.body || [], { empty: 'None' }))}
     ${card('Penalties', table([
     { label: 'Charged', value: (p) => day(p.charged_on) },
     { label: 'Days late', num: true, key: 'days_late' },
     { label: 'Amount', num: true, value: (p) => money(p.amount) },
-    { label: 'Waived', value: (p) => (p.waived_at ? 'yes' : '') },
+    { label: 'Waived', value: (p) => (p.adjusted_at ? 'adjusted' : p.waived_at ? 'yes' : '') },
+    { label: '', html: true, value: (p) => (!p.waived_at && !p.reversed_at && Number(p.amount) > 0 ? `<button class="link" data-adjust-penalty="${p.id}">adjust</button>` : '') },
   ], pens.body || [], { empty: 'None' }))}
+    </div>
+    <div class="grid">
+    ${card('Guarantors', table([
+    { label: 'Guarantor', value: (g) => `${g.first_name} ${g.last_name} · ${g.member_no}` },
+    { label: 'Pledged', num: true, value: (g) => money(g.pledged_amount) },
+    { label: 'Status', key: 'status' },
+    { label: '', html: true, value: (g) => (g.status === 'PLEDGED' ? `<button class="link" data-drop-guarantor="${g.id}">remove</button>` : '') },
+  ], guarantors.body || [], { empty: 'None' }))}
+    <div id="attachments">${card('Attachments', table([
+    { label: 'Title', key: 'title' },
+    { label: 'File', value: (x) => `${x.fileName} · ${Math.ceil(x.size / 1024)} KB` },
+    { label: 'Added', value: (x) => `${day(x.createdAt)} ${x.createdBy || ''}` },
+    { label: '', html: true, value: (x) => `${x.previewable ? `<button class="link" data-preview="${x.id}">preview</button> ` : ''}<button class="link" data-download="${x.id}">download</button> <button class="link" data-edit-attachment="${x.id}">edit</button> <button class="link" data-drop-attachment="${x.id}">delete</button>` },
+  ], attachments.body || [], { empty: 'No documents' }))}</div>
     </div>
     ${(tranches.body || []).length ? card('Tranches', table([
     { label: '#', key: 'number' },
@@ -717,6 +895,53 @@ async function loanDetail(row) {
     toast(res.ok ? 'Fee waived' : res.error, !res.ok);
     if (res.ok) loanDetail(row);
   }));
+  const reload = () => loanDetail(row);
+  view().querySelectorAll('[data-adjust-fee]').forEach((btn) => btn.addEventListener('click', async () => {
+    const d = await ask([{ label: 'Reason (the fee is taken back as if never applied)', name: 'reason' }], 'Adjust fee');
+    if (!d) return;
+    const res = await api('POST', `/api/loans/fees/${btn.dataset.adjustFee}/adjust`, { reason: d.reason });
+    toast(res.ok ? 'Fee adjusted' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
+  view().querySelectorAll('[data-adjust-penalty]').forEach((btn) => btn.addEventListener('click', async () => {
+    const d = await ask([{ label: 'Reason (only before a repayment is entered)', name: 'reason' }], 'Adjust penalty');
+    if (!d) return;
+    const res = await api('POST', `/api/loans/penalties/${btn.dataset.adjustPenalty}/adjust`, { reason: d.reason });
+    toast(res.ok ? 'Penalty adjusted' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
+  view().querySelectorAll('[data-drop-guarantor]').forEach((btn) => btn.addEventListener('click', async () => {
+    const d = await ask([{ label: 'Note', name: 'note', required: false }], 'Remove guarantor');
+    if (!d) return;
+    const res = await api('DELETE', `/api/loans/${id}/guarantors/${btn.dataset.dropGuarantor}`, { note: d.note || undefined });
+    toast(res.ok ? 'Guarantor removed' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
+  view().querySelectorAll('[data-drop-installment]').forEach((btn) => btn.addEventListener('click', async () => {
+    const res = await api('DELETE', `/api/loans/${id}/revolving-installments/${btn.dataset.dropInstallment}`);
+    toast(res.ok ? 'Installment removed' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
+  const attachment = (aid) => (attachments.body || []).find((x) => x.id === aid);
+  view().querySelectorAll('[data-preview]').forEach((btn) => btn.addEventListener('click', () =>
+    openFile(`/api/loans/${id}/attachments/${btn.dataset.preview}/preview`, attachment(btn.dataset.preview)?.fileName)));
+  view().querySelectorAll('[data-download]').forEach((btn) => btn.addEventListener('click', () =>
+    openFile(`/api/loans/${id}/attachments/${btn.dataset.download}/download`, attachment(btn.dataset.download)?.fileName, { save: true })));
+  view().querySelectorAll('[data-edit-attachment]').forEach((btn) => btn.addEventListener('click', async () => {
+    const x = attachment(btn.dataset.editAttachment);
+    const d = await ask([{ label: 'Title', name: 'title', value: x.title }, { label: 'Description', name: 'description', value: x.description || '', required: false }], 'Edit document');
+    if (!d) return;
+    const res = await api('PATCH', `/api/loans/${id}/attachments/${x.id}`, { title: d.title, description: d.description });
+    toast(res.ok ? 'Document saved' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
+  view().querySelectorAll('[data-drop-attachment]').forEach((btn) => btn.addEventListener('click', async () => {
+    const d = await ask([{ label: `Delete ${attachment(btn.dataset.dropAttachment)?.fileName}? Type DELETE`, name: 'confirm' }], 'Delete document');
+    if (!d || d.confirm !== 'DELETE') return;
+    const res = await api('DELETE', `/api/loans/${id}/attachments/${btn.dataset.dropAttachment}`);
+    toast(res.ok ? 'Document deleted' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
   view().querySelectorAll('[data-action]').forEach((btn) => btn.addEventListener('click', async () => {
     const a = btn.dataset.action;
     let res;
@@ -754,14 +979,20 @@ async function loanDetail(row) {
       res = await api('POST', `/api/loans/${id}/disbursements`, { channelId: d.channelId });
       if (res.ok) { toast(`Top-up of ${money(res.body.topUp)} paid; ${res.body.oldLoan.accountNo} closed`); return loanDetail(row); }
     } else if (a === 'disburse') {
+      const dd = details.body || {};
       const d = await ask([
         { label: 'Amount', name: 'amount', type: 'number', step: '0.01', value: l.principal },
-        { label: 'Channel', name: 'channelId', value: 'bank' },
+        opt({ label: 'Channel (blank: into the deposit account below or in the details)', name: 'channelId', value: dd.disbursementSavingsAccountId ? '' : (dd.disbursementChannelId || 'bank') }),
+        opt({ label: 'Into the member\'s deposit account number', name: 'savingsAccountId', value: '' }),
+        opt({ label: 'Value date (blank: today)', name: 'valueDate', type: 'date', value: day(dd.expectedDisbursementDate) }),
+        opt({ label: 'First repayment date (blank: the details, else the product)', name: 'firstRepaymentDate', type: 'date', value: '' }),
         { label: 'Optional fee codes, comma separated', name: 'fees', value: '', required: false },
       ], 'Disburse loan');
       if (!d) return;
       res = await api('POST', `/api/loans/${id}/disbursements`, {
-        amount: Number(d.amount), channelId: d.channelId, fees: d.fees ? d.fees.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean) : [] });
+        amount: Number(d.amount), channelId: d.channelId || undefined, savingsAccountId: d.savingsAccountId ? d.savingsAccountId.trim() : undefined,
+        valueDate: d.valueDate || undefined, firstRepaymentDate: d.firstRepaymentDate || undefined,
+        fees: d.fees ? d.fees.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean) : [] });
     }
     if (a === 'drawdown') {
       const d = await ask([
@@ -812,12 +1043,15 @@ async function loanDetail(row) {
         { label: 'Name (arbitrary fee)', name: 'name', value: '', required: false },
         { label: 'Amount (if the fee leaves it open)', name: 'amount', type: 'number', step: '0.01', required: false },
         { label: 'Goes on', name: 'allocation', options: ['FEE_SETTING', 'NEXT_INSTALLMENT', 'NO_ALLOCATION'], value: 'FEE_SETTING' },
+        opt({ label: 'On installment number (blank: as above)', name: 'installmentNumber', type: 'number' }),
+        opt({ label: 'Back date (blank: today)', name: 'valueDate', type: 'date' }),
         { label: 'Note', name: 'note', required: false },
       ], 'Apply fee');
       if (!d) return;
       res = await api('POST', `/api/loans/${id}/fees`, {
         fee: d.fee ? d.fee.toUpperCase() : undefined, name: d.name || undefined,
         amount: d.amount ? Number(d.amount) : undefined, note: d.note,
+        installmentNumber: d.installmentNumber ? Number(d.installmentNumber) : undefined, valueDate: d.valueDate || undefined,
         allocation: d.allocation === 'FEE_SETTING' ? undefined : d.allocation });
     }
     if (a === 'reschedule' || a === 'refinance') {
@@ -825,12 +1059,22 @@ async function loanDetail(row) {
         { label: 'New number of installments', name: 'termMonths', type: 'number', value: l.term_months },
         { label: 'Product (blank keeps the same)', name: 'productId', value: '', required: false },
         ...(a === 'refinance' ? [{ label: 'Top-up the member asks for', name: 'topUp', type: 'number', step: '0.01' }] : []),
-        { label: 'Interest, fees and penalties owed', name: 'arrears', options: ['CAPITALIZE', 'WRITE_OFF'], value: 'CAPITALIZE' },
+        { label: 'Interest, fees and penalties owed', name: 'arrears', options: ['CAPITALIZE', 'WRITE_OFF', 'PART'], value: 'CAPITALIZE' },
+        opt({ label: `If PART: interest to capitalise (owed ${money(b.interest)}), the rest written off`, name: 'capInterest', type: 'number', step: '0.01' }),
+        opt({ label: `If PART: fees to capitalise (owed ${money(Number(b.fees || 0) + Number(b.nonScheduledFees || 0))})`, name: 'capFees', type: 'number', step: '0.01' }),
+        opt({ label: `If PART: penalties to capitalise (owed ${money(b.penalty)})`, name: 'capPenalty', type: 'number', step: '0.01' }),
+        ...(a === 'reschedule' ? [opt({ label: `New principal (blank: all ${money(b.principal)}; less writes the rest off)`, name: 'principal', type: 'number', step: '0.01' })] : []),
+        { label: 'Late and payment-due fees move to the new loan', name: 'carryFees', options: ['true', 'false'], value: 'true' },
+        { label: 'The new loan keeps this account number', name: 'keepAccountNo', options: ['false', 'true'], value: 'false' },
         { label: 'Note', name: 'note', required: false },
       ], a === 'refinance' ? 'Top-up application' : 'Reschedule loan');
       if (!d) return;
+      const part = d.arrears === 'PART';
       res = await api('POST', `/api/loans/${id}/${a}`, {
-        termMonths: Number(d.termMonths), productId: d.productId || undefined, arrears: d.arrears, note: d.note,
+        termMonths: Number(d.termMonths), productId: d.productId || undefined, arrears: part ? 'CAPITALIZE' : d.arrears, note: d.note,
+        ...(part ? { capitalize: { interest: Number(d.capInterest || 0), fees: Number(d.capFees || 0), penalty: Number(d.capPenalty || 0) } } : {}),
+        ...(a === 'reschedule' && d.principal ? { principal: Number(d.principal) } : {}),
+        carryFees: d.carryFees === 'true', keepAccountNo: d.keepAccountNo === 'true',
         ...(a === 'refinance' ? { topUp: Number(d.topUp) } : {}) });
       if (res.ok && a === 'refinance') {
         toast(`Application ${res.body.application.account_no} for ${money(res.body.application.principal)} awaits approval`);
@@ -913,11 +1157,13 @@ async function loanDetail(row) {
     if (a === 'holiday') {
       const d = await ask([
         { label: 'From installment number', name: 'from', type: 'number' },
-        { label: 'Number of installments with nothing due', name: 'count', type: 'number', value: 1 },
+        { label: 'Number of installments', name: 'count', type: 'number', value: 1 },
+        { label: 'Kind', name: 'kind', options: ['NO_PRINCIPAL_NO_INTEREST', 'PRINCIPAL_NO_INTEREST'], value: 'NO_PRINCIPAL_NO_INTEREST' },
+        { label: 'The holiday\'s interest (no principal, no interest)', name: 'interest', options: ['SPREAD', 'NONE', 'APPLY_LATER'], value: 'SPREAD' },
         { label: 'Note', name: 'note', required: false },
       ], `Payment holiday on ${l.account_no}`);
       if (!d) return;
-      res = await api('POST', `/api/loans/${id}/payment-holiday`, { from: Number(d.from), count: Number(d.count), note: d.note || undefined });
+      res = await api('POST', `/api/loans/${id}/payment-holiday`, { from: Number(d.from), count: Number(d.count), kind: d.kind, interest: d.interest, note: d.note || undefined });
     }
     if (a === 'due-day') {
       const d = await ask([
@@ -959,6 +1205,105 @@ async function loanDetail(row) {
       if (!d) return;
       res = await api('POST', `/api/loans/${id}/write-off`, { reason: d.narration, valueDate: d.valueDate || undefined });
       if (res.ok && !res.body.transaction) { toast('Write-off requested; another manager approves it'); return loanDetail(row); }
+    }
+    if (a === 'eod-include') res = await api('POST', `/api/loans/${id}/eod-include`, {});
+    if (a === 'disbursement-details') {
+      const dd = details.body || {};
+      const d = await ask([
+        opt({ label: 'Anticipated disbursement date', name: 'expectedDisbursementDate', type: 'date', value: day(dd.expectedDisbursementDate) }),
+        opt({ label: 'First repayment date (blank: from the product)', name: 'firstRepaymentDate', type: 'date', value: day(dd.firstRepaymentDate) }),
+        opt({ label: 'Channel to pay out through', name: 'disbursementChannelId', value: dd.disbursementChannelId || '' }),
+        opt({ label: 'Or the member\'s deposit account number', name: 'disbursementSavingsAccountId', value: '' }),
+      ], `Disbursement details of ${l.account_no}`);
+      if (!d) return;
+      res = await api('PUT', `/api/loans/${id}/disbursement-details`, {
+        expectedDisbursementDate: d.expectedDisbursementDate || null, firstRepaymentDate: d.firstRepaymentDate || null,
+        ...(d.disbursementSavingsAccountId ? { disbursementSavingsAccountId: d.disbursementSavingsAccountId.trim() }
+          : { disbursementChannelId: d.disbursementChannelId || null }) });
+    }
+    if (a === 'repay-deposit') {
+      const d = await ask([
+        { label: 'Deposit account number (the member\'s or anyone\'s)', name: 'savingsAccountId' },
+        { label: 'Amount', name: 'amount', type: 'number', step: '0.01' },
+      ], `Repay ${l.account_no} from a deposit account`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/repayments`, { amount: Number(d.amount), savingsAccountId: d.savingsAccountId.trim() });
+    }
+    if (a === 'pay-off') {
+      const q = await api('GET', `/api/loans/${id}/pay-off`);
+      if (!q.ok) return toast(q.error, true);
+      const d = await ask([
+        { label: `Principal ${money(q.body.principal)} is paid in full. Interest owed ${money(q.body.interest)}: collect`, name: 'interest', type: 'number', step: '0.01', value: q.body.interest },
+        { label: `Fees owed ${money(q.body.fees)}: collect`, name: 'fees', type: 'number', step: '0.01', value: q.body.fees },
+        { label: `Penalties owed ${money(q.body.penalty)}: collect`, name: 'penalty', type: 'number', step: '0.01', value: q.body.penalty },
+        { label: 'Channel', name: 'channelId', value: 'cash' },
+        opt({ label: 'Note', name: 'note' }),
+      ], `Pay off ${l.account_no} (what is not collected is written off)`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/pay-off`, { interest: Number(d.interest), fees: Number(d.fees), penalty: Number(d.penalty), channelId: d.channelId, note: d.note || undefined });
+    }
+    if (a === 'terminate') {
+      const d = await ask([opt({ label: 'Termination date (blank: today)', name: 'valueDate', type: 'date' }), opt({ label: 'Note', name: 'note' })],
+        `Terminate ${l.account_no}: everything owed falls due on the date`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/terminate`, { valueDate: d.valueDate || undefined, note: d.note || undefined });
+    }
+    if (a === 'undo-terminate') res = await api('POST', `/api/loans/${id}/undo-terminate`, {});
+    if (a === 'rate') {
+      const indexed = l.rate_plan === 'INDEX';
+      const d = await ask([
+        { label: indexed ? 'New spread' : 'New interest rate (product unit)', name: 'value', type: 'number', step: '0.0001', value: indexed ? '' : l.monthly_rate },
+        opt({ label: 'From (blank: today)', name: 'effectiveFrom', type: 'date' }),
+        opt({ label: 'Note', name: 'note' }),
+      ], `Change the interest rate of ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/interest-rate`, { [indexed ? 'spread' : 'rate']: Number(d.value), effectiveFrom: d.effectiveFrom || undefined, note: d.note || undefined });
+    }
+    if (a === 'reduce-balance') {
+      const d = await ask([
+        { label: 'Balance', name: 'component', options: ['FEE', 'PENALTY'], value: 'FEE' },
+        { label: `New amount due (fees now ${money(Number(b.fees || 0) + Number(b.nonScheduledFees || 0))}, penalties now ${money(b.penalty)})`, name: 'newBalance', type: 'number', step: '0.01' },
+        opt({ label: 'Reason', name: 'reason' }),
+      ], `Reduce a balance of ${l.account_no} (the difference is written off)`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/reduce-balance`, { component: d.component, newBalance: Number(d.newBalance), reason: d.reason || undefined });
+    }
+    if (a === 'holiday-interest') {
+      const d = await ask([{ label: `Amount to apply (held ${money(l.holiday_interest_pending)})`, name: 'amount', type: 'number', step: '0.01', value: l.holiday_interest_pending }],
+        `Apply payment holiday interest on ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/holiday-interest`, { amount: Number(d.amount) });
+    }
+    if (a === 'revolving-installment') {
+      const d = await ask([{ label: 'Due date', name: 'dueDate', type: 'date' }], `Add an installment to ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/revolving-installments`, { dueDate: d.dueDate });
+    }
+    if (a === 'guarantor') {
+      const d = await ask([
+        { label: 'Guarantor member number or id', name: 'member' },
+        { label: 'Amount pledged', name: 'amount', type: 'number', step: '0.01' },
+      ], `Add a guarantor to ${l.account_no}`);
+      if (!d) return;
+      const m = await api('GET', `/api/members/${encodeURIComponent(d.member.trim())}`);
+      if (!m.ok) return toast(m.error, true);
+      res = await api('POST', `/api/loans/${id}/guarantors`, { memberId: m.body.id, amount: Number(d.amount) });
+    }
+    if (a === 'undo-restructure') {
+      const d = await ask([opt({ label: 'Note', name: 'note' })], `Undo: ${l.parent_account_no} runs again and ${l.account_no} is withdrawn`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/undo-restructure`, { note: d.note || undefined });
+      if (res.ok) { toast(`${res.body.restored.accountNo} is running again`); return loanDetail({ account_no: res.body.restored.accountNo }); }
+    }
+    if (a === 'attach') {
+      const d = await ask([
+        { label: 'File', name: 'file', type: 'file' },
+        opt({ label: 'Title', name: 'title' }),
+        opt({ label: 'Description', name: 'description' }),
+      ], `Attach a document to ${l.account_no}`);
+      if (!d || !d.file || !d.file.size) return;
+      const qs = new URLSearchParams({ fileName: d.file.name, ...(d.title ? { title: d.title } : {}), ...(d.description ? { description: d.description } : {}) });
+      res = await apiRaw('POST', `/api/loans/${id}/attachments?${qs}`, await d.file.arrayBuffer(), d.file.type || 'application/octet-stream');
     }
     if (a === 'approve-write-off') res = await api('POST', `/api/loans/${id}/write-off/approve`, {});
     if (a === 'reject-write-off') {
@@ -1978,7 +2323,8 @@ const CONTROL_ROLES = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDIT
 let lastControlsRun = null;
 
 async function controlsView() {
-  const [ctl, users] = await Promise.all([api('GET', '/api/loans/controls'), api('GET', '/api/loans/controls/users')]);
+  const [ctl, users, excluded] = await Promise.all([api('GET', '/api/loans/controls'), api('GET', '/api/loans/controls/users'),
+    api('GET', '/api/loans/eod-exclusions')]);
   if (!ctl.ok) throw new Error(ctl.error);
   const k = ctl.body;
   const yes = (v) => (v ? 'yes' : 'no');
@@ -2000,6 +2346,8 @@ async function controlsView() {
         <dt>Two-man rule (the approver may not disburse)</dt><dd>${yes(k.two_man_rule)}</dd>
         <dt>A write-off needs a second person's approval</dt><dd>${yes(k.write_off_requires_approval)}</dd>
         <dt>Roles that may post repayments on a locked loan</dt><dd id="locked-roles">${(k.locked_posting_roles || []).length ? esc(k.locked_posting_roles.join(', ')) : 'none'}</dd>
+        <dt>Roles that may post custom repayments</dt><dd id="custom-roles">${k.custom_allocation_roles ? esc(k.custom_allocation_roles.join(', ') || 'none') : 'any that posts repayments'}</dd>
+        <dt>Roles that may set disbursement details</dt><dd id="disbursement-roles">${k.disbursement_conditions_roles ? esc(k.disbursement_conditions_roles.join(', ') || 'none') : 'any that edits applications'}</dd>
       </dl>${admin ? '<button id="ctl-edit" class="secondary">Change controls</button>' : ''}`)}
       ${card('Run the controls now', `<p class="hint">The end of day runs these every night: it locks loans at their product's charge cap
         or after its days in arrears, and closes running loans that have owed nothing for the product's number of days.</p>
@@ -2014,7 +2362,21 @@ async function controlsView() {
     { label: 'Largest loan they may approve', num: true, value: (u) => limit(u.approvalLimit) },
     { label: 'Largest disbursement', num: true, value: (u) => limit(u.disbursementLimit) },
     { label: '', html: true, value: (u) => (admin ? `<button class="link" data-limits="${esc(u.id)}">set limits</button>` : '') },
-  ], users.body, { empty: 'No staff users' })}<p class="hint">A blank limit means none beyond the user's role.</p>`) : ''}`;
+  ], users.body, { empty: 'No staff users' })}<p class="hint">A blank limit means none beyond the user's role.</p>`) : ''}
+    <div id="eod-exclusions">${card('Loans left out of the end of day', `${table([
+    { label: 'Loan', value: (x) => `${x.account_no} · ${x.member_no} ${x.first_name} ${x.last_name}` },
+    { label: 'Since', value: (x) => day(x.business_date) },
+    { label: 'Job', key: 'job' },
+    { label: 'Error', key: 'error' },
+    { label: '', html: true, value: (x) => `<button class="link" data-include="${esc(x.account_no)}">include</button>` },
+  ], excluded.body || [], { empty: 'None: every loan runs in the end of day' })}
+    <p class="hint">A loan that breaks an end-of-day job is left out so the rest run; nothing is accrued or charged on it until it is fixed and included,
+      which catches it up.</p>`)}</div>`;
+  view().querySelectorAll('[data-include]').forEach((btn) => btn.addEventListener('click', async () => {
+    const res = await api('POST', `/api/loans/${encodeURIComponent(btn.dataset.include)}/eod-include`, {});
+    toast(res.ok ? `${btn.dataset.include} included and caught up` : res.error, !res.ok);
+    if (res.ok) controlsView();
+  }));
 
   if (admin) {
     $('#ctl-edit').addEventListener('click', async () => {
@@ -2027,6 +2389,8 @@ async function controlsView() {
         { label: 'Two-man rule', name: 'twoManRule', options: ['false', 'true'], value: String(!!k.two_man_rule) },
         { label: 'A write-off needs a second person\'s approval', name: 'writeOffRequiresApproval', options: ['true', 'false'], value: String(!!k.write_off_requires_approval) },
         ...CONTROL_ROLES.map((r) => ({ label: `${r} may post on locked loans`, name: `lock_${r}`, options: ['false', 'true'], value: String((k.locked_posting_roles || []).includes(r)) })),
+        opt({ label: 'Roles that may post custom repayments (comma separated; blank: any)', name: 'customRoles', value: (k.custom_allocation_roles || []).join(', ') }),
+        opt({ label: 'Roles that may set disbursement details (comma separated; blank: any)', name: 'disbursementRoles', value: (k.disbursement_conditions_roles || []).join(', ') }),
       ], 'Lending controls');
       if (!d) return;
       const num = (v) => (v === '' || v === undefined ? null : Number(v));
@@ -2036,6 +2400,8 @@ async function controlsView() {
         minArrearsDaysBeforeWriteoff: Number(d.minArrearsDaysBeforeWriteoff || 0), maxDaysUndoClose: num(d.maxDaysUndoClose),
         twoManRule: d.twoManRule === 'true', writeOffRequiresApproval: d.writeOffRequiresApproval === 'true',
         lockedPostingRoles: CONTROL_ROLES.filter((r) => d[`lock_${r}`] === 'true'),
+        customAllocationRoles: d.customRoles ? d.customRoles.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean) : null,
+        disbursementConditionsRoles: d.disbursementRoles ? d.disbursementRoles.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean) : null,
       });
       toast(res.ok ? 'Controls saved' : res.error, !res.ok);
       if (res.ok) controlsView();

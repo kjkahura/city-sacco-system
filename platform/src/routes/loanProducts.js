@@ -98,6 +98,7 @@ const FIELDS = {
   arrearsTolerancePercentMin: 'arrears_tolerance_percent_min', arrearsTolerancePercentMax: 'arrears_tolerance_percent_max',
   glDeferredFeeIncome: 'gl_deferred_fee_income',
   coverCountsDeposits: 'cover_counts_deposits', capIncludesAccrued: 'cap_includes_accrued',
+  allowCustomAllocation: 'allow_custom_allocation',
   settlementEnabled: 'settlement_enabled', settlementProductId: 'settlement_product_id', settlementAutoSet: 'settlement_auto_set',
   settlementAutoCreate: 'settlement_auto_create', settlementOption: 'settlement_option',
   arrearsNonWorkingDays: 'arrears_non_working_days',
@@ -165,6 +166,7 @@ const publicProduct = (p) => ({
   arrearsToleranceDaysMin: p.arrears_tolerance_days_min, arrearsToleranceDaysMax: p.arrears_tolerance_days_max,
   arrearsTolerancePercentMin: num(p.arrears_tolerance_percent_min), arrearsTolerancePercentMax: num(p.arrears_tolerance_percent_max),
   coverCountsDeposits: p.cover_counts_deposits, capIncludesAccrued: p.cap_includes_accrued,
+  allowCustomAllocation: p.allow_custom_allocation,
   settlement: { enabled: p.settlement_enabled, productId: p.settlement_product_id, autoSet: p.settlement_auto_set,
     autoCreate: p.settlement_auto_create, option: p.settlement_option },
   arrearsToleranceFloor: num(p.arrears_tolerance_floor), arrearsCountFrom: p.arrears_count_from,
@@ -332,7 +334,7 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
   for (const col of ['accrue_late_interest', 'enforce_deposit_multiplier', 'require_guarantor_cover', 'is_active', 'allow_arbitrary_fees',
     'credit_balance_enabled', 'enable_guarantors', 'enable_collateral', 'tax_on_interest', 'tax_on_fees', 'tax_on_penalties',
     'funding_enabled', 'lock_funds_at_approval', 'adjustable_rates', 'allow_negative_rate', 'allow_prepayments',
-    'allow_postdated_payments', 'cover_counts_deposits', 'cap_includes_accrued', 'settlement_enabled', 'settlement_auto_set',
+    'allow_postdated_payments', 'cover_counts_deposits', 'cap_includes_accrued', 'allow_custom_allocation', 'settlement_enabled', 'settlement_auto_set',
     'settlement_auto_create']) {
     if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
   }

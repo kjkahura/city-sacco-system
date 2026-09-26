@@ -5,6 +5,7 @@ const S = require('./schedule');
 const ledger = require('./ledger');
 const savings = require('./savings');
 const loans = require('./loans');
+const G = require('./eodGuard');
 const { round2 } = acct;
 const { ymd, isoDate } = S;
 
@@ -43,13 +44,14 @@ async function dueNow(c, l, asOf) {
   return round2(Math.max(0, b.penalty) + Math.max(0, b.fees) + Math.max(0, b.interest) + Math.min(Number(pd.p), b.principal));
 }
 
-async function run(c, { asOf = null, createdBy = 'EOD' } = {}) {
+async function run(c, { asOf = null, createdBy = 'EOD', loanId = null } = {}) {
   const date = asOf ? ymd(asOf) : isoDate(new Date());
   const { rows } = await c.query(
     `SELECT l.id FROM loan_accounts l JOIN loan_products p ON p.id = l.product_id
      WHERE l.settlement_account_id IS NOT NULL AND l.status IN ('ACTIVE', 'IN_ARREARS')
-       AND p.settlement_enabled AND p.settlement_option <> 'NONE'
-     ORDER BY l.settlement_account_id, l.settlement_linked_at, l.id`);
+       AND p.settlement_enabled AND p.settlement_option <> 'NONE' AND ${G.EXCLUDED_SQL('l')}
+       AND ($1::uuid IS NULL OR l.id = $1::uuid)
+     ORDER BY l.settlement_account_id, l.settlement_linked_at, l.id`, [loanId]);
   const out = { loans: rows.length, transferred: 0, amount: 0, short: 0, failed: 0 };
   for (const { id } of rows) {
     const l = await ledger.lock(c, id);

@@ -13,6 +13,7 @@ const SETTLE = require('../domain/settlement');
 const FA = require('../domain/feeAmortization');
 const P2 = require('../domain/provisioning');
 const CL = require('../domain/close');
+const G = require('../domain/eodGuard');
 
 /**
  * End-of-day processing.
@@ -56,18 +57,22 @@ const JOBS = {
     return withTenant(tenant.schema_name, (c) => RATES.reviewAll(c, { date: businessDate, createdBy: 'EOD' }));
   },
 
-  /** Accrue a period's interest on every active loan. */
+  /**
+   * Accrue a period's interest on every active loan. Each loan in its own
+   * savepoint: one that fails is left out of the end of day (./eodGuard)
+   * and the rest are accrued.
+   */
   async accrueInterest(tenant, businessDate) {
     return withTenant(tenant.schema_name, async (c) => {
       const { rows } = await c.query(
-        "SELECT id FROM loan_accounts WHERE status IN ('ACTIVE','IN_ARREARS')");
+        `SELECT l.id FROM loan_accounts l WHERE l.status IN ('ACTIVE','IN_ARREARS') AND ${G.EXCLUDED_SQL('l')}`);
       let accrued = 0;
       let total = 0;
-      for (const l of rows) {
-        const tx = await L.accrueInterest(c, l.id, { valueDate: businessDate, createdBy: 'EOD' });
+      const run = await G.eachLoan(c, { job: 'accrueInterest', date: businessDate }, rows, async (id) => {
+        const tx = await L.accrueInterest(c, id, { valueDate: businessDate, createdBy: 'EOD' });
         if (tx) { accrued += 1; total += Number(tx.amount); }
-      }
-      return { loans: rows.length, accrued, total: Math.round(total * 100) / 100 };
+      });
+      return { loans: rows.length, accrued, total: Math.round(total * 100) / 100, ...G.summary(run) };
     });
   },
 
@@ -98,14 +103,15 @@ const JOBS = {
    */
   async applyFees(tenant, businessDate) {
     return withTenant(tenant.schema_name, async (c) => {
-      const { rows } = await c.query("SELECT id FROM loan_accounts WHERE status IN ('ACTIVE','IN_ARREARS')");
+      const { rows } = await c.query(
+        `SELECT l.id FROM loan_accounts l WHERE l.status IN ('ACTIVE','IN_ARREARS') AND ${G.EXCLUDED_SQL('l')}`);
       let due = 0; let late = 0;
-      for (const r of rows) {
-        const l = await L.lock(c, r.id);
+      const run = await G.eachLoan(c, { job: 'applyFees', date: businessDate }, rows, async (id) => {
+        const l = await L.lock(c, id);
         if (L.productType(l).paymentDueFeesByCalendar) due += await F.applyPaymentDueFees(c, l, businessDate);
         late += await F.applyLateFees(c, l, businessDate);
-      }
-      return { loans: rows.length, paymentDueApplied: due, lateFeesApplied: late };
+      });
+      return { loans: rows.length, paymentDueApplied: due, lateFeesApplied: late, ...G.summary(run) };
     });
   },
 
@@ -177,7 +183,7 @@ const JOBS = {
   async markArrears(tenant, businessDate) {
     return withTenant(tenant.schema_name, async (c) => {
       const flagged = await L.markArrears(c, { asOf: businessDate });
-      return { flagged: flagged.length, loans: flagged.map((r) => r.account_no) };
+      return { flagged: flagged.length, loans: flagged.map((r) => r.account_no), ...(flagged.guard ? G.summary(flagged.guard) : {}) };
     });
   },
 
