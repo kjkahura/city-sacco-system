@@ -20,6 +20,7 @@ const writeOffs = require('./writeOffs');
 const rates = require('./rates');
 const penalties = require('./penalties');
 const FA = require('./feeAmortization');
+const settlementLinks = require('./settlementLinks');
 const { err, round2 } = acct;
 const { ymd, isoDate } = S;
 const {
@@ -184,6 +185,8 @@ async function apply(c, params, { refinance = null, settles = refinance?.of || n
   await rates.planPeriods(c, rows[0], p, params.ratePeriods);
   for (const f of fundingSources || []) await funding.addFundingSource(c, rows[0].id, { ...f, createdBy });
   for (const k of collateral || []) await securities.addCollateral(c, rows[0].id, { ...k, createdBy });
+  // A settlement deposit account, where the product sets or creates one.
+  await settlementLinks.autoLink(c, rows[0], { createdBy });
   return (await c.query('SELECT * FROM loan_accounts WHERE id = $1', [rows[0].id])).rows[0];
 }
 
@@ -239,6 +242,8 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
   // next tranche, or a drawdown within the available limit).
   const { amount: amt, tranche: plannedTranche } = await type.disbursementAmount(c, l, { amount, tranche, date });
   await workflow.assertMayDisburse(c, l, { actor: createdBy, amount: amt, user });
+  // The required securities, checked again before the money leaves.
+  if (first) await eligibility.assertCovered(c, l);
 
   const { rows: [ch] } = await c.query(
     'SELECT * FROM transaction_channels WHERE id = $1 AND is_active', [channelId]
@@ -467,10 +472,13 @@ function customPaid(custom, amount, due) {
   return paid;
 }
 
-async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy, branchId: tellerBranch = null, allocationOrder = null, customAllocation = null } = {}) {
+async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy, branchId: tellerBranch = null, allocationOrder = null, customAllocation = null, user = null } = {}) {
   let l = await lock(c, loanId);
   const type = types.forLoan(l);
-  if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
+  // A locked loan takes repayments only from a user whose role may post on
+  // locked accounts (Mambu's permission); the loan stays locked.
+  if (l.status === 'LOCKED') await controls.assertMayPostOnLocked(c, { user });
+  else if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   let left = round2(amount);
   if (!(left > 0)) throw err('INVALID_REPAYMENT_AMOUNT');
 

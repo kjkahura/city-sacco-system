@@ -417,8 +417,7 @@ const product = (id, body) => call('POST', '/api/loan-products', { id, name: id,
     check('the late days\' penalty is cut to the cap and the loan is locked; nothing more is charged',
       c1.length === 1 && Number(c1[0].amount) === 2000 && c2.length === 0 && hRow.status === 'LOCKED' && hRow.locked_reason === 'CAPPED'
       && Number(hRow.charges_since_arrears) === 2000, `${c1.length} ${c1[0]?.amount} ${c2.length} ${hRow.status} ${hRow.charges_since_arrears}`);
-    const forfeited = (await Rd((c) => c.query('SELECT * FROM penalty_charges WHERE loan_id = $1 AND forfeited', [hl.id]))).rows;
-    check('a loan locked by the cap forfeits the days it is locked', forfeited.length === 1 && Number(forfeited[0].amount) === 0, String(forfeited.length));
+    check('a loan locked by the cap keeps accruing, to be applied when it is unlocked', Number(hRow.penalty_unapplied) > 0, String(hRow.penalty_unapplied));
     const unlock = await call('POST', `/api/loans/${hl.id}/unlock`, {});
     check('a cap lock cannot be lifted while the charges are unpaid and the loan is in arrears',
       unlock.status === 409 && /CAP_LOCK/.test(unlock.reason), `${unlock.status} ${unlock.reason}`);

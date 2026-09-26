@@ -329,6 +329,7 @@ async function disburseRefinance(c, applicationId, { channelId = 'bank', valueDa
   const np = await productFor(c, a.product_id, { activeOnly: false });
   assertSameMethod(old, np, s.capitalized);
   await W.assertMayDisburse(c, a, { actor: createdBy, amount: extra, user });
+  await eligibility.assertCovered(c, a);
   const channel = await channelFor(c, channelId);
   return settle(c, { kind: 'REFINANCE', old, np, fresh: a, s, extra, channel, channelId, arrears, date, note: note || a.notes, createdBy });
 }

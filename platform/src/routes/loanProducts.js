@@ -42,6 +42,7 @@ const ENUMS = {
   prepayment_allocation: ['UPCOMING_PENDING', 'NEXT_INSTALLMENTS'],
   mark_paid_when: ['FULL_DUE', 'PRINCIPAL_EXPECTED'],
   interest_prepayment: ['NONE', 'NEXT_INSTALLMENT', 'ALL_INSTALLMENTS'],
+  settlement_option: ['FULL_DUES', 'PARTIAL', 'NONE'],
   rate_review_unit: ['DAYS', 'WEEKS', 'MONTHS'],
   simple_base: ['PRINCIPAL_ONLY', 'PRINCIPAL_AND_INTEREST'],
   interest_posting: ['ON_REPAYMENT', 'ON_DISBURSEMENT'],
@@ -96,6 +97,9 @@ const FIELDS = {
   arrearsToleranceDaysMin: 'arrears_tolerance_days_min', arrearsToleranceDaysMax: 'arrears_tolerance_days_max',
   arrearsTolerancePercentMin: 'arrears_tolerance_percent_min', arrearsTolerancePercentMax: 'arrears_tolerance_percent_max',
   glDeferredFeeIncome: 'gl_deferred_fee_income',
+  coverCountsDeposits: 'cover_counts_deposits', capIncludesAccrued: 'cap_includes_accrued',
+  settlementEnabled: 'settlement_enabled', settlementProductId: 'settlement_product_id', settlementAutoSet: 'settlement_auto_set',
+  settlementAutoCreate: 'settlement_auto_create', settlementOption: 'settlement_option',
   arrearsNonWorkingDays: 'arrears_non_working_days',
   chargeCapPercent: 'charge_cap_percent', chargeCapBase: 'charge_cap_base', chargeCapMode: 'charge_cap_mode',
   autoClosePaidOffDays: 'auto_close_paid_off_days', autoLockArrearsDays: 'auto_lock_arrears_days',
@@ -160,6 +164,9 @@ const publicProduct = (p) => ({
   arrearsToleranceDays: p.arrears_tolerance_days, arrearsTolerancePercent: num(p.arrears_tolerance_percent),
   arrearsToleranceDaysMin: p.arrears_tolerance_days_min, arrearsToleranceDaysMax: p.arrears_tolerance_days_max,
   arrearsTolerancePercentMin: num(p.arrears_tolerance_percent_min), arrearsTolerancePercentMax: num(p.arrears_tolerance_percent_max),
+  coverCountsDeposits: p.cover_counts_deposits, capIncludesAccrued: p.cap_includes_accrued,
+  settlement: { enabled: p.settlement_enabled, productId: p.settlement_product_id, autoSet: p.settlement_auto_set,
+    autoCreate: p.settlement_auto_create, option: p.settlement_option },
   arrearsToleranceFloor: num(p.arrears_tolerance_floor), arrearsCountFrom: p.arrears_count_from,
   arrearsNonWorkingDays: p.arrears_non_working_days,
   chargeCapPercent: num(p.charge_cap_percent), chargeCapBase: p.charge_cap_base, chargeCapMode: p.charge_cap_mode,
@@ -244,6 +251,23 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
     }
     if (merged.allow_postdated_payments && !['FIXED_TERM', 'INTEREST_FREE'].includes(type)) problems.push('postdated payments are for fixed-term products');
   }
+  {
+    // Settlement deposit accounts (Mambu's linked accounts).
+    if ((merged.settlement_auto_set || merged.settlement_auto_create) && !merged.settlement_product_id) {
+      problems.push('auto-set and auto-create settlement accounts need a settlement_product_id');
+    }
+    if ((merged.settlement_auto_set || merged.settlement_auto_create || merged.settlement_product_id) && !merged.settlement_enabled) {
+      problems.push('settlement account options need settlement_enabled');
+    }
+    if (cols.settlement_product_id) {
+      const { rows: [sp] } = await c.query('SELECT id, allow_overdraft, allow_technical_overdraft, is_funding_account FROM savings_products WHERE id = $1', [cols.settlement_product_id]);
+      if (!sp) problems.push(`unknown deposit product: ${cols.settlement_product_id}`);
+      else if (sp.is_funding_account) problems.push('a funding account product cannot settle loans');
+      else if ((merged.settlement_auto_set || merged.settlement_auto_create) && (sp.allow_overdraft || sp.allow_technical_overdraft)) {
+        problems.push('a deposit product with overdrafts is linked by hand only: no auto-set or auto-create');
+      }
+    }
+  }
   if (cols.schedule_editing !== undefined) {
     const edits = cols.schedule_editing;
     const known = ['PAYMENT_DATES', 'PRINCIPAL', 'INTEREST', 'FEES', 'PAYMENT_HOLIDAYS', 'NUMBER_OF_INSTALLMENTS'];
@@ -308,7 +332,8 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
   for (const col of ['accrue_late_interest', 'enforce_deposit_multiplier', 'require_guarantor_cover', 'is_active', 'allow_arbitrary_fees',
     'credit_balance_enabled', 'enable_guarantors', 'enable_collateral', 'tax_on_interest', 'tax_on_fees', 'tax_on_penalties',
     'funding_enabled', 'lock_funds_at_approval', 'adjustable_rates', 'allow_negative_rate', 'allow_prepayments',
-    'allow_postdated_payments']) {
+    'allow_postdated_payments', 'cover_counts_deposits', 'cap_includes_accrued', 'settlement_enabled', 'settlement_auto_set',
+    'settlement_auto_create']) {
     if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
   }
   const nonNeg = ['monthly_rate', 'rate_min', 'rate_max', 'processing_fee', 'penalty_rate', 'penalty_rate_min', 'penalty_rate_max',

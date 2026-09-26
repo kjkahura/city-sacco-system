@@ -146,6 +146,10 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
       }
       to = l.status_before_lock || to || 'ACTIVE';
       set('locked_at', null); set('locked_reason', null); set('status_before_lock', null);
+      // A cap lock lifted: the count of charges since arrears starts again,
+      // so what accrued while locked is applied up to the cap (Mambu applies
+      // the charges a locked loan accrued once it is unlocked).
+      if (l.locked_reason === 'CAPPED') set('charges_since_arrears', 0);
     }
     if (!to) throw err('NO_PREVIOUS_STATE_RECORDED', 409);
     if (['UNDO_REJECT', 'UNDO_WITHDRAW'].includes(name)) {
@@ -478,6 +482,28 @@ async function lockForCap(c, l) {
 async function enforceControls(c, { asOf = null } = {}) {
   const date = asOf || new Date().toISOString().slice(0, 10);
   const out = { capped: 0, lockedForArrears: 0, closed: 0 };
+  // Close dormant accounts (Mambu): a running loan that owes nothing and
+  // holds no credit balance closes itself the product's number of days
+  // after its last transaction. Fixed and dynamic loans close when paid;
+  // this is for revolving loans at nothing and anything else left at zero.
+  const { rows: idle } = await c.query(
+    `SELECT l.id, p.auto_close_paid_off_days AS days,
+            (SELECT max(t.value_date) FROM transactions t WHERE t.loan_account_id = l.id AND t.reversed_by IS NULL) AS last
+     FROM loan_accounts l JOIN loan_products p ON p.id = l.product_id
+     WHERE l.status = 'ACTIVE' AND p.auto_close_paid_off_days IS NOT NULL AND l.principal_disbursed > 0
+       AND l.credit_balance = 0
+       AND l.principal_disbursed + l.principal_capitalized - l.principal_paid + l.interest_accrued - l.interest_paid
+           + l.fees_due - l.fees_paid + l.penalty_accrued - l.penalty_paid + l.ns_fees_due - l.ns_fees_paid <= 0`);
+  for (const r of idle) {
+    if (!r.last) continue;
+    const since = Math.floor((new Date(`${date}T00:00:00Z`) - new Date(`${ymd(r.last)}T00:00:00Z`)) / 86400000);
+    if (since < Number(r.days)) continue;
+    await c.query("UPDATE loan_accounts SET status = 'CLOSED_REPAID', closed_on = $2::date, updated_at = now() WHERE id = $1", [r.id, date]);
+    await eligibility.releaseGuarantors(c, r.id);
+    await securities.onClose(c, r.id);
+    await history(c, r.id, { from: 'ACTIVE', to: 'CLOSED_REPAID', action: 'AUTO_CLOSE', actor: 'EOD', note: `nothing owed for ${since} day(s)` });
+    out.closed += 1;
+  }
   const { rows } = await c.query(
     `SELECT l.id FROM loan_accounts l JOIN loan_products p ON p.id = l.product_id
      WHERE l.status = 'IN_ARREARS' AND (p.charge_cap_percent IS NOT NULL OR p.auto_lock_arrears_days IS NOT NULL)`);
@@ -485,7 +511,9 @@ async function enforceControls(c, { asOf = null } = {}) {
     const l = await ledger.lock(c, r.id);
     if (l.status !== 'IN_ARREARS') continue;
     const limit = capLimit(l);
-    if (limit !== null && Number(l.charges_since_arrears) >= limit) { await lockForCap(c, l); out.capped += 1; continue; }
+    // With cap_includes_accrued, charges accrued and not yet applied count too.
+    const charges = Number(l.charges_since_arrears) + (l.cap_includes_accrued ? Number(l.penalty_unapplied || 0) : 0);
+    if (limit !== null && charges >= limit) { await lockForCap(c, l); out.capped += 1; continue; }
     if (l.auto_lock_arrears_days !== null && daysInArrears(l, date) >= Number(l.auto_lock_arrears_days)) {
       await c.query(
         `UPDATE loan_accounts SET status = 'LOCKED', locked_at = now(), locked_reason = 'ARREARS', status_before_lock = status, updated_at = now() WHERE id = $1`, [l.id]);
@@ -493,8 +521,6 @@ async function enforceControls(c, { asOf = null } = {}) {
       out.lockedForArrears += 1;
     }
   }
-  // Paid-off loans are already CLOSED_REPAID here; the product's auto-close
-  // is satisfied by construction. Left in the result for the report.
   return out;
 }
 

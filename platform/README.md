@@ -594,7 +594,7 @@ configured with, not how a loan behaves.
 | Arrears | `arrears_tolerance_days`, `arrears_tolerance_percent`, `arrears_tolerance_floor`, `arrears_count_from`, `arrears_non_working_days` | A loan stays ACTIVE for the tolerance days (working days only, if so set); a shortfall under the greater of the percentage of outstanding and the floor is a partial payment, not arrears. Days in arrears count from the oldest late installment or from when the loan first went into arrears. |
 | Penalties | `penalty_rate` (+ band), `penalty_basis`, `penalty_tolerance_days` | Daily rate on OVERDUE_PRINCIPAL, OVERDUE_PRINCIPAL_INTEREST, OVERDUE_ALL or OUTSTANDING_PRINCIPAL, or NONE; applied once the tolerance lapses, for every late day. A loan may carry its own rate inside the band. |
 | Cap on charges | `charge_cap_percent`, `charge_cap_base`, `charge_cap_mode` | When interest, fees and penalties charged since the loan went into arrears reach the percentage of the original or outstanding principal, the loan is LOCKED: HARD refuses the charge that would cross the line, SOFT applies it first. Ships unset; the in duplum position is 100% of outstanding principal, HARD. |
-| Controls | `auto_lock_arrears_days`, `allow_arbitrary_fees` | Per product. Tenant-wide controls are separate, below. |
+| Controls | `auto_lock_arrears_days`, `auto_close_paid_off_days`, `cap_includes_accrued`, `allow_arbitrary_fees` | Per product: lock after days in arrears; close a running loan that has owed nothing for the days given since its last transaction (revolving loans at nothing, mainly; Mambu's Close dormant accounts); count charges accrued and not applied towards the cap. Tenant-wide controls are separate, below. |
 | Accounting | `accounting_method` | ACCRUAL, CASH, or NONE: balances kept, no journal entries, no GL accounts needed. |
 
 ### Fees
@@ -724,9 +724,15 @@ write-off, the window for undoing a closure, and the two-man rule, all off
 by default; and whether a write-off needs a second person's approval, on
 by default.
 
-A LOCKED loan accrues nothing and takes no repayment until unlocked. A lock
-for the charge cap lifts only once the charges are paid or the loan is out
-of arrears; a manual lock lifts when a manager says so.
+A LOCKED loan applies no interest, fees or penalties while it is locked,
+but keeps accruing them. They are applied at the first run after it is
+unlocked, whatever the lock was for (Mambu). It takes repayments only from
+users whose role the tenant lists in `lockedPostingRoles`
+(`PATCH /api/loans/controls`; none by default), and stays locked after
+them. A lock for the charge cap lifts only once the charges are paid or the
+loan is out of arrears. Lifting it restarts the count of charges the cap is
+measured on, so what accrued while locked is applied up to the cap. A
+manual lock lifts when a manager says so.
 
 ### Reschedule and refinance (top-up)
 
@@ -1258,10 +1264,68 @@ promised for a date (a Mambu option for fixed-term loans).
 Applying records a request; approving is the credit decision, and that is
 where the product's rules bite. `enforce_deposit_multiplier` refuses a loan
 above `max_multiplier` times the member's deposits; `require_guarantor_cover`
-refuses one where deposits plus guarantor pledges fall short of
-`min_cover_percent` of the principal. `GET /api/loans/:id/eligibility`
-shows the same picture approval will judge by, guarantors included, so the
-preview and the decision cannot disagree.
+refuses one where the securities fall short of `min_cover_percent` of the
+principal. `GET /api/loans/:id/eligibility` shows the same picture approval
+will judge by, guarantors included, so the preview and the decision cannot
+disagree.
+
+After Mambu's "Securities Settings":
+
+- **What counts as cover.** The securities are guarantor pledges and
+  collateral. The member's own deposits count as well unless the product
+  sets `coverCountsDeposits` to false. Mambu counts guarantees and
+  collateral only; counting deposits is common SACCO practice and the
+  default here.
+- **When it is checked.** At approval and again at disbursement, including
+  a top-up's. A guarantee released or collateral taken off after approval
+  stops the money leaving (INSUFFICIENT_GUARANTOR_COVER_AT_DISBURSEMENT).
+
+### Settlement deposit accounts
+
+After Mambu's "Linking Deposit and Loan Accounts". A loan linked to a
+deposit account of its member has what it owes taken from that account.
+
+- **Product settings.**
+  - `settlementEnabled` turns linking on. `settlementProductId` names the
+    deposit product the account must be under; leave it blank for any.
+  - `settlementAutoSet` links a new loan to the member's account of that
+    product when there is exactly one.
+  - `settlementAutoCreate` opens one for a member who has none.
+  - Auto-set and auto-create need a named deposit product that has no
+    overdraft. An account with an overdraft is linked by hand only.
+- **Settlement option** (`settlementOption`):
+  - FULL_DUES: transfer only when the account covers the whole amount due.
+  - PARTIAL: transfer whatever the account covers.
+  - NONE: linked, no automated transfers.
+- **Linking.** `PUT /api/loans/:id/settlement-account` takes a
+  `savingsAccountId` (an id or account number); `DELETE` unlinks;
+  `GET` shows the account and the loans it settles. The account must be:
+  - the loan member's own, active, and not a funding account;
+  - under the named deposit product, if one is set;
+  - on a product linked to the ledger when the loan's is (or neither);
+  - in the loan's branch.
+- **The transfer.** The end-of-day job `collectSettlements` runs after the
+  night's interest and postdated payments and before `markArrears`.
+  - It takes what each linked loan owes now: its charges plus the principal
+    of installments fallen due.
+  - The money goes through the settlement channel as a withdrawal from the
+    deposit account and a repayment of the loan. The clearing account,
+    290-200 Settlement Clearing, nets to nothing.
+  - The deposit account's own rules stand: whether it can be withdrawn
+    from, its minimum balance, deposits pledged as security, and overdraft
+    only where allowed. A transfer the account cannot make is not made,
+    and the loan goes into arrears like any unpaid loan.
+  - A deposit account that settles several loans pays them in the order
+    they were linked.
+  - `POST /api/loans/settlement/run` runs the job by hand.
+- **Retries.** The job runs every day something is owed, so a loan that
+  could not be paid on its due date is paid once the money arrives. Mambu
+  transfers on the due date only.
+- **Branches.** Moving a loan to another branch moves its settlement account
+  too, unless that account also settles other loans. Unlinking returns the
+  account to its member's branch.
+- **Console.** The loan page has a "Settlement account" action to link or
+  unlink, and the product form has these settings.
 
 ### Allocation order
 
@@ -1388,8 +1452,10 @@ it off and use a CronJob calling the CLI instead.
 6. `accruePenalties`, which reads the arrears state the previous job produced
 7. `applyFees`: a dynamic loan's payment-due fees on their dates, late fees on
    installments that went overdue
-8. `enforceControls`: lock loans at the product's charge cap or after its
-   days in arrears
+8. `enforceControls`: lock loans at the product's charge cap (counting
+   accrued, unapplied charges where `capIncludesAccrued` is set) or after
+   its days in arrears, and close running loans that have owed nothing for
+   the product's `autoClosePaidOffDays`
 9. `provision`, which reads the same arrears and posts only the movement
    since the last run. While the bands have no rates it records a skip, not a
    failure, so a tenant that has not configured provisioning does not fill
@@ -1453,10 +1519,9 @@ a charge cap is charged no further than the cap allows.
 - **Non-working days.** Where the product excludes them
   (`arrearsNonWorkingDays` EXCLUDE), weekends and holidays count neither
   towards the tolerance nor towards the penalty.
-- **Locked loans.** A loan locked by hand, or for days in arrears, keeps
+- **Locked loans.** A locked loan, whatever the lock was for, keeps
   accruing and is charged the whole of it at the first run after it is
-  unlocked. A loan locked by the charge cap forfeits the days it is locked:
-  a charge of nothing marks them covered.
+  unlocked.
 - **Changing the rate.** `POST /api/loans/:id/penalty-rate` (Mambu's Edit
   Penalty Rate) changes a running loan's rate within the product band.
   Every change is kept (`GET /api/loans/:id/penalty-rate-changes`).

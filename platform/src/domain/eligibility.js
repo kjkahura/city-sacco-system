@@ -110,7 +110,10 @@ async function checkEligibility(c, { memberId, productId, principal, loanId = nu
   const pledged = round2((loanId ? await guarantorCoverage(c, loanId) : 0) + carriedPledges);
   const collateral = round2((loanId ? await collateralCoverage(c, loanId, { exclude: excludeCollateralId }) : 0) + carriedCollateral);
   const coverRequired = round2(requested * Number(p.min_cover_percent || 100) / 100);
-  const cover = round2(deposits + pledged + collateral);
+  // The member's own deposits count towards cover unless the product says
+  // otherwise (Mambu counts guarantees and collateral only).
+  const depositCover = p.cover_counts_deposits === false ? 0 : deposits;
+  const cover = round2(depositCover + pledged + collateral);
 
   const withinMultiplier = requested <= ceiling;
   const covered = cover >= coverRequired;
@@ -136,6 +139,7 @@ async function checkEligibility(c, { memberId, productId, principal, loanId = nu
     ...(refinancing ? { refinancing, carried: { pledged: carriedPledges, collateral: carriedCollateral } } : {}),
     coverRequired,
     cover,
+    depositCover,
     coverShortfall: round2(Math.max(0, coverRequired - cover)),
     exposure: controls.exposure,
     rules: {
@@ -146,6 +150,20 @@ async function checkEligibility(c, { memberId, productId, principal, loanId = nu
     approvable: reasons.length === 0,
     reasons,
   };
+}
+
+/**
+ * Mambu checks the required securities at disbursement as well as at
+ * approval: a guarantor released or collateral taken off in between is
+ * caught before the money leaves.
+ */
+async function assertCovered(c, l) {
+  if (!l.require_guarantor_cover) return null;
+  const e = await checkEligibility(c, { memberId: l.member_id, productId: l.product_id, principal: l.principal, loanId: l.id });
+  if (e.rules.guarantorCover === 'BREACHED') {
+    throw err(`INSUFFICIENT_GUARANTOR_COVER_AT_DISBURSEMENT: cover ${e.cover} of ${e.coverRequired} required`, 409);
+  }
+  return e;
 }
 
 /** Refuse a loan that breaks a rule its product enforces. */
@@ -160,6 +178,6 @@ async function enforceEligibility(c, l) {
 }
 
 module.exports = {
-  OPEN_APPLICATION, addGuarantor, guarantorCoverage, releaseGuarantors, collateralCoverage,
+  OPEN_APPLICATION, addGuarantor, guarantorCoverage, releaseGuarantors, collateralCoverage, assertCovered,
   checkEligibility, enforceEligibility,
 };

@@ -27,7 +27,9 @@ const CONTROL_FIELDS = {
   minArrearsDaysBeforeWriteoff: 'min_arrears_days_before_writeoff',
   maxDaysUndoClose: 'max_days_undo_close', twoManRule: 'two_man_rule',
   writeOffRequiresApproval: 'write_off_requires_approval',
+  lockedPostingRoles: 'locked_posting_roles',
 };
+const ROLES = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'];
 
 async function updateControls(c, patch, { actor } = {}) {
   const before = await controls(c);
@@ -37,6 +39,9 @@ async function updateControls(c, patch, { actor } = {}) {
     if (patch[k] === undefined) continue;
     if (col === 'max_exposure_mode' && !['UNLIMITED', 'SUM_OF_LOANS', 'SUM_MINUS_DEPOSITS'].includes(patch[k])) {
       throw err('INVALID_EXPOSURE_MODE', 400);
+    }
+    if (col === 'locked_posting_roles' && (!Array.isArray(patch[k]) || patch[k].some((r) => !ROLES.includes(r)))) {
+      throw err(`LOCKED_POSTING_ROLES_LIST_ANY_OF: ${ROLES.join(', ')}`, 400);
     }
     vals.push(patch[k]);
     sets.push(`${col} = $${vals.length}`);
@@ -118,6 +123,19 @@ async function assertMayDisburse(c, l, { actor, amount, user = null }) {
   }
 }
 
+/**
+ * Posting a repayment on a locked loan needs a role the tenant allows
+ * (lending_controls.locked_posting_roles). With no user (the end of day, a
+ * settlement transfer) it is refused like any posting on a locked loan.
+ */
+async function assertMayPostOnLocked(c, { user = null } = {}) {
+  const ctl = await controls(c);
+  const roles = ctl.locked_posting_roles || [];
+  if (!user || !roles.includes(user.role)) {
+    throw err(`LOAN_IS_LOCKED: posting on a locked loan needs one of ${roles.length ? roles.join(', ') : 'the roles the tenant allows (none set)'}`, 409);
+  }
+}
+
 module.exports = {
-  controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, CONTROL_FIELDS,
+  controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMayPostOnLocked, CONTROL_FIELDS,
 };

@@ -20,6 +20,8 @@ const SE = require('../domain/scheduleEdits');
 const PDP = require('../domain/postdated');
 const PF = require('../domain/plannedFees');
 const FA = require('../domain/feeAmortization');
+const SL = require('../domain/settlementLinks');
+const SETTLE = require('../domain/settlement');
 
 const router = express.Router();
 
@@ -101,7 +103,8 @@ router.get('/:id', ...read(async (c, req) => {
   const { rows } = await c.query(
     `SELECT l.*, m.member_no, m.first_name, m.last_name,
             r.account_no AS refinances_account_no, pl.account_no AS parent_account_no, lp.schedule_editing,
-            lp.allow_postdated_payments, lp.interest_prepayment,
+            lp.allow_postdated_payments, lp.interest_prepayment, lp.settlement_enabled, lp.settlement_option,
+            (SELECT sa.account_no FROM savings_accounts sa WHERE sa.id = l.settlement_account_id) AS settlement_account_no,
             COALESCE(l.settings_snapshot->>'penalty_basis', lp.penalty_basis) AS penalty_basis,
             COALESCE(l.penalty_rate, lp.penalty_rate) AS penalty_rate,
             (SELECT count(*)::int FROM loan_postdated_payments pp WHERE pp.loan_id = l.id AND pp.status = 'PENDING') AS postdated_pending
@@ -267,9 +270,9 @@ router.post('/:id/disbursements', ...tx(async (c, req, res, { actor, user }) => 
   return await L.disburse(c, req.params.id, { ...req.body, createdBy: actor, user });
 }, APPROVER));
 
-router.post('/:id/repayments', ...tx(async (c, req, res, { actor }) => {
+router.post('/:id/repayments', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
-  return await L.repay(c, req.params.id, { ...req.body, createdBy: actor });
+  return await L.repay(c, req.params.id, { ...req.body, createdBy: actor, user });
 }, TELLER));
 
 router.post('/:id/accrue-interest', ...tx(async (c, req, res, { actor }) => {
@@ -369,8 +372,15 @@ router.post('/:id/guarantors/:guarantorId/recover', ...tx(async (c, req, res, { 
 router.post('/:id/guarantors/:guarantorId/release-call', ...tx((c, req, _res, { actor }) =>
   L.releaseCall(c, req.params.id, req.params.guarantorId, { ...req.body, createdBy: actor }), APPROVER));
 
+// A loan's settlement account moves with it (./settlementLinks).
 router.post('/:id/branch', ...tx((c, req, _res, { actor }) =>
-  require('../domain/branches').moveAccount(c, { kind: 'LOAN', accountId: req.params.id, branchId: req.body?.branchId, createdBy: actor }), APPROVER));
+  SL.moveLoan(c, req.params.id, { branchId: req.body?.branchId, createdBy: actor }), APPROVER));
+
+// Settlement deposit accounts.
+router.get('/:id/settlement-account', ...read((c, req) => SL.forLoan(c, req.params.id)));
+router.put('/:id/settlement-account', ...tx((c, req, _res, { actor }) => SL.link(c, req.params.id, { ...req.body, createdBy: actor }), TELLER));
+router.delete('/:id/settlement-account', ...tx((c, req, _res, { actor }) => SL.unlink(c, req.params.id, { ...req.body, createdBy: actor }), TELLER));
+router.post('/settlement/run', ...tx((c, req) => SETTLE.run(c, { ...req.body }), APPROVER));
 
 // Corrections are reversals. There is no PUT or DELETE on a transaction.
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {

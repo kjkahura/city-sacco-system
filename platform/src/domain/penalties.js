@@ -32,10 +32,11 @@ const { err, round2 } = acct;
  * neither towards the tolerance nor towards the penalty.
  *
  * What has accrued and is not applied (inside the tolerance, or on a locked
- * loan) is shown on the loan as penalty_unapplied and not posted. A loan
- * locked by hand or for days in arrears keeps accruing and is charged the
- * whole of it at the first run after it is unlocked; a loan locked by the
- * charge cap forfeits those days (a charge of nothing marks them covered).
+ * loan) is shown on the loan as penalty_unapplied and not posted. A locked
+ * loan (by hand, for days in arrears or by the charge cap) keeps accruing
+ * and is charged the whole of it at the first run after it is unlocked, as
+ * Mambu's internal controls describe; unlocking a cap lock restarts the
+ * count the cap is measured on.
  *
  * The unique index on (installment_id, charged_on) still means a rerun on
  * the same day charges nothing more. A backdated repayment or a reversal
@@ -72,7 +73,7 @@ function dailyRate(l, ratePercent) {
 
 const ymd = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10));
 
-/** The last day any penalty on the loan was worked out to (waived and forfeited charges count). */
+/** The last day any penalty on the loan was worked out to (waived charges count). */
 async function chargedThrough(c, loanId) {
   const { rows: [r] } = await c.query(
     'SELECT max(charged_on) AS d FROM penalty_charges WHERE loan_id = $1 AND reversed_at IS NULL', [loanId]);
@@ -101,7 +102,6 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
   const amountTolerance = e.arrearsTolerancePercent !== null || (l.arrears_tolerance_floor !== null && l.arrears_tolerance_floor !== undefined);
   const exclude = l.arrears_non_working_days === 'EXCLUDE';
   const locked = l.status === 'LOCKED';
-  const forfeit = locked && l.locked_reason === 'CAPPED';
 
   const { rows: overdue } = await c.query(
     `SELECT i.*, (SELECT max(pc.charged_on) FROM penalty_charges pc WHERE pc.installment_id = i.id AND pc.reversed_at IS NULL) AS through
@@ -141,17 +141,9 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
     const late = exclude ? await countDays(c, due, date, true) : daysLate(due, date);
 
     // Inside the tolerance, short of the arrears amount tolerance, or on a
-    // loan locked by hand: accrued, not applied.
-    const waiting = late <= threshold || (amountTolerance && inst.status !== 'OVERDUE') || (locked && !forfeit);
+    // locked loan (any lock, the charge cap's included): accrued, not applied.
+    const waiting = late <= threshold || (amountTolerance && inst.status !== 'OVERDUE') || locked;
     if (waiting) { unapplied += Math.max(0, basisAmount) * perDay * days; continue; }
-
-    if (forfeit) {
-      await c.query(
-        `INSERT INTO penalty_charges (loan_id, installment_id, charged_on, days_late, basis_amount, rate, amount, period_from, days_charged, forfeited)
-         VALUES ($1,$2,$3::date,$4,$5,$6,0,$7::date,$8,true) ON CONFLICT (installment_id, charged_on) WHERE waived_at IS NULL AND reversed_at IS NULL DO NOTHING`,
-        [l.id, inst.id, date, daysLate(due, date), basisAmount, effRate, from, days]);
-      continue;
-    }
 
     const iterCarry = carry;
     const exact = Math.max(0, basisAmount) * perDay * days + carry;

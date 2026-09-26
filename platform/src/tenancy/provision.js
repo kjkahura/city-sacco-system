@@ -65,6 +65,7 @@ const SEED_GL = [
   ['200-330', 'Withholding Tax Payable',     'LIABILITY', 'SHORT_TERM_LIABILITY'],
   ['200-340', 'Interest Received in Advance', 'LIABILITY', 'SHORT_TERM_LIABILITY'],
   ['290-100', 'Inter-branch Clearing',       'LIABILITY', 'OTHER_LIABILITY'],
+  ['290-200', 'Settlement Clearing',         'LIABILITY', 'OTHER_LIABILITY'],
   ['290-900', 'Suspense: Products Without Accounting', 'LIABILITY', 'OTHER_LIABILITY'],
   ['300-900', 'Accounting Method Conversions', 'EQUITY',  'INSTITUTIONAL_CAPITAL'],
   ['400-300', 'Overdraft Interest Income',   'INCOME',    'INCOME'],
@@ -80,6 +81,7 @@ const SEED_CHANNELS = [
   ['cheque', 'Cheque', 'CHEQUE', '100-210'],
   ['payroll', 'Payroll Check-off', 'PAYROLL', '100-210'],
   ['internal', 'Internal', 'INTERNAL', null],
+  ['settlement', 'Settlement account transfer', 'INTERNAL', '290-200'],
 ];
 
 /**
