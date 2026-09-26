@@ -21,6 +21,28 @@ const { scheduledOutstanding, scheduledInterestThrough } = require('./productTyp
  * upfront disbursement fees are placed on the schedule by ./fees.
  */
 
+/**
+ * Fees placed on installments (manual, late, planned, upfront) point at
+ * the installment row. When installments are redrawn the rows are
+ * replaced, so the links are taken by installment number first and put
+ * back after (relinkFees).
+ */
+async function feeLinks(c, loanId, installmentIds = null) {
+  const { rows } = await c.query(
+    `SELECT f.id, f.amount, f.fee_type, i.number FROM loan_fees f JOIN loan_installments i ON i.id = f.installment_id
+     WHERE i.loan_id = $1 AND ($2::uuid[] IS NULL OR i.id = ANY($2::uuid[]))`, [loanId, installmentIds]);
+  return rows;
+}
+async function relinkFees(c, loanId, links, { addBack = false } = {}) {
+  for (const x of links) {
+    const { rows: [i] } = await c.query('SELECT id FROM loan_installments WHERE loan_id = $1 AND number = $2', [loanId, x.number]);
+    if (!i) continue;
+    await c.query('UPDATE loan_fees SET installment_id = $1 WHERE id = $2', [i.id, x.id]);
+    // A fresh draw carries only the payment-due fees; the others go back on.
+    if (addBack && x.fee_type !== 'PAYMENT_DUE') await c.query('UPDATE loan_installments SET fee_due = fee_due + $1 WHERE id = $2', [x.amount, i.id]);
+  }
+}
+
 async function persistInstallments(c, loanId, installments) {
   for (const i of installments) {
     await c.query(
@@ -75,8 +97,10 @@ async function buildSchedule(c, l, { persist = true, custom = true } = {}) {
   }
 
   if (persist) {
+    const links = l.id ? await feeLinks(c, l.id) : [];
     await c.query('DELETE FROM loan_installments WHERE loan_id = $1', [l.id]);
     await persistInstallments(c, l.id, installments);
+    if (links.length) await relinkFees(c, l.id, links, { addBack: true });
   }
 
   return {
@@ -226,8 +250,10 @@ async function reschedule(c, l, asOf, { force = false, rateChange = false } = {}
     fee: Math.max(0, round2(future[i].fee_due - future[i].fee_paid)),
   }));
 
+  const links = await feeLinks(c, l.id, future.map((r) => r.id));
   await c.query('DELETE FROM loan_installments WHERE loan_id = $1 AND id = ANY($2)', [l.id, future.map((r) => r.id)]);
   await persistInstallments(c, l.id, installments);
+  if (links.length) await relinkFees(c, l.id, links);
   await c.query(
     'UPDATE loan_accounts SET rescheduled_at = now(), reschedule_count = reschedule_count + 1 WHERE id = $1', [l.id]
   );
@@ -307,6 +333,6 @@ async function markPaidOnPrincipal(c, loanId, asOf) {
 }
 
 module.exports = {
-  buildSchedule, previewSchedule, reschedule, maturityDate, persistInstallments,
+  buildSchedule, previewSchedule, reschedule, maturityDate, persistInstallments, feeLinks, relinkFees,
   scheduledOutstanding, scheduledInterestThrough, applyToInstallments, markPaidOnPrincipal,
 };

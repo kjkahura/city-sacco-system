@@ -355,10 +355,15 @@ const product = (id, body) => call('POST', '/api/loan-products', { id, name: id,
     const pPI = await penLoan('PN_PI');
     const pAll = await penLoan('PN_ALL');
     const pOut = await penLoan('PN_OUT');
-    check('OVERDUE_PRINCIPAL: 0.5% a day of the 10,000 principal due', Number(pP.charge.amount) === 50, String(pP.charge?.amount));
-    check('OVERDUE_PRINCIPAL_INTEREST: on 11,200', Number(pPI.charge.amount) === 56, String(pPI.charge?.amount));
-    check('OVERDUE_ALL: the same here, no fees', Number(pAll.charge.amount) === 56);
-    check('OUTSTANDING_PRINCIPAL: on the whole 120,000', Number(pOut.charge.amount) === 600, String(pOut.charge?.amount));
+    // The first charge after the tolerance covers every late day since the due date.
+    const lateDays = Number(pP.charge?.days_late);
+    check('the first charge after the tolerance covers every late day since the due date',
+      lateDays > 3 && Number(pP.charge.days_charged) === lateDays, `${pP.charge?.days_charged} of ${lateDays}`);
+    check('OVERDUE_PRINCIPAL: 0.5% a day of the 10,000 principal due', Number(pP.charge.amount) === 50 * lateDays, String(pP.charge?.amount));
+    check('OVERDUE_PRINCIPAL_INTEREST: on 11,200', Number(pPI.charge.amount) === 56 * lateDays, String(pPI.charge?.amount));
+    check('OVERDUE_ALL: the same here, no fees', Number(pAll.charge.amount) === 56 * lateDays);
+    check('OUTSTANDING_PRINCIPAL: on the whole 120,000, the rate per month like the interest rate',
+      Number(pOut.charge.amount) === Math.round(120000 * 0.005 / 30 * lateDays * 100) / 100, String(pOut.charge?.amount));
     const tolLoan = await T((c) => disbursedLoan(c, mP.id, 'PN_P', 120000, 12, plus(-32)));
     await T((c) => L.markArrears(c, { asOf: plus(0) }));
     const tolCharges = await T((c) => P.accrueForLoan(c, tolLoan.id, { asOf: plus(0) }));
@@ -366,7 +371,7 @@ const product = (id, body) => call('POST', '/api/loan-products', { id, name: id,
     const ovr = await T((c) => disbursedLoan(c, mP.id, 'PN_P', 120000, 12, plus(-40), { penaltyRate: 0.1 }));
     await T((c) => L.markArrears(c, { asOf: plus(0) }));
     const ovrCharges = await T((c) => P.accrueForLoan(c, ovr.id, { asOf: plus(0) }));
-    check('a loan carries its own penalty rate within the product band', Number(ovrCharges[0].amount) === 10, String(ovrCharges[0]?.amount));
+    check('a loan carries its own penalty rate within the product band', Number(ovrCharges[0].amount) === 10 * Number(ovrCharges[0]?.days_charged), String(ovrCharges[0]?.amount));
     await product('PN_BAND', { monthlyRate: 1, maxTerm: 12, penaltyRate: 0.5, penaltyRateMin: 0.2, penaltyRateMax: 1, penaltyBasis: 'OVERDUE_ALL' });
     await throws('and a rate outside the band is refused',
       () => T((c) => L.apply(c, { memberId: mP.id, productId: 'PN_BAND', principal: 1000, termMonths: 2, penaltyRate: 2, createdBy: 't' })),
@@ -399,31 +404,33 @@ const product = (id, body) => call('POST', '/api/loan-products', { id, name: id,
 
     // ----------------------------------------------------------------------
     section('the cap on charges');
-    await product('CAPH', { monthlyRate: 1, maxTerm: 12, penaltyRate: 1, penaltyBasis: 'OUTSTANDING_PRINCIPAL', glPenaltyInc: '400-200',
+    await product('CAPH', { monthlyRate: 1, maxTerm: 12, penaltyRate: 30, penaltyBasis: 'OUTSTANDING_PRINCIPAL', glPenaltyInc: '400-200',
       chargeCapPercent: 2, chargeCapBase: 'OUTSTANDING_PRINCIPAL', chargeCapMode: 'HARD' });
     const { m: mH } = await T((c) => newMember(c));
     const hl = await T((c) => disbursedLoan(c, mH.id, 'CAPH', 100000, 12, plus(-40)));
     await T((c) => L.markArrears(c, { asOf: plus(0) }));
-    // 1% a day of 100,000 is 1,000 a day; the cap is 2% of 100,000 = 2,000.
+    // 30% a month on 100,000 is 1,000 a day; the cap is 2% of 100,000 = 2,000.
+    // The first charge covers every late day, so it meets the cap at once.
     const c1 = await T((c) => P.accrueForLoan(c, hl.id, { asOf: plus(0) }));
     const c2 = await T((c) => P.accrueForLoan(c, hl.id, { asOf: plus(1) }));
-    const c3 = await T((c) => P.accrueForLoan(c, hl.id, { asOf: plus(2) }));
     const hRow = await loanRow(hl.id);
-    check('two days of penalties reach the cap; the third is refused and the loan is locked',
-      c1.length === 1 && c2.length === 1 && c3.length === 0 && hRow.status === 'LOCKED' && hRow.locked_reason === 'CAPPED'
-      && Number(hRow.charges_since_arrears) === 2000, `${c1.length} ${c2.length} ${c3.length} ${hRow.status} ${hRow.charges_since_arrears}`);
+    check('the late days\' penalty is cut to the cap and the loan is locked; nothing more is charged',
+      c1.length === 1 && Number(c1[0].amount) === 2000 && c2.length === 0 && hRow.status === 'LOCKED' && hRow.locked_reason === 'CAPPED'
+      && Number(hRow.charges_since_arrears) === 2000, `${c1.length} ${c1[0]?.amount} ${c2.length} ${hRow.status} ${hRow.charges_since_arrears}`);
+    const forfeited = (await Rd((c) => c.query('SELECT * FROM penalty_charges WHERE loan_id = $1 AND forfeited', [hl.id]))).rows;
+    check('a loan locked by the cap forfeits the days it is locked', forfeited.length === 1 && Number(forfeited[0].amount) === 0, String(forfeited.length));
     const unlock = await call('POST', `/api/loans/${hl.id}/unlock`, {});
     check('a cap lock cannot be lifted while the charges are unpaid and the loan is in arrears',
       unlock.status === 409 && /CAP_LOCK/.test(unlock.reason), `${unlock.status} ${unlock.reason}`);
     check('interest stops accruing on a locked loan', (await accrue(hl.id, plus(5))) === null);
-    await product('CAPS', { monthlyRate: 1, maxTerm: 12, penaltyRate: 1, penaltyBasis: 'OUTSTANDING_PRINCIPAL', glPenaltyInc: '400-200',
+    await product('CAPS', { monthlyRate: 1, maxTerm: 12, penaltyRate: 30, penaltyBasis: 'OUTSTANDING_PRINCIPAL', glPenaltyInc: '400-200',
       chargeCapPercent: 1.5, chargeCapBase: 'OUTSTANDING_PRINCIPAL', chargeCapMode: 'SOFT' });
     const sl2 = await T((c) => disbursedLoan(c, mH.id, 'CAPS', 100000, 12, plus(-40)));
     await T((c) => L.markArrears(c, { asOf: plus(0) }));
-    await T((c) => P.accrueForLoan(c, sl2.id, { asOf: plus(0) }));
-    const s2 = await T((c) => P.accrueForLoan(c, sl2.id, { asOf: plus(1) }));
+    const s2 = await T((c) => P.accrueForLoan(c, sl2.id, { asOf: plus(0) }));
     check('a soft cap applies the charge that crosses the line, then locks',
-      s2.length === 1 && Number(s2[0].amount) === 1000 && (await loanRow(sl2.id)).status === 'LOCKED', `${s2.length} ${(await loanRow(sl2.id)).status}`);
+      s2.length === 1 && Number(s2[0].amount) === 1000 * Number(s2[0].days_charged) && (await loanRow(sl2.id)).status === 'LOCKED',
+      `${s2.length} ${s2[0]?.amount} ${(await loanRow(sl2.id)).status}`);
     const capped = await call('GET', '/api/loan-products/NL01');
     check('the seeded product ships with no cap', capped.body.chargeCapPercent === null);
     await assertBalanced('cap');

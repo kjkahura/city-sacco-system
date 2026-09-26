@@ -6,6 +6,7 @@ const tax = require('./tax');
 const ledger = require('./ledger');
 const workflow = require('./workflow');
 const types = require('./productTypes');
+const FA = require('./feeAmortization');
 const { err, round2 } = acct;
 
 /**
@@ -26,6 +27,14 @@ const { err, round2 } = acct;
  *
  * The legacy loan_products.processing_fee is an upfront flat fee called
  * "Processing fee"; a product may use it, the table, or both.
+ *
+ * Where a manual fee goes (Mambu's schedule allocation): on the next
+ * installment not yet due (NEXT_INSTALLMENT, the default; failing that the
+ * last unpaid one), so it falls due and is paid with it, or into a balance
+ * of its own outside the schedule (NO_ALLOCATION, Mambu's non-scheduled
+ * fees: ns_fees_due), which counts in the loan's total, never falls due and
+ * is paid only by a custom repayment. A fee whose income is amortised is
+ * credited to deferred fee income (./feeAmortization).
  */
 
 const ymd = (d) => (d instanceof Date
@@ -78,6 +87,34 @@ const glFor = (l, fee) => ({
   glReceivable: fee?.gl_receivable || l.gl_fee_rec,
 });
 
+/**
+ * What a "% of disbursement amount" fee is a percentage of once the loan is
+ * disbursed: the amount disbursed plus any capitalised disbursement fees
+ * (Mambu's examples: 1,000 less a deducted 100 is still 1,000; 1,000 plus a
+ * capitalised 100 is 1,100). Before disbursement, the approved amount.
+ */
+async function percentBase(c, l) {
+  if (!(Number(l.principal_disbursed) > 0)) return Number(l.principal);
+  const { rows: [r] } = await c.query(
+    "SELECT COALESCE(sum(amount), 0) AS a FROM loan_fees WHERE loan_id = $1 AND fee_type = 'DISBURSEMENT_CAPITALIZED' AND status <> 'WAIVED'", [l.id]);
+  return round2(Number(l.principal_disbursed) + Number(r.a));
+}
+
+/**
+ * The installment a fee applied on `date` goes on: the next one not yet
+ * paid, not in grace or a payment holiday, due on or after the date; if
+ * every one of those has passed, the last one still unpaid.
+ */
+async function nextInstallment(c, loanId, date) {
+  const { rows: [n] } = await c.query(
+    `SELECT id FROM loan_installments WHERE loan_id = $1 AND status NOT IN ('PAID', 'GRACE') AND NOT payment_holiday
+       AND due_date >= $2::date ORDER BY number LIMIT 1`, [loanId, date]);
+  if (n) return n.id;
+  const { rows: [o] } = await c.query(
+    `SELECT id FROM loan_installments WHERE loan_id = $1 AND status NOT IN ('PAID', 'GRACE') ORDER BY number DESC LIMIT 1`, [loanId]);
+  return o ? o.id : null;
+}
+
 /** Was this optional fee chosen for the loan? By code or id. */
 const chosen = (fee, selected) => fee.required || (selected || []).some((s) => s === fee.code || s === fee.id);
 
@@ -109,7 +146,7 @@ async function scheduledFees(c, l, lines) {
  * legacy processing fee. Returns the items and the deducted, capitalised
  * and upfront totals.
  */
-async function disbursementFees(c, l, { amount, selected = [] }) {
+async function disbursementFees(c, l, { amount, selected = [], later = false }) {
   const fees = await productFees(c, l.product_id, ['DISBURSEMENT_DEDUCTED', 'DISBURSEMENT_CAPITALIZED', 'DISBURSEMENT_UPFRONT']);
   const known = new Set(fees.flatMap((f) => [f.code, f.id]));
   for (const s of selected) {
@@ -126,10 +163,15 @@ async function disbursementFees(c, l, { amount, selected = [] }) {
     items.push({ ...base, amount: tx.gross, net: tx.income, tax: tx.tax });
   };
   for (const fee of fees) {
-    if (!chosen(fee, selected)) continue;
+    // On a later tranche a required fee becomes optional (Mambu: they are
+    // meant to be charged once in the loan's life): only a fee chosen for
+    // this disbursement applies.
+    if (later ? !(selected || []).some((s) => s === fee.code || s === fee.id) : !chosen(fee, selected)) continue;
     const amt = feeAmount(fee, { principal: amount, count: Number(l.term_months) });
     if (!(amt > 0)) continue;
-    push({ productFeeId: fee.id, code: fee.code, name: fee.name, feeType: fee.fee_type, net: amt, taxable: fee.taxable !== false, ...glFor(l, fee) });
+    const deferring = FA.amortized(fee) && ledger.isAccrual(l);
+    push({ productFeeId: fee.id, code: fee.code, name: fee.name, feeType: fee.fee_type, net: amt, taxable: fee.taxable !== false, ...glFor(l, fee),
+      amortize: deferring ? fee : null, ...(deferring ? { glIncome: FA.deferredGl(l, fee) } : {}) });
   }
   if (Number(l.processing_fee) > 0) {
     push({ productFeeId: null, code: 'PROCESSING', name: 'Processing fee', feeType: 'DISBURSEMENT_UPFRONT',
@@ -146,22 +188,27 @@ async function disbursementFees(c, l, { amount, selected = [] }) {
  * Dr Fee Receivable, Cr Fee Income.
  */
 async function recordFee(c, l, { productFeeId = null, name, feeType, amount, valueDate, createdBy, settled = false,
-  installmentId = null, glIncome, glReceivable, note = null, taxable = true }) {
+  installmentId = null, glIncome, glReceivable, note = null, taxable = true, allocation = null, amortize = null }) {
   const net = round2(amount);
   if (!(net > 0)) return null;
   const date = valueDate ? ymd(valueDate) : today();
   const gl = { glIncome: glIncome || l.gl_fee_inc || l.gl_interest_inc, glReceivable: glReceivable || l.gl_fee_rec };
+  const nonScheduled = allocation === 'NO_ALLOCATION';
   // Tax on fees, where the product charges it: the member owes the gross.
   const tx = tax.split(l, 'FEE', net, { taxable });
   const amt = tx.gross;
+  // An amortised fee's income waits in deferred fee income (accrual only).
+  const deferring = FA.amortized(amortize) && ledger.isAccrual(l) && !nonScheduled;
+  const glDeferred = deferring ? FA.deferredGl(l, amortize) : null;
 
   let entryId = null;
   if (!settled) {
-    await c.query('UPDATE loan_accounts SET fees_due = fees_due + $1, tax_charged = tax_charged + $3, updated_at = now() WHERE id = $2', [amt, l.id, tx.tax]);
+    const balance = nonScheduled ? 'ns_fees_due' : 'fees_due';
+    await c.query(`UPDATE loan_accounts SET ${balance} = ${balance} + $1, tax_charged = tax_charged + $3, updated_at = now() WHERE id = $2`, [amt, l.id, tx.tax]);
     if (ledger.isAccrual(l)) {
       entryId = await ledger.post(c, l, {
         debits: [{ glCode: gl.glReceivable, amount: amt, memberId: l.member_id }],
-        credits: tax.incomeCredits(l, tx, gl.glIncome, l.member_id),
+        credits: tax.incomeCredits(l, tx, deferring ? glDeferred : gl.glIncome, l.member_id),
         narration: `${name} ${l.account_no}`,
         sourceType: 'LOAN_FEE', sourceId: l.id, bookingDate: date, createdBy,
       });
@@ -172,19 +219,41 @@ async function recordFee(c, l, { productFeeId = null, name, feeType, amount, val
   } else if (tx.tax > 0) {
     await c.query('UPDATE loan_accounts SET tax_charged = tax_charged + $2 WHERE id = $1', [l.id, tx.tax]);
   }
+  let placeOn = installmentId;
+  if (!placeOn && !settled && !nonScheduled && allocation === 'NEXT_INSTALLMENT') {
+    placeOn = await nextInstallment(c, l.id, date);
+    if (placeOn) await c.query('UPDATE loan_installments SET fee_due = fee_due + $1 WHERE id = $2', [amt, placeOn]);
+  }
   const { rows: [row] } = await c.query(
-    `INSERT INTO loan_fees (loan_id, product_fee_id, installment_id, name, fee_type, amount, paid, applied_on, entry_id, status, note, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8::date,$9,$10,$11,$12) RETURNING *`,
-    [l.id, productFeeId, installmentId, name, feeType, amt, settled ? amt : 0, date, entryId,
-      settled ? 'PAID' : 'DUE', note, createdBy || 'SYSTEM']
+    `INSERT INTO loan_fees (loan_id, product_fee_id, installment_id, name, fee_type, amount, paid, applied_on, entry_id, status, note, created_by,
+       non_scheduled, deferred, gl_deferred)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8::date,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+    [l.id, productFeeId, placeOn, name, feeType, amt, settled ? amt : 0, date, entryId,
+      settled ? 'PAID' : 'DUE', note, createdBy || 'SYSTEM', nonScheduled, deferring ? tx.income : 0, glDeferred]
   );
+  // Disbursement fees are planned once the schedule is drawn (planPending).
+  if (deferring && !String(feeType).startsWith('DISBURSEMENT_')) await FA.plan(c, l, row, amortize, { from: date, createdBy });
   await savings.record(c, {
     reference: savings.ref('LF'), kind: 'LOAN_FEE', memberId: l.member_id, loanAccountId: l.id,
     amount: amt, valueDate: date, entryId,
-    allocation: { fee: name, feeType, feeId: row.id, settled: settled ? 'AT_DISBURSEMENT' : null, ...(tx.tax > 0 ? { tax: tx.tax, net } : {}) },
+    allocation: {
+      fee: name, feeType, feeId: row.id, settled: settled ? 'AT_DISBURSEMENT' : null, ...(tx.tax > 0 ? { tax: tx.tax, net } : {}),
+      ...(nonScheduled ? { nonScheduled: true } : {}), ...(deferring ? { deferred: tx.income } : {}),
+    },
     narration: note, createdBy,
   });
   return row;
+}
+
+/** Plan the amortisation of disbursement fees once the schedule exists. */
+async function planPending(c, l, { date, createdBy } = {}) {
+  const { rows } = await c.query(
+    `SELECT f.* FROM loan_fees f WHERE f.loan_id = $1 AND f.deferred > 0
+       AND NOT EXISTS (SELECT 1 FROM loan_fee_amortization a WHERE a.loan_fee_id = f.id)`, [l.id]);
+  for (const f of rows) {
+    const fee = await FA.settingsOf(c, f.product_fee_id);
+    if (FA.amortized(fee)) await FA.plan(c, l, f, fee, { from: date || f.applied_on, createdBy });
+  }
 }
 
 /**
@@ -251,10 +320,11 @@ async function applyLateFees(c, l, asOf) {
     [l.id, asOf]
   );
   let applied = 0;
+  const base = await percentBase(c, l);
   for (const inst of rows) {
     for (const fee of fees) {
       const amt = feeAmount(fee, {
-        principal: Number(l.principal), count: Number(l.term_months), installmentPrincipal: Number(inst.principal_due),
+        principal: base, count: Number(l.term_months), installmentPrincipal: Number(inst.principal_due),
       });
       const allowed = await workflow.capAllows(c, l, amt);
       if (!(allowed > 0)) continue;
@@ -269,28 +339,41 @@ async function applyLateFees(c, l, asOf) {
   return applied;
 }
 
-/** A predefined MANUAL fee, applied by a user. */
-async function applyManualFee(c, loanId, { fee: feeRef, amount = null, note, valueDate, createdBy }) {
+const ALLOCATIONS = ['NEXT_INSTALLMENT', 'NO_ALLOCATION'];
+function allocationFor(given, fallback) {
+  if (given === undefined || given === null) return fallback || 'NEXT_INSTALLMENT';
+  if (!ALLOCATIONS.includes(given)) throw err(`ALLOCATION_IS_ONE_OF: ${ALLOCATIONS.join(', ')}`, 400);
+  return given;
+}
+
+/**
+ * A predefined MANUAL fee, applied by a user. `allocation` chooses, for
+ * this application, the schedule (NEXT_INSTALLMENT) or none (NO_ALLOCATION);
+ * the fee's own setting otherwise.
+ */
+async function applyManualFee(c, loanId, { fee: feeRef, amount = null, note, valueDate, createdBy, allocation }) {
   const l = await ledger.lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   const { rows: [fee] } = await c.query(
     `SELECT * FROM loan_product_fees WHERE product_id = $1 AND is_active AND fee_type = 'MANUAL' AND (code = $2 OR id::text = $2)`,
     [l.product_id, String(feeRef)]);
   if (!fee) throw err(`UNKNOWN_MANUAL_FEE: ${feeRef}`, 404);
-  const amt = feeAmount(fee, { principal: Number(l.principal), entered: amount });
+  const amt = feeAmount(fee, { principal: await percentBase(c, l), entered: amount });
   const row = await recordFee(c, l, {
     productFeeId: fee.id, name: fee.name, feeType: 'MANUAL', amount: amt, valueDate, note, createdBy, ...glFor(l, fee), taxable: fee.taxable !== false,
+    allocation: allocationFor(allocation, fee.allocation), amortize: fee,
   });
   return row;
 }
 
 /** A fee with any name and amount; only if the product allows it. */
-async function applyArbitraryFee(c, loanId, { name, amount, note, valueDate, createdBy }) {
+async function applyArbitraryFee(c, loanId, { name, amount, note, valueDate, createdBy, allocation }) {
   const l = await ledger.lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   if (!l.allow_arbitrary_fees) throw err('PRODUCT_DOES_NOT_ALLOW_ARBITRARY_FEES', 409);
   if (!name || !(round2(amount) > 0)) throw err('FEE_NAME_AND_AMOUNT_REQUIRED', 400);
-  return recordFee(c, l, { name: String(name), feeType: 'MANUAL', amount, valueDate, note, createdBy, ...glFor(l, null) });
+  return recordFee(c, l, { name: String(name), feeType: 'MANUAL', amount, valueDate, note, createdBy, ...glFor(l, null),
+    allocation: allocationFor(allocation, 'NEXT_INSTALLMENT') });
 }
 
 /** Waive the unpaid part of a fee, reversing its posting. */
@@ -302,15 +385,35 @@ async function waive(c, feeId, { reason = '', createdBy } = {}) {
   const remaining = round2(f.amount - f.paid);
   if (!(remaining > 0)) throw err('FEE_ALREADY_PAID', 409);
 
+  const { rows: [pf] } = f.product_fee_id
+    ? await c.query('SELECT * FROM loan_product_fees WHERE id = $1', [f.product_fee_id]) : { rows: [null] };
+  const g = glFor(l, pf);
+
   let entryId = null;
   if (f.entry_id && ledger.isAccrual(l)) {
+    // An amortised fee: what was recognised goes back to deferred fee
+    // income first; the part already paid is then recognised for good, and
+    // the unpaid part comes off deferred income with the waiver.
+    const deferred = Number(f.deferred) > 0;
+    if (deferred) {
+      await FA.cancel(c, f.id, { createdBy, narration: 'Fee waived' });
+      const paidIncome = round2(Number(f.deferred) * Number(f.paid) / Number(f.amount));
+      if (paidIncome > 0) {
+        await ledger.post(c, l, {
+          debits: [{ glCode: f.gl_deferred, amount: paidIncome, memberId: l.member_id }],
+          credits: [{ glCode: g.glIncome, amount: paidIncome, memberId: l.member_id }],
+          narration: `Fee income on the part paid before the waiver ${l.account_no}`,
+          sourceType: 'LOAN_FEE_AMORTIZATION', sourceId: l.id, createdBy,
+        });
+      }
+    }
     // The original entry may have been partly paid down; reverse only what
     // is still open, as its own entry, so both sides stay traceable. The
     // tax share, if any, comes back out of the payable.
-    const sp = tax.splitPaid(l, 'FEE', remaining);
+    const sp = tax.splitPaid(l, 'FEE', remaining, { taxable: pf ? pf.taxable !== false : true });
     entryId = await ledger.post(c, l, {
-      debits: tax.incomeCredits(l, sp, l.gl_fee_inc || l.gl_interest_inc, l.member_id),
-      credits: [{ glCode: l.gl_fee_rec, amount: remaining, memberId: l.member_id }],
+      debits: tax.incomeCredits(l, sp, deferred ? f.gl_deferred : g.glIncome, l.member_id),
+      credits: [{ glCode: g.glReceivable, amount: remaining, memberId: l.member_id }],
       narration: `Fee waived ${l.account_no}: ${reason}`,
       sourceType: 'LOAN_FEE_WAIVED', sourceId: l.id, createdBy,
     });
@@ -318,7 +421,8 @@ async function waive(c, feeId, { reason = '', createdBy } = {}) {
   await c.query(
     `UPDATE loan_fees SET status = 'WAIVED', waived_at = now(), waived_by = $1, note = COALESCE(note || ' | ', '') || $2 WHERE id = $3`,
     [createdBy || 'SYSTEM', `waived: ${reason}`, feeId]);
-  await c.query('UPDATE loan_accounts SET fees_due = fees_due - $1, updated_at = now() WHERE id = $2', [remaining, l.id]);
+  const balance = f.non_scheduled ? 'ns_fees_due' : 'fees_due';
+  await c.query(`UPDATE loan_accounts SET ${balance} = ${balance} - $1, updated_at = now() WHERE id = $2`, [remaining, l.id]);
   if (f.installment_id) {
     await c.query('UPDATE loan_installments SET fee_due = GREATEST(0, fee_due - $1) WHERE id = $2', [remaining, f.installment_id]);
   }
@@ -332,12 +436,15 @@ async function waive(c, feeId, { reason = '', createdBy } = {}) {
   });
 }
 
-/** Allocate `amount` of paid fees to DUE fee rows, oldest first. */
-async function settle(c, loanId, amount) {
+/**
+ * Allocate `amount` of paid fees to DUE fee rows, oldest first: the
+ * scheduled fees, or with `nonScheduled` the fees kept off the schedule.
+ */
+async function settle(c, loanId, amount, { nonScheduled = false } = {}) {
   let left = round2(amount);
   if (!(left > 0)) return;
   const { rows } = await c.query(
-    "SELECT * FROM loan_fees WHERE loan_id = $1 AND status = 'DUE' ORDER BY applied_on, created_at", [loanId]);
+    "SELECT * FROM loan_fees WHERE loan_id = $1 AND status = 'DUE' AND non_scheduled = $2 ORDER BY applied_on, created_at", [loanId, nonScheduled]);
   for (const f of rows) {
     if (left <= 0) break;
     const take = round2(Math.min(left, f.amount - f.paid));
@@ -349,12 +456,17 @@ async function settle(c, loanId, amount) {
   }
 }
 
-/** Outstanding fees in the order settle() pays them, with each fee's own GL accounts. */
-async function outstanding(c, l) {
+/**
+ * Outstanding fees in the order settle() pays them, with each fee's own GL
+ * accounts: the scheduled ones, the non-scheduled ones (`nonScheduled`
+ * true), or all of them (`nonScheduled` null).
+ */
+async function outstanding(c, l, { nonScheduled = false } = {}) {
   const { rows } = await c.query(
     `SELECT f.*, pf.gl_income, pf.gl_receivable, pf.gl_writeoff, COALESCE(pf.taxable, true) AS taxable
      FROM loan_fees f LEFT JOIN loan_product_fees pf ON pf.id = f.product_fee_id
-     WHERE f.loan_id = $1 AND f.status = 'DUE' ORDER BY f.applied_on, f.created_at`, [l.id]);
+     WHERE f.loan_id = $1 AND f.status = 'DUE' AND ($2::boolean IS NULL OR f.non_scheduled = $2)
+     ORDER BY f.non_scheduled, f.applied_on, f.created_at`, [l.id, nonScheduled]);
   return rows;
 }
 
@@ -363,11 +475,11 @@ async function outstanding(c, l) {
  * receivable, under cash each fee's income (and tax payable where the fee is
  * taxed). Anything not matched to a fee row goes to the product's accounts.
  */
-async function settlementCredits(c, l, amount) {
+async function settlementCredits(c, l, amount, { nonScheduled = false } = {}) {
   let left = round2(amount);
   if (!(left > 0)) return [];
   const out = [];
-  for (const f of await outstanding(c, l)) {
+  for (const f of await outstanding(c, l, { nonScheduled })) {
     if (left <= 0) break;
     const take = round2(Math.min(left, f.amount - f.paid));
     if (!(take > 0)) continue;
@@ -383,12 +495,12 @@ async function settlementCredits(c, l, amount) {
   return out;
 }
 
-/** What writing off `total` of fees clears, fee by fee: its receivable and its write-off account. */
+/** What writing off `total` of fees clears, fee by fee (scheduled and not): its receivable and its write-off account. */
 async function writeOffLines(c, l, total) {
   let left = round2(total);
   if (!(left > 0)) return [];
   const out = [];
-  for (const f of await outstanding(c, l)) {
+  for (const f of await outstanding(c, l, { nonScheduled: null })) {
     if (left <= 0) break;
     const take = round2(Math.min(left, f.amount - f.paid));
     if (!(take > 0)) continue;
@@ -400,21 +512,25 @@ async function writeOffLines(c, l, total) {
 }
 
 /** After a reversal: forget who paid what and reallocate the surviving total. */
-async function resettle(c, loanId, totalPaid) {
+async function resettle(c, loanId, totalPaid, { nonScheduled = false } = {}) {
   await c.query(
-    "UPDATE loan_fees SET paid = 0, status = 'DUE' WHERE loan_id = $1 AND status IN ('DUE', 'PAID') AND fee_type <> 'DISBURSEMENT_DEDUCTED' AND fee_type <> 'DISBURSEMENT_CAPITALIZED'",
-    [loanId]);
-  await settle(c, loanId, totalPaid);
+    `UPDATE loan_fees SET paid = 0, status = 'DUE' WHERE loan_id = $1 AND status IN ('DUE', 'PAID') AND non_scheduled = $2
+       AND fee_type <> 'DISBURSEMENT_DEDUCTED' AND fee_type <> 'DISBURSEMENT_CAPITALIZED'`,
+    [loanId, nonScheduled]);
+  await settle(c, loanId, totalPaid, { nonScheduled });
 }
 
 /** Undoing a disbursement removes the fees it created and their postings. */
 async function undoDisbursementFees(c, loanId, { createdBy } = {}) {
   const { rows } = await c.query('SELECT * FROM loan_fees WHERE loan_id = $1', [loanId]);
   for (const f of rows) {
+    // Income already recognised from deferred fee income goes back first.
+    if (Number(f.deferred) > 0) await FA.cancel(c, f.id, { createdBy, narration: 'Disbursement undone' });
     if (f.entry_id) await acct.reverse(c, f.entry_id, 'Disbursement undone', createdBy);
   }
+  await c.query("UPDATE loan_planned_fees SET status = 'PLANNED', loan_fee_id = NULL, reason = NULL WHERE loan_id = $1 AND status IN ('APPLIED', 'SKIPPED')", [loanId]);
   await c.query('DELETE FROM loan_fees WHERE loan_id = $1', [loanId]);
-  await c.query('UPDATE loan_accounts SET fees_due = 0, fees_paid = 0 WHERE id = $1', [loanId]);
+  await c.query('UPDATE loan_accounts SET fees_due = 0, fees_paid = 0, ns_fees_due = 0, ns_fees_paid = 0 WHERE id = $1', [loanId]);
 }
 
 async function forLoan(c, loanId) {
@@ -427,7 +543,7 @@ async function forLoan(c, loanId) {
 }
 
 module.exports = {
-  settlementCredits, writeOffLines, outstanding,
+  settlementCredits, writeOffLines, outstanding, percentBase, nextInstallment, planPending, glFor,
   productFees, feeAmount, scheduledFees, disbursementFees, recordFee, placeUpfrontFees,
   applyPaymentDueFees, applyLateFees, applyManualFee, applyArbitraryFee, waive, settle, resettle,
   undoDisbursementFees, forLoan,

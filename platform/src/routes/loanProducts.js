@@ -93,6 +93,9 @@ const FIELDS = {
   penaltyBasis: 'penalty_basis', penaltyToleranceDays: 'penalty_tolerance_days',
   arrearsToleranceDays: 'arrears_tolerance_days', arrearsTolerancePercent: 'arrears_tolerance_percent',
   arrearsToleranceFloor: 'arrears_tolerance_floor', arrearsCountFrom: 'arrears_count_from',
+  arrearsToleranceDaysMin: 'arrears_tolerance_days_min', arrearsToleranceDaysMax: 'arrears_tolerance_days_max',
+  arrearsTolerancePercentMin: 'arrears_tolerance_percent_min', arrearsTolerancePercentMax: 'arrears_tolerance_percent_max',
+  glDeferredFeeIncome: 'gl_deferred_fee_income',
   arrearsNonWorkingDays: 'arrears_non_working_days',
   chargeCapPercent: 'charge_cap_percent', chargeCapBase: 'charge_cap_base', chargeCapMode: 'charge_cap_mode',
   autoClosePaidOffDays: 'auto_close_paid_off_days', autoLockArrearsDays: 'auto_lock_arrears_days',
@@ -155,6 +158,8 @@ const publicProduct = (p) => ({
   penaltyRate: Number(p.penalty_rate), penaltyRateMin: num(p.penalty_rate_min), penaltyRateMax: num(p.penalty_rate_max),
   penaltyBasis: p.penalty_basis, penaltyToleranceDays: p.penalty_tolerance_days, penaltyGraceDays: p.penalty_tolerance_days,
   arrearsToleranceDays: p.arrears_tolerance_days, arrearsTolerancePercent: num(p.arrears_tolerance_percent),
+  arrearsToleranceDaysMin: p.arrears_tolerance_days_min, arrearsToleranceDaysMax: p.arrears_tolerance_days_max,
+  arrearsTolerancePercentMin: num(p.arrears_tolerance_percent_min), arrearsTolerancePercentMax: num(p.arrears_tolerance_percent_max),
   arrearsToleranceFloor: num(p.arrears_tolerance_floor), arrearsCountFrom: p.arrears_count_from,
   arrearsNonWorkingDays: p.arrears_non_working_days,
   chargeCapPercent: num(p.charge_cap_percent), chargeCapBase: p.charge_cap_base, chargeCapMode: p.charge_cap_mode,
@@ -169,7 +174,7 @@ const publicProduct = (p) => ({
     portfolio: p.gl_portfolio, interestIncome: p.gl_interest_inc, feeIncome: p.gl_fee_inc,
     penaltyIncome: p.gl_penalty_inc, interestReceivable: p.gl_interest_rec,
     feeReceivable: p.gl_fee_rec, penaltyReceivable: p.gl_penalty_rec, writeOffExpense: p.gl_writeoff_exp, recoveries: p.gl_recoveries,
-    deferredInterest: p.gl_deferred_interest,
+    deferredInterest: p.gl_deferred_interest, deferredFeeIncome: p.gl_deferred_fee_income,
   },
   maxTranches: p.max_tranches,
   revolving: p.product_type === 'REVOLVING' ? {
@@ -191,6 +196,10 @@ const publicFee = (f) => ({
   id: f.id, code: f.code, name: f.name, feeType: f.fee_type, calculation: f.calculation,
   amount: num(f.amount), percent: num(f.percent), minAmount: num(f.min_amount), maxAmount: num(f.max_amount),
   required: f.required, glIncome: f.gl_income, glReceivable: f.gl_receivable, isActive: f.is_active, taxable: f.taxable,
+  allocation: f.allocation, amortizationProfile: f.amortization_profile, amortizationFrequency: f.amortization_frequency,
+  amortizationIntervalCount: f.amortization_interval_count, amortizationIntervalUnit: f.amortization_interval_unit,
+  amortizationIntervals: f.amortization_intervals, amortizationOnReschedule: f.amortization_on_reschedule,
+  glDeferredIncome: f.gl_deferred_income,
 });
 
 const isBool = (v) => typeof v === 'boolean';
@@ -306,7 +315,16 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
     'penalty_tolerance_days', 'arrears_tolerance_days', 'arrears_tolerance_percent', 'arrears_tolerance_floor',
     'min_principal', 'max_principal', 'default_principal', 'charge_cap_percent', 'first_due_offset_days', 'grace_periods',
     'revolving_repayment_value', 'revolving_repayment_floor', 'revolving_repayment_ceiling', 'max_credit_balance', 'tax_rate_percent',
-    'org_commission', 'org_commission_min', 'org_commission_max', 'funder_rate_default', 'funder_rate_min', 'funder_rate_max'];
+    'org_commission', 'org_commission_min', 'org_commission_max', 'funder_rate_default', 'funder_rate_min', 'funder_rate_max',
+    'arrears_tolerance_days_min', 'arrears_tolerance_days_max', 'arrears_tolerance_percent_min', 'arrears_tolerance_percent_max'];
+  // The arrears tolerances' bands, as Mambu's default, minimum and maximum.
+  for (const [lo, def, hi] of [['arrears_tolerance_days_min', 'arrears_tolerance_days', 'arrears_tolerance_days_max'],
+    ['arrears_tolerance_percent_min', 'arrears_tolerance_percent', 'arrears_tolerance_percent_max']]) {
+    const v = (k) => (merged[k] === null || merged[k] === undefined ? null : Number(merged[k]));
+    if (v(lo) !== null && v(hi) !== null && v(lo) > v(hi)) problems.push(`${lo} exceeds ${hi}`);
+    if (v(def) !== null && v(lo) !== null && v(def) < v(lo)) problems.push(`${def} is below ${lo}`);
+    if (v(def) !== null && v(hi) !== null && v(def) > v(hi)) problems.push(`${def} is above ${hi}`);
+  }
   // A product whose rate is an index plus a spread may allow a negative
   // spread (a discount on the index); its rate and band are the spread's.
   const spreadsMayBeNegative = merged.allow_negative_rate && (merged.interest_rate_source === 'INDEX' || merged.adjustable_rates);
@@ -490,11 +508,38 @@ const FEE_FIELDS = {
   code: 'code', name: 'name', feeType: 'fee_type', calculation: 'calculation', amount: 'amount', percent: 'percent',
   minAmount: 'min_amount', maxAmount: 'max_amount', required: 'required', glIncome: 'gl_income',
   glReceivable: 'gl_receivable', glWriteOff: 'gl_writeoff', isActive: 'is_active', taxable: 'taxable',
+  allocation: 'allocation', amortizationProfile: 'amortization_profile', amortizationFrequency: 'amortization_frequency',
+  amortizationIntervalCount: 'amortization_interval_count', amortizationIntervalUnit: 'amortization_interval_unit',
+  amortizationIntervals: 'amortization_intervals', amortizationOnReschedule: 'amortization_on_reschedule',
+  glDeferredIncome: 'gl_deferred_income',
 };
 const FEE_ENUMS = {
   fee_type: ['MANUAL', 'DISBURSEMENT_DEDUCTED', 'DISBURSEMENT_CAPITALIZED', 'DISBURSEMENT_UPFRONT', 'PAYMENT_DUE', 'LATE_REPAYMENT'],
   calculation: ['FLAT', 'FLAT_PER_INSTALLMENT', 'PERCENT_OF_AMOUNT', 'PERCENT_PER_INSTALLMENT', 'PERCENT_OF_INSTALLMENT_PRINCIPAL'],
+  allocation: ['NEXT_INSTALLMENT', 'NO_ALLOCATION'],
+  amortization_profile: ['NONE', 'STRAIGHT_LINE', 'SUM_OF_YEARS_DIGITS', 'EFFECTIVE_INTEREST_RATE'],
+  amortization_frequency: ['INSTALLMENT_DUE_DATES', 'INSTALLMENT_DUE_DATES_DAILY', 'CUSTOM_INTERVAL'],
+  amortization_interval_unit: ['DAYS', 'WEEKS', 'MONTHS', 'YEARS'],
+  amortization_on_reschedule: ['END_ON_ORIGINAL', 'CONTINUE_ON_NEW'],
 };
+// Which fee types each amortisation profile is for, after Mambu.
+const AMORTIZABLE = {
+  STRAIGHT_LINE: ['MANUAL', 'DISBURSEMENT_DEDUCTED', 'DISBURSEMENT_CAPITALIZED', 'DISBURSEMENT_UPFRONT'],
+  SUM_OF_YEARS_DIGITS: ['DISBURSEMENT_DEDUCTED'],
+  EFFECTIVE_INTEREST_RATE: ['MANUAL', 'DISBURSEMENT_DEDUCTED', 'DISBURSEMENT_CAPITALIZED', 'DISBURSEMENT_UPFRONT'],
+};
+
+/** A fee code from its name when none is given: letters and digits, made unique on the product. */
+async function codeFromName(c, productId, name) {
+  const base = String(name || 'FEE').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 16).replace(/_+$/, '') || 'FEE';
+  const stem = base.length >= 2 ? base : `${base}_F`;
+  for (let n = 1; n < 1000; n += 1) {
+    const code = n === 1 ? stem : `${stem.slice(0, 16 - String(n).length - 1)}_${n}`;
+    const { rowCount } = await c.query('SELECT 1 FROM loan_product_fees WHERE product_id = $1 AND code = $2', [productId, code]);
+    if (!rowCount) return code;
+  }
+  return `F${Date.now().toString(36).toUpperCase()}`.slice(0, 16);
+}
 const FITS = {
   MANUAL: ['FLAT', 'PERCENT_OF_AMOUNT'], DISBURSEMENT_DEDUCTED: ['FLAT', 'PERCENT_OF_AMOUNT'],
   DISBURSEMENT_CAPITALIZED: ['FLAT', 'PERCENT_OF_AMOUNT'], DISBURSEMENT_UPFRONT: ['FLAT', 'PERCENT_OF_AMOUNT'],
@@ -502,10 +547,11 @@ const FITS = {
   LATE_REPAYMENT: ['FLAT', 'PERCENT_OF_AMOUNT', 'PERCENT_OF_INSTALLMENT_PRINCIPAL'],
 };
 
-async function validateFee(c, cols, before) {
+async function validateFee(c, cols, before, product = null) {
   const problems = [];
   const m = { ...(before || {}), ...cols };
   for (const [col, allowed] of Object.entries(FEE_ENUMS)) {
+    if (cols[col] === null && col === 'amortization_interval_unit') continue;
     if (cols[col] !== undefined && !allowed.includes(cols[col])) problems.push(`${col} must be one of ${allowed.join(', ')}`);
   }
   if (!before && (!cols.code || !/^[A-Z0-9_]{2,16}$/.test(cols.code))) problems.push('code must be 2 to 16 uppercase letters, digits or underscore');
@@ -524,8 +570,26 @@ async function validateFee(c, cols, before) {
   for (const col of ['required', 'is_active', 'taxable']) {
     if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
   }
+  if (product && product.product_type === 'TRANCHED' && m.fee_type === 'PAYMENT_DUE') problems.push('payment due fees are not available on TRANCHED products');
+  if (m.allocation === 'NO_ALLOCATION' && m.fee_type && m.fee_type !== 'MANUAL') problems.push('NO_ALLOCATION is for MANUAL fees');
+  if (m.amortization_profile && m.amortization_profile !== 'NONE') {
+    const kinds = AMORTIZABLE[m.amortization_profile] || [];
+    if (m.fee_type && !kinds.includes(m.fee_type)) problems.push(`${m.amortization_profile} amortisation is for ${kinds.join(', ')} fees`);
+    if (product && product.accounting_method !== 'ACCRUAL') problems.push('fee amortisation needs ACCRUAL accounting on the product');
+    if (product && ['TRANCHED', 'REVOLVING'].includes(product.product_type)) problems.push(`fee amortisation is not available on ${product.product_type} products`);
+    if (m.allocation === 'NO_ALLOCATION') problems.push('a fee kept off the schedule is not amortised');
+    if (m.amortization_frequency === 'CUSTOM_INTERVAL') {
+      if (m.amortization_profile !== 'STRAIGHT_LINE') problems.push('a custom amortisation interval is for STRAIGHT_LINE');
+      if (!m.amortization_interval_count || !m.amortization_interval_unit || !m.amortization_intervals) {
+        problems.push('a custom interval needs amortization_interval_count, amortization_interval_unit and amortization_intervals');
+      }
+    }
+    if (m.amortization_on_reschedule === 'CONTINUE_ON_NEW' && m.amortization_frequency === 'CUSTOM_INTERVAL') {
+      problems.push('amortisation continues on a rescheduled loan only on installment due dates');
+    }
+  }
   // A fee's own accounts: income (or a liability, for fees collected for a
-  // third party), receivable and write-off. Detail accounts only.
+  // third party), receivable, write-off and deferred income. Detail accounts only.
   problems.push(...await PA.validateFeeAccounts(c, cols));
   return problems;
 }
@@ -545,9 +609,11 @@ router.post('/:id/fees', requireAuth(...ADMIN), async (req, res, next) => {
     const cols = feeCols(req.body);
     if (cols.code) cols.code = String(cols.code).toUpperCase();
     const out = await withTenant(req.tenant.schema_name, async (c) => {
-      const { rows: [p] } = await c.query('SELECT id FROM loan_products WHERE id = $1', [req.params.id]);
+      const { rows: [p] } = await c.query('SELECT id, product_type, accounting_method FROM loan_products WHERE id = $1', [req.params.id]);
       if (!p) return { missing: true };
-      const problems = await validateFee(c, cols, null);
+      // As in Mambu, a fee left without an id is given one.
+      if (!cols.code && cols.name) cols.code = await codeFromName(c, p.id, cols.name);
+      const problems = await validateFee(c, cols, null, p);
       if (problems.length) return { problems };
       const keys = Object.keys(cols);
       const { rows } = await c.query(
@@ -583,10 +649,11 @@ router.patch('/:id/fees/:feeId', requireAuth(...ADMIN), async (req, res, next) =
       // never deleting, a used fee.
       const { rows: [used] } = await c.query('SELECT count(*)::int AS n FROM loan_fees WHERE product_fee_id = $1', [before.id]);
       if (used.n > 0) {
-        const frozen = ['fee_type', 'calculation'].filter((k) => cols[k] !== undefined && cols[k] !== before[k]);
+        const frozen = ['fee_type', 'calculation', 'amortization_profile'].filter((k) => cols[k] !== undefined && cols[k] !== before[k]);
         if (frozen.length) return { problems: [`${frozen.join(', ')} cannot change on a fee that has been applied ${used.n} time(s); deactivate it and add another`] };
       }
-      const problems = await validateFee(c, cols, before);
+      const { rows: [prod] } = await c.query('SELECT id, product_type, accounting_method FROM loan_products WHERE id = $1', [req.params.id]);
+      const problems = await validateFee(c, cols, before, prod);
       if (problems.length) return { problems };
       const keys = Object.keys(cols);
       const { rows } = await c.query(

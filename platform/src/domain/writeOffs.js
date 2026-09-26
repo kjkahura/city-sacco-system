@@ -10,6 +10,7 @@ const provisioning = require('./provisioning');
 const PA = require('./productAccounting');
 const types = require('./productTypes');
 const { accrueInterest, prepaidToPrincipal } = require('./interest');
+const FA = require('./feeAmortization');
 const { pageQuery } = require('../lib/page');
 const { err, round2 } = acct;
 const { lock, balances, isAccrual, interestAccrues, writeOffCredit, post, booksEntries } = ledger;
@@ -112,7 +113,7 @@ async function writeOff(c, loanId, { narration, createdBy, valueDate } = {}) {
     if (b.penalty > 0) credits.push({ glCode: writeOffCredit(l, 'PENALTY'), amount: b.penalty, memberId: l.member_id });
     // Each fee is written off against its own receivable and, where the fee
     // names one, its own write-off account.
-    for (const f of await fees.writeOffLines(c, l, b.fees)) {
+    for (const f of await fees.writeOffLines(c, l, round2(b.fees + b.nonScheduledFees))) {
       credits.push({ glCode: f.glReceivable, amount: f.amount, memberId: l.member_id });
       if (f.glWriteOff !== l.gl_writeoff_exp) debits.push({ glCode: f.glWriteOff, amount: f.amount, memberId: l.member_id });
     }
@@ -142,6 +143,8 @@ async function writeOff(c, loanId, { narration, createdBy, valueDate } = {}) {
        written_off_amount = $3, written_off_on = $2::date, written_off_by = $4, updated_at = now()
      WHERE id = $1`, [l.id, date, b.total, createdBy || 'SYSTEM']);
   await workflow.history(c, l.id, { from: l.status, to: 'CLOSED_WRITTEN_OFF', action: 'WRITE_OFF', actor: createdBy, note: narration });
+  // Fee income still deferred is recognised as the loan leaves the books.
+  await FA.recogniseRemaining(c, l.id, { date, createdBy });
 
   return savings.record(c, {
     reference: savings.ref('LW'), kind: 'LOAN_WRITE_OFF', memberId: l.member_id,
@@ -475,6 +478,7 @@ async function reverse(c, tx, { narration = 'Reversal', createdBy } = {}) {
       `UPDATE loan_accounts SET status = $2, closed_on = NULL, written_off_amount = 0, written_off_on = NULL,
          written_off_by = NULL, updated_at = now() WHERE id = $1`, [l.id, back]);
     await workflow.history(c, l.id, { from: l.status, to: back, action: 'UNDO_WRITE_OFF', actor: createdBy, note: narration });
+    await FA.undoClosure(c, l.id, { createdBy, narration });
     return recordReversal(c, tx, entry.entryId, { narration, createdBy });
   }
   if (tx.kind === 'LOAN_RECOVERY') {

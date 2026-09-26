@@ -10,6 +10,7 @@ const funding = require('./funding');
 const eligibility = require('./eligibility');
 const { accrueInterest, prepaidToPrincipal } = require('./interest');
 const { buildSchedule } = require('./installments');
+const FA = require('./feeAmortization');
 const types = require('./productTypes');
 const { err, round2 } = acct;
 
@@ -130,7 +131,7 @@ async function settle(c, { kind, old, np, fresh, s, extra, channel, channelId, a
     // Whether a component sits in a receivable: interest when accrued
     // interest reaches the ledger, fees and penalties under accrual.
     const inReceivable = (component) => (component === 'INTEREST' ? L.interestAccrues(old) : L.isAccrual(old));
-    for (const [component, amount] of [['INTEREST', b.interest], ['FEE', b.fees], ['PENALTY', b.penalty]]) {
+    for (const [component, amount] of [['INTEREST', b.interest], ['FEE', round2(b.fees + b.nonScheduledFees)], ['PENALTY', b.penalty]]) {
       if (!(amount > 0)) continue;
       if (capitalized > 0) {
         // Capitalised charges: under accrual they clear the receivable that
@@ -157,10 +158,10 @@ async function settle(c, { kind, old, np, fresh, s, extra, channel, channelId, a
   await c.query(
     `UPDATE loan_accounts SET
        principal_paid = principal_paid + $1, interest_paid = interest_paid + $2,
-       fees_paid = fees_paid + $3, penalty_paid = penalty_paid + $4,
+       fees_paid = fees_paid + $3, penalty_paid = penalty_paid + $4, ns_fees_paid = ns_fees_paid + $8,
        status = $5, closed_on = $6::date, locked_at = NULL, locked_reason = NULL, status_before_lock = NULL, updated_at = now()
      WHERE id = $7`,
-    [b.principal, b.interest, b.fees, b.penalty, closedStatus, date, old.id]);
+    [b.principal, b.interest, b.fees, b.penalty, closedStatus, date, old.id, b.nonScheduledFees]);
   await c.query("UPDATE loan_fees SET status = CASE WHEN status = 'DUE' THEN 'PAID' ELSE status END, paid = amount WHERE loan_id = $1 AND status = 'DUE'", [old.id]);
   await W.history(c, old.id, { from: old.status, to: closedStatus, action: kind, actor: createdBy, note: note || `into ${fresh.account_no}` });
 
@@ -172,7 +173,10 @@ async function settle(c, { kind, old, np, fresh, s, extra, channel, channelId, a
      WHERE id = $5`,
     [old.id, date, createdBy || 'SYSTEM', newPrincipal, fresh.id]);
   await W.history(c, fresh.id, { from: fresh.status, to: 'ACTIVE', action: kind, actor: createdBy, note: `from ${old.account_no}` });
+  await W.freezeSettings(c, fresh.id);
   const activated = await L.lock(c, fresh.id);
+  // Deferred fee income ends on the old loan or continues on the new one.
+  await FA.carryOver(c, old, activated, { date, createdBy });
   await buildSchedule(c, activated);
   // The new product's payment-due fees, if fixed-term, land with the schedule.
   await fees.applyPaymentDueFees(c, activated, types.forLoan(activated).paymentDueHorizon(date));

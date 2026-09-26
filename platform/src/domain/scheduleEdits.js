@@ -4,7 +4,7 @@ const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
 const types = require('./productTypes');
-const { buildSchedule } = require('./installments');
+const { buildSchedule, feeLinks, relinkFees } = require('./installments');
 const { err } = acct;
 const { ymd, isoDate, toUTC } = S;
 
@@ -79,6 +79,7 @@ const view = (rows) => rows.map((i) => ({
 }));
 
 async function replaceTail(c, l, tail, lines) {
+  const links = await feeLinks(c, l.id, tail.map((t) => t.id));
   await c.query('DELETE FROM loan_installments WHERE loan_id = $1 AND id = ANY($2)', [l.id, tail.map((t) => t.id)]);
   const start = tail[0].number;
   for (let k = 0; k < lines.length; k += 1) {
@@ -90,6 +91,7 @@ async function replaceTail(c, l, tail, lines) {
       [l.id, start + k, x.dueDate, x.nominalDue || x.dueDate, x.principal, x.interest, x.fee || 0,
         nothingDue ? 'GRACE' : 'PENDING', Boolean(x.holiday)]);
   }
+  if (links.length) await relinkFees(c, l.id, links);
   const count = start - 1 + lines.length;
   await c.query('UPDATE loan_accounts SET term_months = $2, updated_at = now() WHERE id = $1', [l.id, count]);
 }

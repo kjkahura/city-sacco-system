@@ -18,6 +18,8 @@ const types = require('./productTypes');
 const PA = require('./productAccounting');
 const writeOffs = require('./writeOffs');
 const rates = require('./rates');
+const penalties = require('./penalties');
+const FA = require('./feeAmortization');
 const { err, round2 } = acct;
 const { ymd, isoDate } = S;
 const {
@@ -246,7 +248,7 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
 
   // Disbursement fees: on the amount paid out now. Upfront fees (and the
   // legacy processing fee) are charged once, with the first payout.
-  let plan = await fees.disbursementFees(c, l, { amount: amt, selected: selectedFees });
+  let plan = await fees.disbursementFees(c, l, { amount: amt, selected: selectedFees, later: !first });
   if (!first) {
     const items = plan.items.filter((x) => x.feeType !== 'DISBURSEMENT_UPFRONT');
     plan = { ...plan, items, upfront: 0 };
@@ -302,6 +304,8 @@ async function disburse(c, loanId, { amount, channelId = 'bank', valueDate, narr
   // The schedule, or its absence, is the product type's: drawn now, redrawn
   // for a later tranche, or none until the first billing date.
   const sched = await type.afterDisbursement(c, { l, fresh, first, date, plan, createdBy }, ops);
+  // Disbursement fees whose income is amortised are planned on the schedule just drawn.
+  await fees.planPending(c, fresh, { date, createdBy });
 
   if (sched && type.appliesInterestAtDisbursement(l) && sched.totals.interest > 0) {
     // The whole term's interest is applied on day one.
@@ -441,7 +445,29 @@ async function prepayInterest(c, l, type, { interest, pool, asOf }) {
   return { prepaid, principal, left };
 }
 
-async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy, branchId: tellerBranch = null, allocationOrder = null } = {}) {
+/**
+ * A custom repayment (Mambu's Custom Repayments): the teller says how much
+ * goes to each item. Each amount is at most what is owed on it and they add
+ * up to the payment. It is the only way to pay fees kept off the schedule
+ * (NON_SCHEDULED_FEE).
+ */
+const CUSTOM_ITEMS = { penalty: 'PENALTY', fee: 'FEE', interest: 'INTEREST', principal: 'PRINCIPAL', nonScheduledFee: 'NON_SCHEDULED_FEE' };
+function customPaid(custom, amount, due) {
+  const keys = Object.keys(custom || {});
+  if (!keys.length || keys.some((k) => !CUSTOM_ITEMS[k])) throw err(`CUSTOM_ALLOCATION_ITEMS: ${Object.keys(CUSTOM_ITEMS).join(', ')}`, 400);
+  const paid = { PENALTY: 0, FEE: 0, INTEREST: 0, PRINCIPAL: 0, NON_SCHEDULED_FEE: 0 };
+  for (const k of keys) {
+    const v = round2(custom[k]);
+    if (!(v >= 0)) throw err(`CUSTOM_ALLOCATION_AMOUNT_INVALID: ${k}`, 400);
+    if (v > round2(due[CUSTOM_ITEMS[k]])) throw err(`CUSTOM_ALLOCATION_EXCEEDS_WHAT_IS_OWED: ${k} owes ${round2(due[CUSTOM_ITEMS[k]])}`, 400);
+    paid[CUSTOM_ITEMS[k]] = v;
+  }
+  const sum = round2(Object.values(paid).reduce((a, x) => a + x, 0));
+  if (sum !== round2(amount)) throw err(`CUSTOM_ALLOCATION_MUST_ADD_UP_TO_THE_AMOUNT: ${sum} of ${round2(amount)}`, 400);
+  return paid;
+}
+
+async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narration, createdBy, branchId: tellerBranch = null, allocationOrder = null, customAllocation = null } = {}) {
   let l = await lock(c, loanId);
   const type = types.forLoan(l);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
@@ -452,6 +478,16 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
 
   const asOf = valueDate ? ymd(valueDate) : isoDate(new Date());
+  // A repayment dated before penalties already charged: the unpaid ones
+  // after its date are taken back and worked out again up to its date on
+  // what was owed then; after the payment, the days since are charged
+  // again on what is still owed (Mambu recomputes penalties on a
+  // backdated transaction).
+  const recharge = await penalties.reverseAfter(c, l.id, asOf, { createdBy, reason: `backdated repayment ${asOf}` });
+  if (recharge.reversed.length) {
+    await penalties.accrueForLoan(c, l.id, { asOf, createdBy });
+    l = await lock(c, l.id);
+  }
   // Interest owed is brought up to the payment date first, so a prepayment
   // on a dynamic loan pays the interest it has actually earned (Mambu's
   // "apply interest on prepayments"); a capitalising product folds it into
@@ -474,15 +510,25 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
 
   // A product that does not accept prepayments takes no more than is due:
   // charges owed and the principal of installments fallen due.
+  // A custom repayment: the items and amounts are the teller's.
+  let nsPaid = 0;
+  let custom = null;
+  if (customAllocation !== null && customAllocation !== undefined) {
+    custom = customPaid(customAllocation, left, { ...due, NON_SCHEDULED_FEE: b.nonScheduledFees });
+    nsPaid = custom.NON_SCHEDULED_FEE;
+  }
   if (l.allow_prepayments === false) {
     const { rows: [pd] } = await c.query(
       `SELECT COALESCE(sum(principal_due - principal_paid), 0) AS p FROM loan_installments
        WHERE loan_id = $1 AND due_date <= $2::date AND status NOT IN ('PAID', 'GRACE')`, [l.id, asOf]);
     const dueNow = round2(b.penalty + b.fees + b.interest + Math.min(Number(pd.p), b.principal));
-    if (left > dueNow) throw err(`PREPAYMENT_NOT_ALLOWED: ${dueNow} is due`, 409);
+    if (round2(left - nsPaid) > dueNow) throw err(`PREPAYMENT_NOT_ALLOWED: ${dueNow} is due`, 409);
   }
 
-  if (l.payment_method === 'HORIZONTAL') {
+  if (custom) {
+    paid = { PENALTY: custom.PENALTY, FEE: custom.FEE, INTEREST: custom.INTEREST, PRINCIPAL: custom.PRINCIPAL };
+    left = 0;
+  } else if (l.payment_method === 'HORIZONTAL') {
     ({ paid, left } = await horizontalAllocation(c, l, due, left, order));
   } else {
     for (const component of order) {
@@ -493,11 +539,11 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   }
   // Interest taken in advance, where the product takes it.
   let prepaidInterest = 0;
-  const pre = await prepayInterest(c, l, type, { interest: paid.INTEREST, pool: round2(paid.PRINCIPAL + left), asOf });
+  const pre = custom ? null : await prepayInterest(c, l, type, { interest: paid.INTEREST, pool: round2(paid.PRINCIPAL + left), asOf });
   if (pre) { prepaidInterest = pre.prepaid; paid.PRINCIPAL = pre.principal; left = pre.left; }
   const { PENALTY: penalty, FEE: feesPaid, INTEREST: interest, PRINCIPAL: principal } = paid;
   const surplus = round2(left);
-  const total = round2(penalty + feesPaid + interest + principal + prepaidInterest + surplus);
+  const total = round2(penalty + feesPaid + interest + principal + prepaidInterest + nsPaid + surplus);
   const finalPayment = round2(b.principal - principal) <= 0 && type.closesWhenPaid;
 
   // Where each component's money goes. On a funded loan the principal and
@@ -521,6 +567,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     }
   }
   if (prepaidInterest > 0) credits.push({ glCode: l.gl_deferred_interest, amount: prepaidInterest, memberId: l.member_id });
+  if (nsPaid > 0) credits.push(...await fees.settlementCredits(c, l, nsPaid, { nonScheduled: true }));
 
   // A surplus is the member's money: on a revolving loan with a credit
   // balance it stays on the loan for the next drawdown; otherwise it goes to
@@ -571,10 +618,10 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     `UPDATE loan_accounts SET
        penalty_paid = penalty_paid + $1, fees_paid = fees_paid + $2,
        interest_paid = interest_paid + $3, principal_paid = principal_paid + $4,
-       credit_balance = credit_balance + $6, interest_prepaid = interest_prepaid + $7,
+       credit_balance = credit_balance + $6, interest_prepaid = interest_prepaid + $7, ns_fees_paid = ns_fees_paid + $8,
        updated_at = now()
      WHERE id = $5`,
-    [penalty, feesPaid, interest, principal, l.id, toCreditBalance, prepaidInterest]
+    [penalty, feesPaid, interest, principal, l.id, toCreditBalance, prepaidInterest, nsPaid]
   );
   if (surplusAccount) {
     await c.query(
@@ -590,13 +637,16 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   await applyToInstallments(c, l.id, { principal, interest: round2(interest + prepaidInterest), fees: feesPaid }, type.installmentScope(asOf, l));
   if (l.mark_paid_when === 'PRINCIPAL_EXPECTED' && type.basis === 'ACTUAL_BALANCE') await markPaidOnPrincipal(c, l.id, asOf);
   await fees.settle(c, l.id, feesPaid);
+  if (nsPaid > 0) await fees.settle(c, l.id, nsPaid, { nonScheduled: true });
 
   const fresh = await lock(c, l.id);
   const after = balances(fresh);
   let rescheduled = null;
   if (after.total <= 0 && type.closesWhenPaid) {
-    // Interest still held in advance was paid under the contract.
+    // Interest still held in advance was paid under the contract, and fee
+    // income still deferred is recognised (Mambu: at pay-off).
     await recognisePrepaidInterest(c, l.id, { valueDate: asOf, createdBy });
+    await FA.recogniseRemaining(c, l.id, { date: asOf, createdBy });
     await c.query("UPDATE loan_accounts SET status = 'CLOSED_REPAID', closed_on = $2::date, updated_at = now() WHERE id = $1", [l.id, asOf]);
     await workflow.history(c, l.id, { from: fresh.status, to: 'CLOSED_REPAID', action: 'PAID_OFF', actor: createdBy });
     await eligibility.releaseGuarantors(c, l.id);
@@ -605,6 +655,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     await workflow.refreshArrears(c, fresh, asOf);
   }
   rescheduled = await type.afterRepayment(c, fresh, { asOf, principal, interest, createdBy }, ops);
+  if (recharge.reversed.length) await penalties.accrueForLoan(c, l.id, { asOf: recharge.through, createdBy });
 
   return savings.record(c, {
     reference: savings.ref('LR'), kind: 'LOAN_REPAYMENT', memberId: l.member_id,
@@ -612,6 +663,8 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     allocation: {
       penalty, fees: feesPaid, interest, principal, surplus,
       ...(prepaidInterest > 0 ? { prepaidInterest } : {}),
+      ...(nsPaid > 0 ? { nonScheduledFees: nsPaid } : {}),
+      ...(custom ? { custom: true } : {}),
       ...(toCreditBalance > 0 ? { creditBalance: toCreditBalance } : {}),
       ...(distributed ? { funding: distributed.allocation, orgInterest: distributed.orgInterest } : {}),
       ...(rescheduled ? { rescheduled: { recalculation: rescheduled.recalculation, dropped: rescheduled.dropped } } : {}),
@@ -677,6 +730,16 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
 
   if (tx.kind === 'LOAN_REPAYMENT') {
     if (a.prepaidInterest > 0) await unwindPrepaidInterest(c, tx, a.prepaidInterest, { narration, createdBy });
+    // A payment that closed the loan: the fee income its closure recognised goes back to deferred.
+    const { rows: [was] } = await c.query('SELECT status FROM loan_accounts WHERE id = $1', [tx.loan_account_id]);
+    if (was.status === 'CLOSED_REPAID') await FA.undoClosure(c, tx.loan_account_id, { createdBy, narration });
+    if (a.nonScheduledFees > 0) {
+      await c.query('UPDATE loan_accounts SET ns_fees_paid = ns_fees_paid - $1 WHERE id = $2', [a.nonScheduledFees, tx.loan_account_id]);
+      const { rows: [ns] } = await c.query(
+        `SELECT COALESCE(SUM((allocation->>'nonScheduledFees')::numeric), 0) AS n FROM transactions
+         WHERE loan_account_id = $1 AND kind = 'LOAN_REPAYMENT' AND reversed_by IS NULL AND id <> $2`, [tx.loan_account_id, tx.id]);
+      await fees.resettle(c, tx.loan_account_id, Number(ns.n), { nonScheduled: true });
+    }
     await c.query(
       `UPDATE loan_accounts SET
          penalty_paid = penalty_paid - $1, fees_paid = fees_paid - $2,
@@ -729,6 +792,15 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
     }, type.installmentScope(today, restored));
     await fees.resettle(c, tx.loan_account_id, Number(remaining[0].f));
     if (type.redrawsOnReversal) await reschedule(c, await lock(c, tx.loan_account_id), today);
+    // Penalties charged after the payment's date on what it had paid are
+    // worked out again now that it is owed.
+    const valueOn = S.ymd(tx.value_date);
+    const recharge = await penalties.reverseAfter(c, tx.loan_account_id, valueOn, { createdBy, reason: `reversal of ${tx.reference}` });
+    const through = recharge.through;
+    if (through && through > valueOn) {
+      if (recharge.reversed.length) await penalties.accrueForLoan(c, tx.loan_account_id, { asOf: valueOn, createdBy });
+      await penalties.accrueForLoan(c, tx.loan_account_id, { asOf: through, createdBy });
+    }
   } else if (tx.kind === 'LOAN_DISBURSEMENT') {
     const { rows: [cur] } = await c.query('SELECT * FROM loan_accounts WHERE id = $1 FOR UPDATE', [tx.loan_account_id]);
     if (round2(cur.principal_disbursed) !== round2(tx.amount) || Number(cur.principal_paid) > 0) {

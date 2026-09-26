@@ -18,6 +18,8 @@ const WO = require('../domain/writeOffs');
 const RATES = require('../domain/rates');
 const SE = require('../domain/scheduleEdits');
 const PDP = require('../domain/postdated');
+const PF = require('../domain/plannedFees');
+const FA = require('../domain/feeAmortization');
 
 const router = express.Router();
 
@@ -100,6 +102,8 @@ router.get('/:id', ...read(async (c, req) => {
     `SELECT l.*, m.member_no, m.first_name, m.last_name,
             r.account_no AS refinances_account_no, pl.account_no AS parent_account_no, lp.schedule_editing,
             lp.allow_postdated_payments, lp.interest_prepayment,
+            COALESCE(l.settings_snapshot->>'penalty_basis', lp.penalty_basis) AS penalty_basis,
+            COALESCE(l.penalty_rate, lp.penalty_rate) AS penalty_rate,
             (SELECT count(*)::int FROM loan_postdated_payments pp WHERE pp.loan_id = l.id AND pp.status = 'PENDING') AS postdated_pending
      FROM loan_accounts l JOIN members m ON m.id = l.member_id
      JOIN loan_products lp ON lp.id = l.product_id
@@ -107,7 +111,9 @@ router.get('/:id', ...read(async (c, req) => {
      LEFT JOIN loan_accounts pl ON pl.id = l.parent_loan_id
      WHERE l.id::text = $1 OR l.account_no = $1`, [req.params.id]);
   if (!rows.length) return null;
-  return { ...rows[0], balances: L.balances(rows[0]) };
+  // Days late and days in arrears (Mambu's two counters), on the loan's own settings.
+  const indicators = await W.arrearsIndicators(c, await L.read(c, rows[0].id), req.query.asOf || null);
+  return { ...rows[0], balances: L.balances(rows[0]), days_late: indicators.daysLate, days_in_arrears: indicators.daysInArrears };
 }));
 
 router.get('/:id/balances', ...read(async (c, req) => {
@@ -118,7 +124,9 @@ router.get('/:id/balances', ...read(async (c, req) => {
 
 router.get('/:id/schedule', ...read(async (c, req) => {
   const { rows } = await c.query(
-    `SELECT i.* FROM loan_installments i
+    `SELECT i.*, (SELECT COALESCE(sum(p.amount), 0) FROM loan_planned_fees p
+                  WHERE p.loan_id = i.loan_id AND p.installment_number = i.number AND p.status = 'PLANNED') AS planned_fees
+     FROM loan_installments i
      JOIN loan_accounts l ON l.id = i.loan_id
      WHERE l.id::text = $1 OR l.account_no = $1 ORDER BY i.number`, [req.params.id]);
   return rows;
@@ -319,6 +327,25 @@ router.post('/:id/postdated-payments', ...tx(async (c, req, res, { actor }) => {
 }, TELLER));
 router.post('/postdated-payments/:paymentId/cancel', ...tx((c, req, _res, { actor }) =>
   PDP.cancel(c, req.params.paymentId, { ...req.body, createdBy: actor }), TELLER));
+// Penalty rate on a running loan (Mambu's Edit Penalty Rate), and its history.
+router.post('/:id/penalty-rate', ...tx((c, req, _res, { actor }) => P.changeRate(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+router.get('/:id/penalty-rate-changes', ...read((c, req) => P.rateChanges(c, req.params.id)));
+
+// Planned fees: manual fees placed on installments ahead of time (./plannedFees).
+router.get('/:id/planned-fees', ...read((c, req) => PF.forLoan(c, req.params.id)));
+router.post('/:id/planned-fees', ...tx(async (c, req, res, { actor }) => {
+  res.status(201);
+  return PF.add(c, req.params.id, { ...req.body, createdBy: actor });
+}, TELLER));
+router.post('/:id/planned-fees/apply', ...tx((c, req, _res, { actor }) => PF.apply(c, req.params.id, { ...req.body, createdBy: actor }), TELLER));
+router.patch('/planned-fees/:plannedId', ...tx((c, req, _res, { actor }) => PF.edit(c, req.params.plannedId, { ...req.body, createdBy: actor }), TELLER));
+router.delete('/planned-fees/:plannedId', ...tx((c, req, _res, { actor }) => PF.remove(c, req.params.plannedId, { createdBy: actor }), TELLER));
+router.post('/planned-fees/run', ...tx((c, req) => PF.applyDue(c, { ...req.body }), APPROVER));
+
+// Fee amortisation plans and the recognition run.
+router.get('/:id/fee-amortization', ...read((c, req) => FA.forLoan(c, req.params.id)));
+router.post('/fee-amortization/run', ...tx((c, req) => FA.run(c, { ...req.body }), APPROVER));
+
 router.post('/postdated-payments/run', ...tx((c, req) => PDP.applyDue(c, { ...req.body }), APPROVER));
 router.post('/:id/rates/review', ...tx((c, req, _res, { actor }) =>
   RATES.reviewLoan(c, req.params.id, { date: req.body?.asOf, createdBy: actor }).then((x) => x || { changed: false }), APPROVER));

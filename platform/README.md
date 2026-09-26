@@ -621,6 +621,74 @@ deactivated and repriced but not deleted or retyped. The legacy
 `processing_fee` column is an upfront flat fee called "Processing fee".
 Arbitrary fees (any name, any amount) need `allow_arbitrary_fees`.
 
+The rest of Mambu's "Loan Fees Setup" and "Non-Scheduled Fee Allocation":
+
+- **A fee without a code** is given one from its name (`Bounced cheque`
+  becomes `BOUNCED_CHEQUE`), unique on the product.
+- **Where a manual fee goes** (`allocation`). NEXT_INSTALLMENT, the
+  default, puts it on the next installment not yet paid, in grace or in a
+  payment holiday, due on or after the day it is applied (failing that, the
+  last unpaid one). It then falls due with that installment and is paid
+  with it, and an unpaid one counts towards arrears. NO_ALLOCATION keeps
+  it off the schedule in a balance of its own (`ns_fees_due`,
+  `ns_fees_paid`). That balance counts in the loan's total, never falls
+  due, is not paid by an ordinary repayment, and is written off, capitalised
+  on a reschedule or top-up, or waived like any fee. Arbitrary fees choose
+  per application; manual fees default to the fee's setting and may be
+  overridden when applied (`allocation` on `POST /api/loans/:id/fees`).
+- **A custom repayment** (`customAllocation` on
+  `POST /api/loans/:id/repayments`: any of `penalty`, `fee`, `interest`,
+  `principal`, `nonScheduledFee`) splits a payment as the teller says. No
+  item may take more than it owes, and the parts must add up to the
+  amount. It is the only way to pay fees kept off the schedule.
+- **Percentage fees after disbursement** are on the amount disbursed plus
+  any capitalised disbursement fees (Mambu's examples: 1,000 with a
+  deducted 100 is still 1,000; 1,000 with a capitalised 100 is 1,100).
+- **Tranches.** A required disbursement fee is charged on the first tranche.
+  On a later one it applies only if it is chosen for that disbursement.
+  Payment due fees are refused on tranched products.
+- **Planned fees** are manual fees placed on future installments ahead of
+  time, before or after disbursement, on any product with a schedule:
+  - `POST /api/loans/:id/planned-fees` takes `installment` and either `fee`
+    (a MANUAL product fee; `amount` overrides its figure) or `name` and
+    `amount` (where arbitrary fees are allowed). An optional `applyOn` must
+    be after today.
+  - `PATCH` and `DELETE /api/loans/planned-fees/:id` change or remove a fee
+    until it is applied.
+  - The schedule shows them (`planned_fees` on each installment).
+  - The end-of-day job `applyPlannedFees` (before `markArrears`) applies
+    each one on its installment's due date or its `applyOn` date. A fee
+    whose installment was paid by its due date is SKIPPED.
+  - `POST /api/loans/:id/planned-fees/apply` applies them early: now, or
+    on a later `applyOn`.
+  - Once applied, a planned fee is an ordinary fee on that installment.
+  - Planned fees are not allowed on installments in grace or a payment
+    holiday, or on revolving loans.
+- **Fee amortisation** (`amortizationProfile`, accrual products that are
+  not tranched or revolving). The fee's income is credited to deferred fee
+  income: the fee's own `glDeferredIncome`, else the product's
+  `glDeferredFeeIncome`, 200-350 Deferred Fee Income. Tax on the fee is
+  payable at once and is not deferred. A plan (`loan_fee_amortization`,
+  `GET /api/loans/:id/fee-amortization`) then spreads the income, and the
+  end-of-day job `amortizeFees` moves each share to fee income:
+
+  | Profile | Shares | Fee types |
+  |---|---|---|
+  | STRAIGHT_LINE | equal | manual, deducted, capitalised, upfront |
+  | SUM_OF_YEARS_DIGITS | n, n-1 ... 1 parts of n(n+1)/2 | deducted |
+  | EFFECTIVE_INTEREST_RATE | the rate that discounts the installments to the principal less the fee, applied to the carrying amount, less the contractual interest (IFRS 9) | manual, deducted, capitalised, upfront |
+
+  - **Frequency** (`amortizationFrequency`):
+    - INSTALLMENT_DUE_DATES recognises each share on its installment's due date.
+    - INSTALLMENT_DUE_DATES_DAILY recognises it a day at a time through the period.
+    - CUSTOM_INTERVAL (straight line) runs every `amortizationIntervalCount` `amortizationIntervalUnit` for `amortizationIntervals` intervals, from the day the fee is applied.
+  - **Closure.** When the loan is paid off or written off, whatever is still deferred is recognised in one entry. Reversing the closing payment, or the write-off, puts it back.
+  - **Reschedule or refinance.** With END_ON_ORIGINAL (the default) the deferred income is recognised when the old loan closes. With CONTINUE_ON_NEW the plan carries on on the new loan, which must be under the same product.
+  - **Waiving the fee or undoing the disbursement** takes back what was recognised, so the deferred account clears.
+  - **Catch-up.** A share recognised late is posted on its own date, or on the processing date when that date falls in a closed accounting period.
+  - A fee's profile cannot change once the fee has been applied.
+  - "Fee included in total due" (Mambu's equal-installment fee rate, which needs Optimized Payments) is not built.
+
 ### The life cycle
 
 After Mambu's "Loan Account Life Cycle and States". Every step is a
@@ -1094,6 +1162,37 @@ REDUCE_INSTALLMENT_AMOUNT (on equal principal shares they draw the same
 schedule); Recalculate keeping the same principal amount is
 REDUCE_NUMBER_OF_INSTALLMENTS.
 
+### Arrears settings
+
+After Mambu's "Arrears Settings". Tolerance days and the tolerance
+percentage of outstanding principal (with a floor) are set per product,
+with a minimum and maximum that each loan's own value must sit inside
+(`arrearsToleranceDaysMin`, `arrearsToleranceDaysMax`,
+`arrearsTolerancePercentMin`, `arrearsTolerancePercentMax`). The
+setting for counting days in arrears (from the first arrears or from the
+oldest late installment) and the setting for non-working days in the
+tolerance work as before.
+
+**Approval freezes these settings.** When a loan is approved it takes the
+product's penalty rate and arrears tolerances as they stand, for any it
+left to the product. Its penalty method, penalty tolerance, arrears floor
+and counting rules are kept in `settings_snapshot`, which the loan reads
+in place of the product's. A later change to the product therefore reaches
+only loans still pending, as in Mambu. Undoing the approval releases them.
+Migration 023 froze the settings of loans that were already approved or
+running.
+
+`GET /api/loans/:id` shows Mambu's two counters:
+
+- `days_late` is counted from the oldest installment still unpaid after its
+  due date.
+- `days_in_arrears` is counted from the date the loan's arrears count from,
+  less the tolerance. A loan 87 days late with two days' tolerance is 85
+  days in arrears.
+
+Provisioning and portfolio at risk stay on days past due, which is how
+SASRA classifies.
+
 ### Interest paid in advance
 
 On a fixed-term loan a payment made before a due date pays, by default, the
@@ -1333,12 +1432,44 @@ additive.
 
 ## Penalties
 
-Charged per installment per day, with a per-product rate (a loan may carry
+After Mambu's "Loan Penalties Setup". A per-product rate (a loan may carry
 its own, inside the product's band), a tolerance period, and Mambu's four
 bases: `OVERDUE_PRINCIPAL`, `OVERDUE_PRINCIPAL_INTEREST`, `OVERDUE_ALL` (the
 amount actually in arrears) and `OUTSTANDING_PRINCIPAL` (the whole remaining
-principal, a penalty rate on top of the rate). A loan under a charge cap is
-charged no further than the cap allows.
+principal, a penalty rate on top of the rate). The first three rates are
+daily. On OUTSTANDING_PRINCIPAL the rate is per the product's interest rate
+period (a year, a month, a week or a day), as Mambu requires. A loan under
+a charge cap is charged no further than the cap allows.
+
+- **Accrued from the first late day.** Nothing is applied while the
+  installment is inside the tolerance. The tolerance is the penalty
+  tolerance or the arrears tolerance, whichever is longer (Mambu's worked
+  examples). The accrued amount shows on the loan as `penalty_unapplied`
+  and is not posted.
+- **Applied after the tolerance.** The first charge covers every late day
+  since the due date, and each later charge the days since the one before
+  (`period_from`, `days_charged`). A day the end of day missed is covered
+  by the next run.
+- **Non-working days.** Where the product excludes them
+  (`arrearsNonWorkingDays` EXCLUDE), weekends and holidays count neither
+  towards the tolerance nor towards the penalty.
+- **Locked loans.** A loan locked by hand, or for days in arrears, keeps
+  accruing and is charged the whole of it at the first run after it is
+  unlocked. A loan locked by the charge cap forfeits the days it is locked:
+  a charge of nothing marks them covered.
+- **Changing the rate.** `POST /api/loans/:id/penalty-rate` (Mambu's Edit
+  Penalty Rate) changes a running loan's rate within the product band.
+  Every change is kept (`GET /api/loans/:id/penalty-rate-changes`).
+  Charges already applied stand; what accrues from then on uses the new
+  rate.
+- **Backdated repayments and reversals.** A repayment dated before
+  penalties already charged takes back the unpaid charges after its date,
+  works them out again to its date on what was owed then, and after the
+  payment charges the days since on what is still owed. Reversing a
+  repayment takes back the unpaid charges after its date, and the days are
+  charged again on what is owed once more. A taken-back charge is marked
+  reversed, not waived, and keeps its GL reversal. A charge already paid
+  stays.
 
 Rerunning the accrual charges nothing extra. A unique index on
 `(installment_id, charged_on)` combined with `ON CONFLICT DO NOTHING` makes

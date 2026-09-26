@@ -177,6 +177,8 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     `UPDATE loan_accounts SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length} RETURNING *`, vals);
 
   if (['CLOSED_REJECTED', 'CLOSED_WITHDRAWN'].includes(to)) await eligibility.releaseGuarantors(c, l.id);
+  if (name === 'APPROVE') await freezeSettings(c, l.id);
+  if (name === 'UNDO_APPROVE') await thawSettings(c, l.id);
   await history(c, l.id, { from: l.status, to, action: name, actor: createdBy, note });
   await c.query(
     `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
@@ -184,6 +186,73 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     [createdBy || 'SYSTEM', `LOAN_${name}`, l.id,
       JSON.stringify({ status: l.status }), JSON.stringify({ status: to, note })]);
   return rows[0];
+}
+
+// --------------------------------------------------------------------------
+// Settings frozen at approval
+// --------------------------------------------------------------------------
+
+// The overrides a loan leaves to its product (INHERIT) that approval fixes.
+const FROZEN_OVERRIDES = ['penaltyRate', 'arrearsToleranceDays', 'arrearsTolerancePercent'];
+
+/**
+ * At approval the loan keeps the product's penalty and arrears settings as
+ * they stand (Mambu: a change to the product reaches only pending
+ * accounts). The penalty rate and arrears tolerances the loan left to the
+ * product are written onto it; the penalty method and tolerance and the
+ * arrears floor and counting rules go into settings_snapshot, which
+ * ledger.lock lays over the product's. Undoing the approval undoes this.
+ */
+async function freezeSettings(c, loanId) {
+  const l = await ledger.lock(c, loanId);
+  if (l.settings_snapshot) return l.settings_snapshot;
+  const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1', [l.product_id]);
+  const snap = Object.fromEntries(ledger.SNAPSHOT_SETTINGS.map((k) => [k, p[k] ?? null]));
+  const filled = [];
+  for (const key of FROZEN_OVERRIDES) {
+    const o = ledger.OVERRIDES[key];
+    if (l[o.column] === null || l[o.column] === undefined) {
+      if (p[o.column] !== null && p[o.column] !== undefined) {
+        await c.query(`UPDATE loan_accounts SET ${o.column} = $1 WHERE id = $2`, [p[o.column], l.id]);
+        filled.push(o.column);
+      }
+    }
+  }
+  snap._filled = filled;
+  await c.query('UPDATE loan_accounts SET settings_snapshot = $1 WHERE id = $2', [JSON.stringify(snap), l.id]);
+  return snap;
+}
+
+async function thawSettings(c, loanId) {
+  const { rows: [l] } = await c.query('SELECT id, settings_snapshot FROM loan_accounts WHERE id = $1', [loanId]);
+  const snap = l?.settings_snapshot;
+  if (!snap) return;
+  for (const col of snap._filled || []) {
+    if (FROZEN_OVERRIDES.some((k) => ledger.OVERRIDES[k].column === col)) await c.query(`UPDATE loan_accounts SET ${col} = NULL WHERE id = $1`, [l.id]);
+  }
+  await c.query('UPDATE loan_accounts SET settings_snapshot = NULL WHERE id = $1', [l.id]);
+}
+
+/**
+ * Mambu's two counters: days late from the oldest installment still
+ * unpaid after its due date, and days in arrears from the date the loan's
+ * arrears count from, less the arrears tolerance (so a loan 87 days late
+ * with two days' tolerance is 85 days in arrears). Provisioning and the
+ * portfolio-at-risk figures stay on days past due, as SASRA classifies.
+ */
+async function arrearsIndicators(c, l, asOf = null) {
+  const date = asOf || new Date().toISOString().slice(0, 10);
+  const { rows: [o] } = await c.query(
+    `SELECT min(due_date) AS d FROM loan_installments WHERE loan_id = $1 AND status NOT IN ('PAID', 'GRACE') AND due_date < $2::date`,
+    [l.id, date]);
+  const days = (from) => Math.max(0, Math.floor((new Date(`${date}T00:00:00Z`) - new Date(`${ymd(from)}T00:00:00Z`)) / 86400000));
+  const daysLate = o?.d ? days(o.d) : 0;
+  let inArrears = 0;
+  if (l.arrears_since && ['IN_ARREARS', 'LOCKED'].includes(l.status)) {
+    const tol = Number(ledger.effective(l).arrearsToleranceDays || 0);
+    inArrears = days(await toleranceDeadline(c, l.arrears_since, tol, l.arrears_non_working_days === 'EXCLUDE'));
+  }
+  return { daysLate, daysInArrears: inArrears, asOf: date };
 }
 
 // --------------------------------------------------------------------------
@@ -300,7 +369,9 @@ async function markArrears(c, { asOf = null } = {}) {
     `SELECT i.*, l.account_no, l.status AS loan_status, l.arrears_since, l.principal_disbursed, l.principal_capitalized, l.principal_paid,
             ${ledger.overrideSql('arrearsToleranceDays')} AS tol_days,
             ${ledger.overrideSql('arrearsTolerancePercent')} AS tol_pct,
-            p.arrears_tolerance_floor AS tol_floor, p.arrears_non_working_days, p.arrears_count_from
+            ${ledger.settingSql('arrears_tolerance_floor')} AS tol_floor,
+            ${ledger.settingSql('arrears_non_working_days')} AS arrears_non_working_days,
+            ${ledger.settingSql('arrears_count_from')} AS arrears_count_from
      FROM loan_installments i
      JOIN loan_accounts l ON l.id = i.loan_id
      JOIN loan_products p ON p.id = l.product_id
@@ -432,6 +503,6 @@ module.exports = {
   ACTIONS, ALIASES, OPEN, RUNNING, transition, history, historyOf, previousState,
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMayWriteOff,
   amend, TERM_FIELDS, NARRATIVE_FIELDS,
-  markArrears, refreshArrears, daysInArrears, toleranceDeadline,
+  markArrears, refreshArrears, daysInArrears, toleranceDeadline, freezeSettings, thawSettings, arrearsIndicators,
   capLimit, capAllows, enforceControls,
 };
