@@ -247,28 +247,43 @@ const hooks = [];
     const tpl = await call('GET', '/api/data-imports/template', null, { raw: true });
     const tbook = XLSX.read(tpl.buffer);
     check('the template downloads as a workbook', tpl.status === 200 && tpl.headers.get('content-type').includes('spreadsheetml'));
-    check('with a sheet per kind of record, in order',
-      ['Instructions', 'Settings', 'GL Accounts', 'Branches', 'Centres', 'Members', 'Deposit Accounts', 'Share Accounts', 'Loan Accounts', 'Loan Schedule', 'GL Balances', 'Reference']
-        .every((n, i) => tbook[i]?.name === n), tbook.map((s) => s.name).join(','));
-    check('required columns are marked', tbook.find((s) => s.name === 'Members').rows[0][0] === 'Member number*');
-    const refs = tbook.find((s) => s.name === 'Reference').rows;
-    check('and the IDs already in the system are listed to copy from', refs.some((r) => r[0] === 'Loan product' && r[1] === 'IMP') && refs.some((r) => r[0] === 'GL account' && r[1] === '100-100'));
+    const names = tbook.map((x) => x.name);
+    check('with a sheet to fill in per kind of record, in order',
+      ['Instructions', 'Settings', 'GL Accounts', 'Chart of Accounts', 'Branches', 'Centres', 'Members', 'Deposit Accounts', 'Share Accounts',
+        'Loan Accounts', 'Loan Schedule', 'Loan Transactions', 'GL Balances'].every((n, i) => names[i] === n), names.join(','));
+    check('and a reference sheet per kind of record already in the system (the reference platform)',
+      ['Branches Data', 'Centres Data', 'Credit Officers', 'Loan Products', 'Deposit Products', 'Share Products', 'GL Accounts Data', 'ID Templates'].every((n) => names.includes(n)));
+    const sheetXml = (n) => unzip(tpl.buffer).get(`xl/worksheets/sheet${names.indexOf(n) + 1}.xml`).toString();
+    check('sheets to fill in have green headings, reference sheets grey', /<c r="A1" s="4"/.test(sheetXml('Members')) && /<c r="A1" s="5"/.test(sheetXml('Loan Products')));
+    const mhead = tbook.find((x) => x.name === 'Members').rows[0];
+    check('required columns are marked', mhead[0] === 'Member number*');
+    check('every custom field defined for members has its column already', mhead.includes('Custom: _extra.nickname (Nickname)'), mhead.slice(-3).join(' | '));
+    check('with the reference platform\'s client fields: ID document, credit officer, loan cycle',
+      ['ID type', 'ID number', 'ID authority', 'ID valid until', 'Credit officer', 'Prior loan cycles'].every((h) => mhead.includes(h)));
+    const lp = tbook.find((x) => x.name === 'Loan Products').rows;
+    check('the IDs already in the system are listed to copy from', lp.some((r) => r[0] === 'IMP') && tbook.find((x) => x.name === 'GL Accounts Data').rows.some((r) => r[0] === '100-100'));
+    check('credit officers are the SACCO\'s users', tbook.find((x) => x.name === 'Credit Officers').rows.some((r) => r[0] === 'admin@datamgmt.local'));
+    const intro = tbook[0].rows;
+    check('the instructions say what must be set up first, and what is in place', intro.some((r) => r[0] === 'Loan products' && r[1] === 'yes')
+      && intro.some((r) => r[0] === 'Users (credit officers)'));
+    const pre = await call('GET', '/api/data-imports/prerequisites');
+    check('so does the API', pre.status === 200 && pre.body.some((x) => x.item === 'Branches'));
 
     section('Excel data import: a workbook with mistakes');
     const membersBefore = (await q1('SELECT count(*)::int AS n FROM members')).n;
     const bad = XLSX.write([
       sheet('Settings', [['Setting', 'Value'], ['Migration date', '2026-06-30']]),
       sheet('Members', [['Member number*', 'First name*', 'Last name*', 'Date of birth', 'Gender'],
-        ['BX1', 'Ann', 'One', '31/12/1990', 'F'], ['BX1', 'Ann', null, null, null]]),
+        ['BX1', 'Ann', 'One', '31/12/1990', 'X'], ['BX1', 'Ann', null, null, null]]),
       sheet('Loan Accounts', [['Account number*', 'Member number*', 'Product ID*', 'Principal*', 'Installments*', 'Disbursed on*', 'Principal outstanding*'],
         ['LB1', 'BX1', 'IMP', 1000, 12, '2026-07-15', 1500]]),
       sheet('GL Balances', [['GL code*', 'Debit', 'Credit'], ['100-100', 100, null], ['200-100', null, 90]]),
     ]);
-    const up1 = await call('POST', '/api/data-imports', null, { binary: bad, headers: { 'x-file-name': 'bad.xlsx' } });
+    const up1 = await call('POST', '/api/data-imports?wait=true', null, { binary: bad, headers: { 'x-file-name': 'bad.xlsx' } });
     const msgs = (up1.body?.errors || []).map((e) => `${e.sheet}:${e.row}:${e.message}`);
     check('it is INVALID', up1.status === 201 && up1.body.status === 'INVALID', up1.text.slice(0, 300));
     check('a date in the wrong form is found, by sheet, row and column', up1.body.errors.some((e) => e.sheet === 'Members' && e.row === 2 && e.column === 'Date of birth' && /yyyy-MM-dd/.test(e.message)), msgs.join(' | '));
-    check('a value not in the list', msgs.some((m) => /Gender must be one of/.test(m)));
+    check('a value not in the list', msgs.some((m) => /Gender must be M, F or O/.test(m)), msgs.join(' | '));
     check('a required value left out', msgs.some((m) => /Members:3:Last name is required/.test(m)));
     check('a number used twice', msgs.some((m) => /Member number BX1 is also on row 2/.test(m)));
     check('a date after the migration date', msgs.some((m) => /Disbursed on 2026-07-15 is after the migration date/.test(m)));
@@ -277,7 +292,8 @@ const hooks = [];
     check('nothing was created', (await q1('SELECT count(*)::int AS n FROM members')).n === membersBefore);
     const ef = await call('GET', `/api/data-imports/${up1.body.id}/errors`, null, { raw: true });
     const ebook = XLSX.read(ef.buffer);
-    check('the workbook comes back with the errors: a list first', ef.status === 200 && ebook[0].name === 'Errors' && ebook[0].rows.length === up1.body.errors.length + 1);
+    const eList = ebook[ebook.length - 1];
+    check('the workbook comes back with the errors: a list last, as in the reference platform', ef.status === 200 && eList.name === 'Errors' && eList.rows.length === up1.body.errors.length + 1);
     const em = ebook.find((s) => s.name === 'Members');
     check('and an Errors column on each sheet, against the row', em.rows[0].includes('Errors') && /yyyy-MM-dd/.test(em.rows[1][em.rows[0].indexOf('Errors')]));
     check('an invalid import cannot be approved', (await call('POST', `/api/data-imports/${up1.body.id}/approve`)).status === 409);
@@ -291,7 +307,7 @@ const hooks = [];
         ['LDB1', 'DB2', 'IMP', 1000, 99, '2026-01-15', 500]]),
       sheet('GL Balances', [['GL code*', 'Debit', 'Credit'], ['H-9', 10, null], ['200-100', null, 10]]),
     ]);
-    const up2 = await call('POST', '/api/data-imports', null, { binary: dbBad });
+    const up2 = await call('POST', '/api/data-imports?wait=true', null, { binary: dbBad });
     const m2 = (up2.body?.errors || []).map((e) => `${e.sheet}:${e.row}:${e.message}`);
     check('what only the database can refuse is found at upload, row by row', up2.body.status === 'INVALID' && m2.length >= 4, m2.join(' | '));
     check('an unknown branch', m2.some((m) => /^Members:2:.*BRANCH/i.test(m)), m2.join(' | '));
@@ -303,17 +319,17 @@ const hooks = [];
       && (await q1("SELECT count(*)::int AS n FROM gl_accounts WHERE code = 'H-9'")).n === 0);
 
     section('Excel data import: review and approve');
-    const up3 = await call('POST', '/api/data-imports', null, { binary: goodWorkbook(), headers: { 'x-file-name': 'migration.xlsx' } });
+    const up3 = await call('POST', '/api/data-imports?wait=true', null, { binary: goodWorkbook(), headers: { 'x-file-name': 'migration.xlsx' } });
     check('a clean workbook is PENDING_APPROVAL', up3.status === 201 && up3.body.status === 'PENDING_APPROVAL', JSON.stringify(up3.body?.errors?.slice(0, 5)));
     const sorted = (o) => JSON.stringify(Object.fromEntries(Object.entries(o || {}).sort()));
     check('the review shows what it will create',
-      sorted(up3.body.summary.creates) === sorted({ glAccounts: 2, branches: 1, centres: 1, members: 2, deposits: 2, shares: 1, loans: 2, installments: 13, openingEntryLines: 7 }),
+      sorted(up3.body.summary.creates) === sorted({ glAccounts: 2, branches: 1, centres: 1, members: 2, deposits: 2, shares: 1, loans: 2, installments: 13, transactions: 0, openingEntryLines: 7 }),
       JSON.stringify(up3.body.summary.creates));
     check('the subledgers match the trial balance, so there are no warnings', up3.body.warnings.length === 0, JSON.stringify(up3.body.warnings));
     check('before approval nothing is in the live tables', (await q1("SELECT count(*)::int AS n FROM members WHERE member_no LIKE 'IM00%'")).n === 0
       && (await q1("SELECT count(*)::int AS n FROM loan_accounts WHERE account_no LIKE 'LNIMP%'")).n === 0);
     check('an auditor may look at it', (await call('GET', `/api/data-imports/${up3.body.id}`, null, { auth: signToken({ sub: admin.id, email: 'a@x', role: 'AUDITOR', tid: SLUG }) })).status === 200);
-    check('a teller may not upload', (await call('POST', '/api/data-imports', null, { binary: goodWorkbook(), auth: teller })).status === 403);
+    check('a teller may not upload', (await call('POST', '/api/data-imports?wait=true', null, { binary: goodWorkbook(), auth: teller })).status === 403);
     await T((c) => c.query('UPDATE lending_controls SET two_man_rule = true'));
     const four = await call('POST', `/api/data-imports/${up3.body.id}/approve`);
     check('under the four-eyes rule the uploader may not approve it', four.status === 409 && /FOUR_EYES/.test(four.reason), four.text);
@@ -337,7 +353,7 @@ const hooks = [];
     const sa = await q1("SELECT * FROM savings_accounts WHERE account_no = 'SAIMP1'");
     check('a deposit account opens with its balance', sa.balance === 5000 && sa.opened_on === '2019-02-01' && sa.accrued_through === '2026-06-30');
     const satx = await q1("SELECT * FROM transactions WHERE savings_account_id = $1", [sa.id]);
-    check('the balance is the first line of its history, with no journal entry', satx.kind === 'MIGRATION_OPENING_BALANCE' && satx.amount === 5000 && satx.entry_id === null && satx.value_date === '2026-06-30');
+    check('the balance is the first line of its history, dated when the account opened (the reference platform), with no journal entry', satx.kind === 'MIGRATION_OPENING_BALANCE' && satx.amount === 5000 && satx.entry_id === null && satx.value_date === '2019-02-01');
     const sh = await q1("SELECT * FROM share_accounts WHERE account_no = 'SHIMP1'");
     check('a share account opens with its units', sh.units === 10 && (await q1("SELECT kind FROM share_movements WHERE account_id = $1", [sh.id])).kind === 'MIGRATION');
 
@@ -386,16 +402,16 @@ const hooks = [];
     check('the portfolio in the ledger is the imported loans', portfolio.b === 10500, String(portfolio.b));
 
     section('Excel data import: warnings, rejection, and approval that fails');
-    const up4 = await call('POST', '/api/data-imports', null, { binary: goodWorkbook({ suffix: '9', portfolio: 10000 }) });
+    const up4 = await call('POST', '/api/data-imports?wait=true', null, { binary: goodWorkbook({ suffix: '9', portfolio: 10000 }) });
     check('a subledger that does not match its GL account is a warning for the reviewer, not an error',
-      up4.body.status === 'PENDING_APPROVAL' && up4.body.warnings.some((w) => /Loan principal outstanding add up to 10500 on GL account 100-100; the GL Balances sheet has 10000/.test(w.message)),
+      up4.body.status === 'PENDING_APPROVAL' && up4.body.warnings.some((w) => /Loan principal outstanding add up to 10500 on GL account 100-100; the opening balances have 10000/.test(w.message)),
       JSON.stringify(up4.body.warnings));
     const rj = await call('POST', `/api/data-imports/${up4.body.id}/reject`, { note: 'portfolio does not reconcile' });
     check('the reviewer rejects it', rj.status === 200 && rj.body.status === 'REJECTED' && rj.body.decision_note === 'portfolio does not reconcile');
     check('a rejected import cannot then be approved', (await call('POST', `/api/data-imports/${up4.body.id}/approve`)).status === 409);
     check('and left nothing behind', (await q1("SELECT count(*)::int AS n FROM members WHERE member_no LIKE 'IM00%9'")).n === 0);
 
-    const up5 = await call('POST', '/api/data-imports', null, { binary: goodWorkbook({ suffix: '7' }) });
+    const up5 = await call('POST', '/api/data-imports?wait=true', null, { binary: goodWorkbook({ suffix: '7' }) });
     check('another clean import waits for approval', up5.body.status === 'PENDING_APPROVAL', JSON.stringify(up5.body.errors?.slice(0, 3)));
     await call('POST', '/api/members', { memberNo: 'IM0027', firstName: 'Taken', lastName: 'Since' });
     const ap5 = await call('POST', `/api/data-imports/${up5.body.id}/approve`);
@@ -406,12 +422,12 @@ const hooks = [];
     check('and nothing of it was created', (await q1("SELECT count(*)::int AS n FROM branches WHERE code = 'WEST7'")).n === 0
       && (await q1("SELECT count(*)::int AS n FROM members WHERE member_no = 'IM0017'")).n === 0);
     const big = Buffer.alloc(6 * 1024 * 1024, 1);
-    check('a file over 5 MB is refused', (await call('POST', '/api/data-imports', null, { binary: big })).status === 413);
-    const notX = await call('POST', '/api/data-imports', null, { binary: Buffer.from('name,phone\nann,1\n'), headers: { 'content-type': 'text/csv' } });
-    check('a file that is not a workbook is INVALID with a reason', notX.body.status === 'INVALID' && /not an .xlsx file/i.test(notX.body.errors[0].message), notX.text);
+    check('a file over 5 MB is refused', (await call('POST', '/api/data-imports?wait=true', null, { binary: big })).status === 413);
+    const notX = await call('POST', '/api/data-imports?wait=true', null, { binary: Buffer.from('name,phone\nann,1\n'), headers: { 'content-type': 'text/csv' } });
+    check('a file that is not a workbook is ERROR with a reason', notX.body.status === 'ERROR' && /not an .xlsx file/i.test(notX.body.errors[0].message), notX.text);
     const bomb = zip([{ name: 'xl/workbook.xml', data: Buffer.alloc(60 * 1024 * 1024, 32) }]);
-    const up6 = await call('POST', '/api/data-imports', null, { binary: bomb });
-    check('a small file that inflates to a huge one is refused', up6.body.status === 'INVALID', `${bomb.length} ${up6.text.slice(0, 200)}`);
+    const up6 = await call('POST', '/api/data-imports?wait=true', null, { binary: bomb });
+    check('a small file that inflates to a huge one is refused', up6.body.status === 'ERROR', `${bomb.length} ${up6.text.slice(0, 200)}`);
     const listed = await call('GET', '/api/data-imports');
     check('imports are listed, newest first', listed.body.length >= 5 && listed.body[0].created_at >= listed.body[1].created_at);
     const orig = await call('GET', `/api/data-imports/${up3.body.id}/file`, null, { raw: true });

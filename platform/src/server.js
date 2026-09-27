@@ -147,6 +147,7 @@ tenantApi.use('/data-dictionary', data.dictionary);
 tenantApi.use('/extract', data.extract);
 tenantApi.use('/database', data.database);
 tenantApi.use('/data-imports', data.imports);
+tenantApi.use('/data', data.importApi);
 
 const shares = require('./routes/shares');
 tenantApi.use('/shares', shares);

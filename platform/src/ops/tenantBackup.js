@@ -8,7 +8,8 @@ const https = require('https');
 const { pool } = require('../db/pool');
 const { withTenant, assertSchemaName } = require('../db/tenantContext');
 const DD = require('../domain/dataDictionary');
-const { zip } = require('../lib/zip');
+const { zip, unzip } = require('../lib/zip');
+const CSV = require('../lib/csv');
 
 /**
  * The tenant's own database backup (the reference platform's Database Backup API): a tenant
@@ -225,6 +226,7 @@ async function exportTables(tenant, { tables, from }) {
   const files = [];
   const counts = {};
   const omitted = {};
+  const columnsOf = {};
   let dict;
   let snapshotAt;
   try {
@@ -263,6 +265,7 @@ async function exportTables(tenant, { tables, from }) {
       }
       await client.query('CLOSE backup_cursor');
       counts[t.name] = n;
+      columnsOf[t.name] = names;
       files.push({ name: `${t.name}.csv`, data: Buffer.from(chunks.join(''), 'utf8') });
     }
     await client.query('COMMIT');
@@ -282,10 +285,78 @@ async function exportTables(tenant, { tables, from }) {
     omittedColumns: omitted,
     format: 'CSV, UTF-8, comma separated, header row, CRLF line ends; values in PostgreSQL text form, timestamps in UTC; empty field is NULL.',
   };
-  files.push({ name: 'schema.sql', data: DD.schemaSql(dict, Object.keys(counts)) });
+  files.push({ name: 'schema.sql', data: DD.schemaSql(dict, Object.keys(counts), { withoutBinary: true }) });
+  files.push({ name: 'restore.sql', data: restoreSql(tenant, columnsOf) });
   files.push({ name: 'dictionary.json', data: JSON.stringify({ ...dict, tables: dict.tables.filter((t) => counts[t.name] !== undefined) }, null, 2) });
   files.push({ name: 'manifest.json', data: JSON.stringify(manifest, null, 2) });
   return { files, counts, snapshotAt };
+}
+
+// --- loading a backup back (the reference platform: Import Database clone) ------------------
+
+const ident = (x) => `"${String(x).replace(/"/g, '""')}"`;
+
+/**
+ * restore.sql, in the ZIP: loads the backup into a PostgreSQL database with
+ * psql, from the folder it was unzipped into:
+ *   psql -d mydb -v schema=citysacco_copy -f restore.sql
+ * The schema is created if missing (default tenant_backup); the tables come
+ * from schema.sql and the rows from the CSVs, in one transaction.
+ */
+function restoreSql(tenant, columnsOf) {
+  const out = [
+    `-- Load the ${tenant.slug} backup into PostgreSQL. Unzip it, change into the folder, and run:`,
+    '--   psql -d yourdb -v schema=your_schema -f restore.sql',
+    '\\set ON_ERROR_STOP on',
+    '\\if :{?schema}',
+    '\\else',
+    '\\set schema tenant_backup',
+    '\\endif',
+    'BEGIN;',
+    'CREATE SCHEMA IF NOT EXISTS :"schema";',
+    'SET LOCAL search_path TO :"schema";',
+    '\\i schema.sql',
+  ];
+  for (const [t, cols] of Object.entries(columnsOf)) {
+    out.push(`\\copy ${ident(t)} (${cols.map(ident).join(', ')}) FROM '${t}.csv' WITH (FORMAT csv, HEADER true)`);
+  }
+  out.push('COMMIT;');
+  return `${out.join('\n')}\n`;
+}
+
+/**
+ * Load a backup ZIP into a schema of a database (cli backup:load): the
+ * tables from schema.sql, then each CSV's rows, in one transaction. For
+ * analysis or a check that a backup restores; the migrations remain the
+ * way a tenant's live schema is made.
+ */
+async function load(zipBuffer, { schema, client }) {
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(String(schema))) throw err('SCHEMA_NAME_IS_LOWERCASE_LETTERS_DIGITS_AND_UNDERSCORES');
+  const files = unzip(zipBuffer, { maxTotal: 2 * 1024 * 1024 * 1024, maxEntries: 1000 });
+  const manifest = JSON.parse(files.get('manifest.json').toString('utf8'));
+  const counts = {};
+  await client.query('BEGIN');
+  try {
+    await client.query(`CREATE SCHEMA IF NOT EXISTS ${ident(schema)}`);
+    await client.query(`SET LOCAL search_path TO ${ident(schema)}`);
+    await client.query(files.get('schema.sql').toString('utf8'));
+    for (const t of Object.keys(manifest.tables)) {
+      const rows = CSV.parse(files.get(`${t}.csv`).toString('utf8'));
+      const [header, ...body] = rows;
+      for (let i = 0; i < body.length; i += 500) {
+        const batch = body.slice(i, i + 500);
+        const params = [];
+        const values = batch.map((r) => `(${header.map((_, k) => { params.push(r[k]); return `$${params.length}`; }).join(',')})`);
+        await client.query(`INSERT INTO ${ident(t)} (${header.map(ident).join(',')}) VALUES ${values.join(',')}`, params);
+      }
+      counts[t] = body.length;
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  }
+  return { schema, tables: counts };
 }
 
 async function run(tenant, row) {
@@ -326,4 +397,4 @@ async function run(tenant, row) {
   return outcome;
 }
 
-module.exports = { request, list, get, file, waitFor, expire, checkCallbackUrl, isPrivateAddress, EXCLUDED_TABLES };
+module.exports = { request, list, get, file, waitFor, expire, checkCallbackUrl, isPrivateAddress, load, restoreSql, EXCLUDED_TABLES };

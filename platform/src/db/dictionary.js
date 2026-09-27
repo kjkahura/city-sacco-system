@@ -96,6 +96,7 @@ const TABLES = {
   // Added by later migrations.
   data_imports: 'Spreadsheet imports: the file, its validation, and whether it was approved or rejected.',
   database_backups: 'Database backups taken on request for download.',
+  api_idempotency: 'Idempotency keys: the first response to a request, returned again when the same key is sent.',
 };
 
 const ABBR = { inc: 'income', rec: 'receivable', exp: 'expense', od: 'overdraft', neg: 'negative', ns: 'non-scheduled', gl: 'GL' };
@@ -761,7 +762,7 @@ const COLUMNS = {
   'data_imports.file_name': 'The uploaded file name.',
   'data_imports.file_size': 'Size in bytes.',
   'data_imports.sha256': 'SHA-256 of the file.',
-  'data_imports.status': 'INVALID (failed validation), PENDING_APPROVAL, APPROVED, REJECTED or FAILED (approval could not complete).',
+  'data_imports.status': 'QUEUED, IN_PROGRESS, ERROR (the file could not be processed), INVALID (failed validation), PENDING_APPROVAL (the reference platform: Draft), APPROVED, REJECTED (the reference platform: Reverted) or FAILED (approval could not complete).',
   'data_imports.as_of': 'The migration date: balances are as at the end of this day, and the opening entry is dated on it.',
   'data_imports.summary': 'Rows per sheet, and what the import creates or created, by kind.',
   'data_imports.errors': 'Validation errors: sheet, row, column, message.',
@@ -773,6 +774,21 @@ const COLUMNS = {
   'data_imports.decided_by': 'Who approved or rejected it.',
   'data_imports.decided_at': 'When it was approved or rejected.',
   'data_imports.decision_note': 'The reason given with the decision.',
+  'data_imports.progress': 'How far the validation run has got, 0 to 100.',
+  'data_imports.progress_at': 'When progress last moved; a run that stops moving is marked ERROR.',
+  'data_imports.started_at': 'When the validation run started.',
+  'data_imports.finished_at': 'When the validation run finished.',
+  'data_imports.preview': 'What approval would create, record by record, captured during the validation run.',
+  'api_idempotency.key': 'The Idempotency-Key the client sent (primary key).',
+  'api_idempotency.route': 'The request the key was used on.',
+  'api_idempotency.request_hash': 'SHA-256 of the request, so a key reused for a different request is refused.',
+  'api_idempotency.status': 'The HTTP status of the first response.',
+  'api_idempotency.response': 'The first response, returned again for a repeat.',
+  'savings_accounts.applied_on': 'When the account was applied for (imported accounts; others open on application).',
+  'savings_accounts.overdraft_rate': 'The account\'s own overdraft interest rate, a year; NULL: the product\'s.',
+  'gl_accounts.notes': 'Free-text notes.',
+  'loan_accounts.migration_fields': 'The migration fields the loan was created with (the reference platform external migration), as given.',
+  'penalty_charges.imported': 'Brought across from the system the loan came from, not worked out here.',
   'database_backups.status': 'IN_PROGRESS, COMPLETE, FAILED or EXPIRED (file removed after 30 days).',
   'database_backups.tables': 'Tables asked for; NULL for all.',
   'database_backups.from_date': 'Only rows created or changed from this moment, for tables that record either.',

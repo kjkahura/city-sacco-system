@@ -13,6 +13,9 @@ const CL = require('../src/domain/close');
 const RT = require('../src/domain/returns');
 const acct = require('../src/domain/accounting');
 const DD = require('../src/domain/dataDictionary');
+const TB = require('../src/ops/tenantBackup');
+const fs = require('fs');
+const { Client } = require('pg');
 
 const [, , cmd, ...args] = process.argv;
 
@@ -36,6 +39,24 @@ const COMMANDS = {
     const out = await inTenant((c) => DD.applyComments(c));
     console.log(`${out.comments} comments on ${out.tables} tables` + (out.missing.length ? `; undescribed: ${out.missing.join(', ')}` : ''));
     if (out.missing.length) process.exitCode = 1;
+  },
+
+  // Load a tenant backup ZIP into a schema (the reference platform's Import Database clone):
+  //   cli backup:load --file backup.zip --schema citysacco_copy [--database postgres://...]
+  async 'backup:load'() {
+    const file = arg('file');
+    const schema = arg('schema');
+    if (!file || !schema) throw new Error('--file and --schema are required');
+    const target = arg('database');
+    const client = target ? new Client({ connectionString: target }) : await pool.connect();
+    if (target) await client.connect();
+    try {
+      const out = await TB.load(fs.readFileSync(file), { schema, client });
+      const rows = Object.values(out.tables).reduce((a, b) => a + b, 0);
+      console.log(`loaded ${Object.keys(out.tables).length} tables, ${rows} rows into schema ${schema}`);
+    } finally {
+      if (target) await client.end(); else client.release();
+    }
   },
 
   // The data dictionary as CSV on stdout (--format json for JSON).

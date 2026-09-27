@@ -31,6 +31,9 @@ const ATT = require('../domain/attachments');
 const ELIG = require('../domain/eligibility');
 const HIST = require('../domain/loanHistory');
 const CF = require('../domain/customFields');
+const LM = require('../domain/loanMigration');
+const ORG = require('../domain/organization');
+const B = require('../domain/branches');
 
 const router = express.Router();
 
@@ -123,6 +126,38 @@ router.post('/collections/batches', ...tx(async (c, req, res, { actor, user }) =
 }, TELLER));
 
 // --- list and read --------------------------------------------------------
+
+// The reference platform's external migration (POST /loans/migrate): a loan brought across
+// from another system with its balances (migrationFields), optionally its
+// schedule and its transactions, built as the Excel import builds loans
+// (../domain/loanMigration). No journal entries; the opening balances are
+// posted by an import's GL Balances or Chart of Accounts sheet.
+router.post('/migrate', ...tx(async (c, req, res, { actor, user }) => {
+  const body = req.body || {};
+  const asOf = body.migrationDate ? String(body.migrationDate).slice(0, 10)
+    : ORG.localClock(req.tenant.timezone || 'Africa/Nairobi').date;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf) || asOf > ORG.localClock(req.tenant.timezone || 'Africa/Nairobi').date) {
+    throw Object.assign(new Error('MIGRATION_DATE_CANNOT_BE_IN_THE_FUTURE'), { status: 400 });
+  }
+  const spec = LM.fromApiBody(body, { asOf });
+  if (!spec.accountNo || !spec.member || !spec.productId) throw Object.assign(new Error('LOAN_ID_ACCOUNT_HOLDER_AND_PRODUCT_REQUIRED'), { status: 400 });
+  if (!(spec.principal > 0) && !spec.transactions.length) throw Object.assign(new Error('LOAN_AMOUNT_REQUIRED'), { status: 400 });
+  if (!(spec.installments > 0)) throw Object.assign(new Error('REPAYMENT_INSTALLMENTS_REQUIRED'), { status: 400 });
+  const { rows: [m] } = await c.query('SELECT id FROM members WHERE id::text = $1 OR member_no = $1', [String(spec.member)]);
+  if (!m) throw Object.assign(new Error(`MEMBER_NOT_FOUND: ${spec.member}`), { status: 404 });
+  spec.memberId = m.id;
+  if (spec.branchId) spec.branchId = (await B.resolve(c, spec.branchId)).id;
+  else delete spec.branchId;
+  let out;
+  try {
+    out = await LM.migrate(c, spec, { asOf, createdBy: actor, user });
+  } catch (e) {
+    if (e.code === '23505') throw Object.assign(new Error(`LOAN_ACCOUNT_ID_ALREADY_IN_USE: ${spec.accountNo}`), { status: 409 });
+    throw e;
+  }
+  res.status(201);
+  return { ...out.loan, migrationDate: asOf, installments: out.installments, warnings: out.warnings };
+}, ['TENANT_ADMIN']));
 
 router.get('/', requireAuth(), async (req, res, next) => {
   try {

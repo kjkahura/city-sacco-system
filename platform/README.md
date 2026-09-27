@@ -1770,121 +1770,146 @@ RECORD and STATE messages; the state holds the extract cursor per stream,
 so each run carries on where the last one stopped. `target-stitch` is
 Stitch's own Python package and is not part of this repository.
 
-### Excel data import
+### Data importing
 
-After the reference platform's Data Importing: a SACCO moving onto the platform fills in one
-workbook, uploads it, and someone reviews and approves it.
+After the reference platform's Data Importing pages: the Excel import with its review,
+The reference platform's data import API, the external loan migration API, and loading a
+backup back into a database.
 
-- `GET /api/data-imports/template` downloads the workbook: Instructions,
-  Settings (the migration date), GL Accounts, Branches, Centres, Members,
-  Deposit Accounts, Share Accounts, Loan Accounts, Loan Schedule, GL
-  Balances, and a Reference sheet listing the products, branches, centres
-  and GL accounts already in the system. Required columns are marked `*`.
-  Members, Branches, Centres, Deposit Accounts and Loan Accounts take
-  custom field columns headed `Custom: _setId.fieldId`.
-- `POST /api/data-imports` (tenant admin or manager) takes the workbook as
-  the request body, up to 5 MB. Every cell is checked (required values,
-  dates, amounts, lists, numbers used twice, dates after the migration
-  date, a schedule that does not add up to its loan, a trial balance that
-  does not balance). Then the whole import is run inside a savepoint and
-  rolled back, so whatever only the database can refuse (a product band,
-  an account number in use, a closed accounting period, a header account in
-  the trial balance) is found now, row by row; a row that depends on one
-  that failed says which. An import with errors is `INVALID`, and
-  `GET /api/data-imports/:id/errors` returns the workbook with an Errors
-  sheet and an Errors column on each sheet. One without is
-  `PENDING_APPROVAL`, with what it will create and any warnings.
-- Nothing reaches the live tables before approval, so nothing waits to be
-  left out of the end of day, and a rejected import leaves no trace but its
-  record. `POST /:id/approve` (tenant admin) runs the import again and
-  commits it all or none of it; under the four-eyes rule
-  (`two_man_rule`) the uploader may not approve it. If something changed
-  since the upload, nothing is created, the import is `FAILED`, and the
-  response lists why. `POST /:id/reject` rejects it with a note.
-- Balances are as at the end of the migration date. A deposit account
-  opens with its balance (recorded as `MIGRATION_OPENING_BALANCE`, no
-  journal entry), a share account with its units, and a loan active with
-  what it still owes. Its schedule is the Loan Schedule sheet's, or the
-  product's from the disbursement date with the principal repaid applied
-  to the oldest installments first. Arrears are marked on the product's
-  rules as at the migration date; interest accrues from it.
-- An installment already late at the migration date is exempt from the
-  late repayment fee, and a forfeited penalty marker covers its days before
-  the migration date, so its penalty counts from then: the old system
-  charged, or did not charge, for those days.
-- Accounts post nothing to the general ledger. The GL Balances sheet is the
-  opening trial balance, posted as one entry on the migration date
-  (`source_type` `DATA_IMPORT`). The reviewer is warned where the loans,
-  deposits or share capital imported do not add up to their GL account in
-  that sheet.
-- Not imported: revolving and tranched loans, index-rate and adjustable-
-  rate loans, and funded loans. They are opened in the system.
-- Members also gained middle name, second phone, address lines, city,
-  postcode, region, country, credit officer, notes and prior loan cycles
-  (cycles repaid in the old system, counted in the member's completed loan
-  cycles), on the members API as well as the import.
+**Before you import** (the reference platform's prerequisites): staff users to be credit
+officers, branches, loan and deposit products, and any custom fields.
+`GET /api/data-imports/prerequisites` says what is in place; the template's
+Instructions sheet lists it, and an upload that needs something missing is
+warned.
 
-## Shares and dividends
+**The template.** `GET /api/data-imports/template` downloads the workbook.
+Sheets to fill in have green headings: Settings (the migration date), GL
+Accounts, Chart of Accounts, Branches, Centres, Members, Deposit Accounts,
+Share Accounts, Loan Accounts, Loan Schedule, Loan Transactions and GL
+Balances. Reference sheets have grey headings and are not imported:
+Branches Data, Centres Data, Credit Officers (the SACCO's users), Loan,
+Deposit and Share Products, GL Accounts Data and ID Templates. Every custom
+field defined for members, branches, centres, deposit and loan accounts has
+its column already, headed `Custom: _setId.fieldId (Name)`; checkboxes take
+True or False.
 
-Shares are equity, not a deposit. Buying them credits share capital; a
-dividend is a distribution out of retained earnings, not interest expense.
-Getting that wrong is the kind of thing an auditor finds.
+**The reference platform's layout is read as well.** the reference platform's sheet names (Clients, Savings
+Accounts, Loan Schedules, Transactions) and headings (Client ID, Date Joined
+(dd.MM.yyyy), Mobile/Cellphone and Phone, Credit Officer username,
+Individual Loan Cycle, Loan Length (# Installments), Repayment Period
+(D/W/M/Y), Principal Expected, Current Balance, Overdraft Amount Due, Type
+(A/L/I/E/Q), Usage (D/H)) map to this template's columns. Dates may be
+dd.MM.yyyy or yyyy-MM-dd; gender M, F or O; meeting days M, T, W, TH, F,
+SA, SU. IDs are at most 32 characters and other text 255, as in the reference platform.
 
-The cycle is three deliberate steps, because that is how an AGM decision
-actually moves:
+**What each sheet carries.**
+
+- Members: the reference platform's client fields, including an ID document (type, number,
+  authority, valid until, checked against the ID templates), the credit
+  officer (checked against the SACCO's active users) and loan cycles
+  completed in the old system. Groups are not part of this system: a Groups
+  sheet with rows, a Group ID or a loan with client type G is refused.
+- Deposit Accounts: the balance (including interest accrued and not yet
+  applied), the dates applied and opened (the balance is recorded on the
+  opening date, as in the reference platform), notes, an overdraft limit, and for an
+  overdrawn account the overdraft amount, interest and fees due and its own
+  overdraft interest rate, which then replaces the product's.
+- Loan Accounts: any reference platform state (Active, Pending Approval, Approved,
+  Closed, Withdrawn, Rejected, Written Off), the dates applied, approved and
+  disbursed, the repayment start date, grace installments, and the
+  repayment frequency and period (which must be the product's). What was
+  paid is given as principal paid or principal outstanding, with interest,
+  fees and penalties outstanding, and optionally the principal in arrears.
+  Closed loans are history and count as completed loan cycles; they are
+  imported before running ones, so a product that allows one loan at a time
+  still takes a member's old loans.
+  Not imported: revolving and tranched loans, index-rate and
+  adjustable-rate loans. Open them in the system.
+- Loan Schedule (fixed-term loans): due dates with principal, interest,
+  fees and penalties due, and optionally what was paid on each. Without the
+  paid columns, what the account says was paid is applied oldest first.
+  Installment numbers default to the order of the due dates. A dynamic-term
+  loan's schedule is always the product's (the reference platform), so one given is refused.
+- Loan Transactions (fixed-term loans): DISBURSEMENT, REPAYMENT, FEE and
+  PENALTY, each loan's rows together, oldest first, starting with its
+  disbursement. They are replayed against the schedule: repayments in the
+  product's allocation order, installment by installment, interest never
+  beyond what the schedule has earned by the payment date; fees and
+  penalties on the first unpaid installment. They replace the paid and
+  outstanding amounts on the account sheet, are recorded in the loan's
+  history, and post no journal entries. Paying more than is owed is an
+  error.
+- Opening balances: GL Balances (debit and credit per account) or the reference platform's
+  Chart of Accounts sheet (a balance signed by the account's type: asset and
+  expense debit positive, liability, equity and income credit positive), not
+  both. New accounts on the Chart of Accounts sheet are created. The
+  opening entry is dated the migration date.
+
+**Loans are built by one migration routine** (`src/domain/loanMigration.js`)
+that the external migration API uses too. Balances are as at the end of the
+migration date; interest accrues from it. Fees on installments due by the
+migration date (or already paid) are recorded as applied, so the end of
+day does not charge them again; fees on later installments come due on
+their dates. Installments already late are exempt from the late fee and
+their penalty counts from the migration date.
+
+**Upload, progress and review.**
+
+- `POST /api/data-imports` (the workbook as the body, or a multipart form
+  with the file in `file`) stores it and returns 202 with the import
+  QUEUED. The check runs in the background: GET `/api/data-imports/:id`
+  shows IN_PROGRESS with a percentage, then the outcome. The console shows
+  a progress bar. `?wait=true` waits and returns the outcome.
+- An import with errors is INVALID; `/errors` returns the workbook with each
+  offending cell red, an Errors column on its sheet and an Errors sheet
+  last (the reference platform). A file that cannot be read is ERROR.
+- A clean one is PENDING_APPROVAL (the reference platform's Draft). `GET /:id/preview`
+  lists the records approval will create, by kind and paged (members,
+  loans with their balances, arrears and schedules, deposit accounts, the
+  opening entry): the reviewer's view of the draft, since nothing is
+  written before approval.
+- Approve (all or nothing; the uploader may not approve under the four-eyes
+  rule) or reject (the reference platform's Reverted). Both take an `Idempotency-Key`.
+
+**The reference platform's data import API** is served on the same imports:
 
 ```
-POST /api/dividends                    declare a rate for a financial year
-POST /api/dividends/:year/allocate     allocate by holding at the record date
-POST /api/dividends/:year/pay          clear the payable into members' savings
+POST /api/data/import                             multipart "file" -> { importKey, state }
+GET  /api/data/import/{importKey}                 { importKey, state, progress, eventKey, importState, errors }
+POST /api/data/import/events/{eventKey}:action    { "action": "APPROVE" | "REJECT" }, Idempotency-Key header
 ```
 
-Allocation uses shareholding **as at the record date**, derived from
-`share_movements` via `units_as_at()`, not whatever the balance happens to
-be when the job runs. Rounding residual goes to the largest holder so the
-sum of allocations equals the amount posted to the payable, exactly.
+`state` is the job's (QUEUED, IN_PROGRESS, COMPLETE, ERROR); `importState`
+is DRAFT, APPROVED, REVERTED or INVALID; errors carry the sheet, row,
+`column { name, index }` and `errorMessage`. A request repeated with the
+same Idempotency-Key gets the first response; the same key on a different
+request is refused.
 
-A shareholder with no active savings account is **reported, not silently
-skipped**, and the dividend stays `ALLOCATED` until nobody is left unpaid.
+**Migrating loans through the API** (the reference platform's recommended route for large
+books). `POST /api/loans/migrate` (tenant admin) creates one loan the way
+the import does: the reference platform's body (`loanAccount` with `id`, `accountHolderKey`,
+`productTypeKey`, `loanAmount`, `scheduleSettings.repaymentInstallments`,
+`disbursementDetails.disbursementDate`, `balances.principalBalance`;
+`migrationFields` with `principalInArrears`, `interest`, `interestAccrued`,
+`interestFromArrears`, `lastSetToArrearsDate`, `contractualMonthlyPayment`,
+`redrawBalance`; `firstRepaymentDate`), plus `migrationDate` and optionally
+`schedule` and `transactions`. The migration fields are kept on the loan.
+The sequence for a full API migration: members (`POST /api/members`),
+deposit accounts with their opening balance, loans with `/loans/migrate`,
+then the opening balances as an import with only Settings and a Chart of
+Accounts sheet. Run it outside business hours; the rate limit per tenant
+applies.
 
-## Sessions and MFA
+**Loading a backup back** (the reference platform's Import Database clone). The backup ZIP
+carries `restore.sql`: unzip it, change into the folder, and run
+`psql -d yourdb -v schema=copy -f restore.sql`. Or `cli backup:load --file
+backup.zip --schema copy [--database postgres://...]` loads it from Node.
+NULL and empty text are kept apart (an empty string is written `""`).
 
-Access tokens are 15 minutes. Refresh tokens are 30 days, single use, and
-stored only as a SHA-256 hash, so a database dump does not hand over live
-sessions. Rotation detects replay: presenting a spent token revokes the
-**entire family**, logging out both the attacker and the real user. A forced
-re-login beats a silent session hijack. Changing a password revokes
-everything too.
-
-**TOTP** is implemented directly on `node:crypto`, about forty lines,
-checked against the RFC 6238 test vector. An authentication primitive is not
-somewhere to inherit a supply chain.
-
-Enrolment is two steps. You get a secret, and MFA only switches on once you
-have proved the authenticator produces a working code, because enabling it
-without that check is how people lock themselves out of their own SACCO. Ten
-single-use recovery codes are issued at that point, hashed like any other
-credential and shown exactly once.
-
-Login with MFA is password, then a short-lived ticket, then the code. The
-half-authenticated state is an opaque hashed row in the database, so a
-client holding a ticket has nothing it can use against the API. A ticket
-burns after five wrong codes.
-
-**A code cannot be replayed inside its 30 second window.** The last accepted
-counter is recorded, and a code at that same counter is refused. Someone
-reading a code over your shoulder cannot use it.
-
-Which roles must have a second factor is per tenant
-(`tenants.mfa_required_roles`, default `TENANT_ADMIN`), so a SACCO can
-require it of admins before requiring it of every teller.
-
-There is one subtlety worth knowing about. Requiring MFA of an admin who has
-not enrolled would deadlock a fresh tenant: no session without a code, no
-code without a session. Login in that state returns 403 with an
-**enrolment-scoped token**, valid for ten minutes and accepted by the
-enrolment endpoints and nowhere else. The test suite confirms it is rejected
-on an ordinary route.
+**Also fixed.** The end of day's arrears check read the loan's total
+principal paid where it meant the installment's, so a loan that had repaid
+more than one installment's principal was never marked in arrears. It now
+reads the installment's.
 
 ## Staff users
 

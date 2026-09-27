@@ -121,11 +121,8 @@ async function table(c, name) {
   return t;
 }
 
-const csvCell = (v) => {
-  if (v === null || v === undefined) return '';
-  const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
-  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-};
+// NULL is an empty field, an empty string a quoted one, as COPY reads CSV.
+const csvCell = require('../lib/csv').cell;
 
 /** The dictionary as one CSV row per column. */
 function toCsv(dict) {
@@ -173,16 +170,18 @@ async function applyComments(c) {
  * nullability, defaults and primary keys. Enough to load the CSVs into an
  * empty database for analysis; the migrations remain the schema's source.
  */
-function schemaSql(dict, only = null) {
+function schemaSql(dict, only = null, { withoutBinary = false } = {}) {
   const out = [`-- Schema ${dict.schema.version ? `at migration ${dict.schema.version}` : ''}, generated ${dict.generatedAt}`];
   for (const t of dict.tables) {
     if (only && !only.includes(t.name)) continue;
-    const cols = t.columns.map((col) => `  ${ident(col.name)} ${col.type}${col.nullable ? '' : ' NOT NULL'}`);
+    // A backup leaves binary columns out, so its schema does too.
+    const kept = t.columns.filter((col) => !(withoutBinary && col.type === 'bytea'));
+    const cols = kept.map((col) => `  ${ident(col.name)} ${col.type}${col.nullable ? '' : ' NOT NULL'}`);
     if (t.primaryKey.length) cols.push(`  PRIMARY KEY (${t.primaryKey.map(ident).join(', ')})`);
     if (t.description) out.push(`\n-- ${t.description.replace(/\n/g, ' ')}`);
     else out.push('');
     out.push(`CREATE TABLE ${ident(t.name)} (\n${cols.join(',\n')}\n);`);
-    for (const col of t.columns) {
+    for (const col of kept) {
       if (col.description) out.push(`COMMENT ON COLUMN ${ident(t.name)}.${ident(col.name)} IS ${lit(col.description)};`);
     }
   }

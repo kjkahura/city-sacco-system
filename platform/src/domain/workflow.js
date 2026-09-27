@@ -623,7 +623,11 @@ async function toleranceDeadline(c, due, days, excludeNonWorking, branchId = nul
 async function markArrears(c, { asOf = null, loanId = null } = {}) {
   const date = asOf || new Date().toISOString().slice(0, 10);
   const { rows: cands } = await c.query(
-    `SELECT i.*, l.account_no, l.branch_id, l.status AS loan_status, l.arrears_since, l.principal_disbursed, l.principal_capitalized, l.principal_paid,
+    // The loan's principal paid is aliased: as plain principal_paid it would
+    // overwrite the installment's in the row, and a loan that had repaid more
+    // than one installment's principal would never go into arrears.
+    `SELECT i.*, l.account_no, l.branch_id, l.status AS loan_status, l.arrears_since, l.principal_disbursed, l.principal_capitalized,
+            l.principal_paid AS loan_principal_paid,
             ${ledger.overrideSql('arrearsToleranceDays')} AS tol_days,
             ${ledger.overrideSql('arrearsTolerancePercent')} AS tol_pct,
             ${ledger.settingSql('arrears_tolerance_floor')} AS tol_floor,
@@ -652,7 +656,7 @@ async function markArrears(c, { asOf = null, loanId = null } = {}) {
       const shortfall = round2((i.principal_due - i.principal_paid) + (i.interest_due - i.interest_paid) + (i.fee_due - i.fee_paid));
       if (shortfall <= 0) continue;
       if (i.tol_pct !== null || i.tol_floor !== null) {
-        const outstanding = round2(Number(i.principal_disbursed) + Number(i.principal_capitalized) - Number(i.principal_paid));
+        const outstanding = round2(Number(i.principal_disbursed) + Number(i.principal_capitalized) - Number(i.loan_principal_paid));
         const tolerance = Math.max(i.tol_pct !== null ? outstanding * Number(i.tol_pct) / 100 : 0, Number(i.tol_floor || 0));
         if (shortfall <= tolerance) continue;
       }

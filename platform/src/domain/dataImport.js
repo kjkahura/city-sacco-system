@@ -4,173 +4,254 @@ const crypto = require('crypto');
 const XLSX = require('../lib/xlsx');
 const acct = require('./accounting');
 const L = require('./loans');
+const LM = require('./loanMigration');
 const SV = require('./savings');
 const SH = require('./shares');
 const B = require('./branches');
 const CF = require('./customFields');
-const workflow = require('./workflow');
+const IDT = require('./idTemplates');
 
 /**
- * The Excel data import (the reference platform's Data Importing): a SACCO moving onto the
- * platform fills in one workbook with its chart of accounts, branches,
- * centres, members, deposit accounts, share accounts, loans with their
- * schedules, and its opening trial balance; uploads it; and someone reviews
- * and approves it.
+ * The Excel data import (the reference platform's Data Importing and its Excel Migration
+ * Template): a SACCO moving onto the platform fills in one workbook with its
+ * chart of accounts, branches, centres, members, deposit, share and loan
+ * accounts, loan schedules and transactions, and its opening balances;
+ * uploads it; reviews what it will create; and approves or rejects it.
  *
- * Upload. The workbook is read and every cell checked: required values,
- * dates as yyyy-MM-dd, amounts, codes that exist, numbers used twice. Then
- * the whole import is run for real inside a savepoint and rolled back, so
- * whatever the database itself would refuse (a product band, a duplicate
- * account number, a closed accounting period) is found now, row by row,
- * rather than at approval. An import with errors is INVALID and comes with
- * the workbook back, an Errors column on every sheet saying what to fix.
- * One without is PENDING_APPROVAL, with what it will create and any
- * warnings for the reviewer.
+ * The template reads the reference platform's own layout as well as this one: the reference platform's sheet
+ * names (Clients, Savings Accounts, Loan Schedules, Chart of Accounts) and
+ * column headings (Client ID, Date Joined (dd.MM.yyyy), Loan Length
+ * (# Installments), Principal Expected, Current Balance), dd.MM.yyyy dates,
+ * M/F, day initials, and A/L/I/E/Q and D/H in the chart of accounts. IDs are
+ * limited to 32 characters and other text to 255, as in the reference platform.
+ *
+ * Upload. The file is stored and the work runs in the background (./ops
+ * importRunner): the workbook is read and every cell checked, then the
+ * whole import is run for real inside a savepoint and rolled back, so what
+ * only the database would refuse is found now, row by row. The run reports
+ * its progress. An import with errors is INVALID, with the workbook back:
+ * each offending cell red, an Errors column on its sheet, and an Errors
+ * sheet last. One without is PENDING_APPROVAL (the reference platform's Draft) with what it
+ * will create, a preview of every record as it will be, and any warnings.
  *
  * Nothing reaches the live tables before approval, so nothing waits to be
- * left out of the end of day, and a rejected import leaves no trace but its
- * record. Approval runs the import again and commits it all or none of it.
+ * left out of the end of day, and a rejected import (the reference platform's Reverted)
+ * leaves no trace but its record. Approval runs the import again and
+ * commits it all or none of it.
  *
- * Balances are as at the end of the migration date (Settings sheet). A
- * deposit account opens with its balance, a share account with its units,
- * and a loan active with what is still owed, its schedule either given
- * (Loan Schedule sheet) or drawn by the product from the disbursement date
- * with the principal repaid applied to the oldest installments first.
- * Interest accrues from the migration date. An installment already late at
- * the migration date is exempt from the late repayment fee and its penalty
- * counts from the migration date (a forfeited marker covers the days
- * before), because the old system charged, or did not charge, for those
- * days. The account balances post nothing to the general ledger; the GL
- * Balances sheet is the opening trial balance and is posted as one entry
- * on the migration date. The reviewer is warned where a subledger total
- * does not match its GL account in that sheet.
+ * Balances are as at the end of the migration date (Settings sheet). Loans
+ * are built by ./loanMigration, which the reference platform's external migration API uses
+ * too. Accounts post nothing to the general ledger; the opening balances
+ * (GL Balances sheet, or the reference platform's Chart of Accounts sheet with its signed
+ * balances) are posted as one entry on the migration date, and the reviewer
+ * is warned where a subledger does not match its GL account there.
  */
 
 const MAX_FILE = 5 * 1024 * 1024;
 const MAX_ROWS = 20000;
+const MAX_ID = 32;
+const MAX_TEXT = 255;
+const MAX_NOTES = 2000;
+const PREVIEW_SCHEDULES = 300;
 const err = (m, status = 400) => Object.assign(new Error(m), { status });
 
-const GL_TYPES = ['ASSET', 'LIABILITY', 'EQUITY', 'INCOME', 'EXPENSE'];
-const DAYS = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
+const GL_TYPES = { A: 'ASSET', L: 'LIABILITY', I: 'INCOME', E: 'EXPENSE', Q: 'EQUITY', ASSET: 'ASSET', LIABILITY: 'LIABILITY', INCOME: 'INCOME', EXPENSE: 'EXPENSE', EQUITY: 'EQUITY' };
+const USAGE = { D: 'DETAIL', H: 'HEADER', DETAIL: 'DETAIL', HEADER: 'HEADER' };
+const GENDER = { M: 'MALE', F: 'FEMALE', O: 'OTHER', MALE: 'MALE', FEMALE: 'FEMALE', OTHER: 'OTHER' };
+const DAY = {
+  SU: 0, SUN: 0, SUNDAY: 0, M: 1, MO: 1, MON: 1, MONDAY: 1, T: 2, TU: 2, TUE: 2, TUESDAY: 2, W: 3, WE: 3, WED: 3, WEDNESDAY: 3,
+  TH: 4, THU: 4, THURSDAY: 4, F: 5, FR: 5, FRI: 5, FRIDAY: 5, SA: 6, SAT: 6, SATURDAY: 6,
+};
+const STATE = {
+  ACTIVE: 'ACTIVE', 'IN ARREARS': 'ACTIVE', 'PENDING APPROVAL': 'PENDING_APPROVAL', PENDING: 'PENDING_APPROVAL', APPROVED: 'APPROVED',
+  CLOSED: 'CLOSED', REPAID: 'CLOSED', WITHDRAWN: 'WITHDRAWN', REJECTED: 'REJECTED', 'WRITTEN OFF': 'WRITTEN_OFF',
+};
+const TX = { DISBURSEMENT: 'DISBURSEMENT', REPAYMENT: 'REPAYMENT', FEE: 'FEE', PENALTY: 'PENALTY', FEE_APPLIED: 'FEE', PENALTY_APPLIED: 'PENALTY' };
+const PERIOD = { D: 'D', W: 'W', M: 'M', Y: 'Y', DAYS: 'D', WEEKS: 'W', MONTHS: 'M', YEARS: 'Y' };
+const lookup = (table, label) => ({ table, label });
 
-// The workbook: each sheet, its columns, and what each column holds.
-// `custom` sheets also take custom field columns headed "Custom: _setId.fieldId".
+// The workbook: each sheet, its columns, and what each column holds. `a`
+// are other headings the column is read under (the reference platform's). `id` columns are
+// limited to 32 characters, text to 255, notes to 2,000. Sheets marked
+// `custom` take custom field columns headed "Custom: _setId.fieldId".
 const SHEETS = [
-  { key: 'glAccounts', name: 'GL Accounts', note: 'Accounts to add to the chart of accounts. Parents first, or in the chart already.', columns: [
-    { h: 'Code', k: 'code', req: true, hint: 'Unique, e.g. 100-150' },
-    { h: 'Name', k: 'name', req: true },
-    { h: 'Type', k: 'type', req: true, oneOf: GL_TYPES },
-    { h: 'Parent code', k: 'parentCode' },
-    { h: 'Usage', k: 'usage', oneOf: ['DETAIL', 'HEADER'], hint: 'DETAIL (default) takes postings; HEADER groups' },
+  { key: 'glAccounts', name: 'GL Accounts', note: 'Accounts to add to the chart of accounts, with parents. Parents first, or in the chart already.', columns: [
+    { h: 'Code', k: 'code', req: true, id: true, a: ['GL Code'], hint: 'Unique, e.g. 100-150' },
+    { h: 'Name', k: 'name', req: true, a: ['Account Name'] },
+    { h: 'Type', k: 'type', req: true, map: lookup(GL_TYPES, 'A, L, I, E, Q or the word') },
+    { h: 'Parent code', k: 'parentCode', id: true },
+    { h: 'Usage', k: 'usage', map: lookup(USAGE, 'D (detail, default) or H (header)') },
+    { h: 'Notes', k: 'notes', notes: true },
+  ] },
+  { key: 'chart', name: 'Chart of Accounts', aliases: ['Chart of Account'], note: 'the reference platform\'s layout: accounts (created when new) with their balance at the migration date, signed by type. Use this or GL Balances for the opening balances, not both.', columns: [
+    { h: 'GL Code', k: 'code', req: true, id: true },
+    { h: 'Account Name', k: 'name', req: true },
+    { h: 'Date', k: 'date', type: 'date', hint: 'The balance date; if given, the migration date' },
+    { h: 'Type', k: 'type', req: true, map: lookup(GL_TYPES, 'A, L, I, E or Q') },
+    { h: 'Usage', k: 'usage', map: lookup(USAGE, 'D or H') },
+    { h: 'Balance', k: 'balance', type: 'signed', hint: 'Asset and expense: debit +, credit -. Liability, equity and income: credit +, debit -' },
+    { h: 'Notes', k: 'notes', notes: true },
   ] },
   { key: 'branches', name: 'Branches', columns: [
-    { h: 'Branch ID', k: 'code', req: true, hint: '2 to 16 uppercase letters, digits, - or _' },
+    { h: 'Branch ID', k: 'code', req: true, id: true, hint: '2 to 16 uppercase letters, digits, - or _' },
     { h: 'Name', k: 'name', req: true },
-    { h: 'Town', k: 'town' }, { h: 'Phone', k: 'phone' }, { h: 'Email', k: 'email' },
-    { h: 'Address', k: 'address' }, { h: 'Notes', k: 'notes' },
-  ], custom: true },
+    { h: 'Town', k: 'town', a: ['City'] }, { h: 'Phone', k: 'phone' }, { h: 'Email', k: 'email' },
+    { h: 'Address', k: 'address', a: ['Address 1'] }, { h: 'Notes', k: 'notes', notes: true },
+  ], custom: 'BRANCH' },
   { key: 'centres', name: 'Centres', columns: [
-    { h: 'Centre ID', k: 'code', req: true },
+    { h: 'Centre ID', k: 'code', req: true, id: true },
     { h: 'Name', k: 'name', req: true },
-    { h: 'Branch ID', k: 'branch', req: true },
-    { h: 'Meeting day', k: 'meetingDay', hint: 'Monday to Sunday, or blank' },
-    { h: 'Address', k: 'address' }, { h: 'Notes', k: 'notes' },
-  ], custom: true },
-  { key: 'members', name: 'Members', columns: [
-    { h: 'Member number', k: 'memberNo', req: true },
+    { h: 'Branch ID', k: 'branch', req: true, id: true },
+    { h: 'Meeting day', k: 'meetingDay', map: lookup(DAY, 'M, T, W, TH, F, SA, SU or the day'), hint: 'Blank: none' },
+    { h: 'Address', k: 'address', a: ['Address 1'] }, { h: 'Address 2', k: 'address2' }, { h: 'City', k: 'city' },
+    { h: 'Postcode', k: 'postcode', a: ['Zip'] }, { h: 'Region', k: 'region', a: ['State/Province/Region'] }, { h: 'Country', k: 'country' },
+    { h: 'Notes', k: 'notes', notes: true },
+  ], custom: 'CENTRE' },
+  { key: 'members', name: 'Members', aliases: ['Clients'], columns: [
+    { h: 'Member number', k: 'memberNo', req: true, id: true, a: ['Client ID'] },
     { h: 'First name', k: 'firstName', req: true },
     { h: 'Middle name', k: 'middleName' },
     { h: 'Last name', k: 'lastName', req: true },
-    { h: 'National ID', k: 'nationalId' }, { h: 'KRA PIN', k: 'kraPin' },
-    { h: 'Phone', k: 'phone' }, { h: 'Phone 2', k: 'phone2' }, { h: 'Email', k: 'email' },
+    { h: 'National ID', k: 'nationalId', id: true }, { h: 'KRA PIN', k: 'kraPin', id: true },
+    { h: 'Phone', k: 'phone', a: ['Mobile/Cellphone', 'Mobile', 'Cellphone'] }, { h: 'Phone 2', k: 'phone2', a: ['Other phone'] }, { h: 'Email', k: 'email', a: ['Email Address'] },
     { h: 'Date of birth', k: 'dateOfBirth', type: 'date' },
-    { h: 'Gender', k: 'gender', oneOf: ['MALE', 'FEMALE', 'OTHER'] },
+    { h: 'Gender', k: 'gender', map: lookup(GENDER, 'M, F or O') },
     { h: 'Employer', k: 'employer' },
-    { h: 'Branch ID', k: 'branch' }, { h: 'Centre ID', k: 'centre' },
-    { h: 'Joined on', k: 'joinedOn', type: 'date', hint: 'Default: the migration date' },
-    { h: 'Status', k: 'status', oneOf: ['ACTIVE', 'DORMANT', 'EXITED'], hint: 'Default ACTIVE' },
-    { h: 'Address line 1', k: 'addressLine1' }, { h: 'Address line 2', k: 'addressLine2' },
-    { h: 'City', k: 'city' }, { h: 'Postcode', k: 'postcode' }, { h: 'Region', k: 'region' }, { h: 'Country', k: 'country' },
-    { h: 'Credit officer', k: 'creditOfficer', hint: 'Email of the staff user' },
-    { h: 'Prior loan cycles', k: 'priorLoanCycles', type: 'int', hint: 'Loans repaid in full in the old system' },
-    { h: 'Notes', k: 'notes' },
-  ], custom: true },
-  { key: 'deposits', name: 'Deposit Accounts', columns: [
-    { h: 'Account number', k: 'accountNo', req: true },
-    { h: 'Member number', k: 'memberNo', req: true },
-    { h: 'Product ID', k: 'productId', req: true },
-    { h: 'Balance', k: 'balance', type: 'amount', req: true, hint: 'At the end of the migration date' },
-    { h: 'Opened on', k: 'openedOn', type: 'date' },
-    { h: 'Branch ID', k: 'branch', hint: "Default: the member's" },
+    { h: 'Branch ID', k: 'branch', id: true }, { h: 'Centre ID', k: 'centre', id: true },
+    { h: 'Group ID', k: 'groupId', id: true, hint: 'Not supported: groups are not part of this system' },
+    { h: 'Joined on', k: 'joinedOn', type: 'date', a: ['Date Joined'], hint: 'Default: the migration date' },
+    { h: 'Status', k: 'status', map: lookup({ ACTIVE: 'ACTIVE', DORMANT: 'DORMANT', EXITED: 'EXITED' }, 'Active, Dormant or Exited'), hint: 'Default Active' },
+    { h: 'Address line 1', k: 'addressLine1', a: ['Address 1'] }, { h: 'Address line 2', k: 'addressLine2', a: ['Address 2'] },
+    { h: 'City', k: 'city' }, { h: 'Postcode', k: 'postcode', a: ['Zip'] }, { h: 'Region', k: 'region', a: ['State/Province/Region'] }, { h: 'Country', k: 'country' },
+    { h: 'Credit officer', k: 'creditOfficer', a: ['Credit Officer username', 'Credit Officer'], hint: 'The staff user\'s email (Credit Officers sheet)' },
+    { h: 'Prior loan cycles', k: 'priorLoanCycles', type: 'int', a: ['Individual Loan Cycle'], hint: 'Loans repaid in full in the old system' },
+    { h: 'ID type', k: 'idType', hint: 'An ID template (ID Templates sheet), or another type where allowed' },
+    { h: 'ID number', k: 'idNumber', id: true },
+    { h: 'ID authority', k: 'idAuthority' },
+    { h: 'ID valid until', k: 'idValidUntil', type: 'date' },
+    { h: 'Notes', k: 'notes', notes: true },
+  ], custom: 'MEMBER' },
+  { key: 'deposits', name: 'Deposit Accounts', aliases: ['Savings Accounts'], columns: [
+    { h: 'Account number', k: 'accountNo', req: true, id: true, a: ['Account ID'] },
+    { h: 'Member number', k: 'memberNo', req: true, id: true, a: ['Client ID'] },
+    { h: 'Product ID', k: 'productId', req: true, id: true },
+    { h: 'Balance', k: 'balance', type: 'amount', req: true, a: ['Current Balance'], hint: 'At the end of the migration date, including interest accrued and not yet applied' },
+    { h: 'Date applied', k: 'appliedOn', type: 'date' },
+    { h: 'Opened on', k: 'openedOn', type: 'date', a: ['Date Approved'], hint: 'The balance is recorded on this date' },
+    { h: 'Branch ID', k: 'branch', id: true, hint: "Default: the member's" },
     { h: 'Overdraft limit', k: 'overdraftLimit', type: 'amount' },
-  ], custom: true },
+    { h: 'Overdraft interest rate', k: 'overdraftRate', type: 'number', hint: "A year; blank: the product's" },
+    { h: 'Overdraft amount due', k: 'overdraftDue', type: 'amount', hint: 'Overdrawn principal at the migration date' },
+    { h: 'Overdraft interest due', k: 'overdraftInterestDue', type: 'amount' },
+    { h: 'Overdraft fees due', k: 'overdraftFeesDue', type: 'amount' },
+    { h: 'Notes', k: 'notes', notes: true },
+  ], custom: 'SAVINGS_ACCOUNT' },
   { key: 'shares', name: 'Share Accounts', columns: [
-    { h: 'Account number', k: 'accountNo', req: true },
-    { h: 'Member number', k: 'memberNo', req: true },
-    { h: 'Product ID', k: 'productId', req: true },
+    { h: 'Account number', k: 'accountNo', req: true, id: true, a: ['Account ID'] },
+    { h: 'Member number', k: 'memberNo', req: true, id: true, a: ['Client ID'] },
+    { h: 'Product ID', k: 'productId', req: true, id: true },
     { h: 'Units', k: 'units', type: 'number', req: true },
   ] },
   { key: 'loans', name: 'Loan Accounts', columns: [
-    { h: 'Account number', k: 'accountNo', req: true },
-    { h: 'Member number', k: 'memberNo', req: true },
-    { h: 'Product ID', k: 'productId', req: true },
-    { h: 'Principal', k: 'principal', type: 'amount', req: true, hint: 'As disbursed' },
-    { h: 'Installments', k: 'installments', type: 'int', req: true },
+    { h: 'Account number', k: 'accountNo', req: true, id: true, a: ['Account ID'] },
+    { h: 'Member number', k: 'memberNo', req: true, id: true, a: ['Client ID'] },
+    { h: 'Client type', k: 'clientType', map: lookup({ C: 'C', G: 'G' }, 'C (member) or G (group)'), hint: 'C; groups are not supported' },
+    { h: 'Product ID', k: 'productId', req: true, id: true },
+    { h: 'Account state', k: 'state', map: lookup(STATE, 'Active, Pending Approval, Approved, Closed, Withdrawn, Rejected or Written Off'), hint: 'Default Active' },
+    { h: 'Principal', k: 'principal', type: 'amount', req: true, a: ['Loan Amount'], hint: 'As disbursed' },
+    { h: 'Installments', k: 'installments', type: 'int', req: true, a: ['Loan Length'] },
+    { h: 'Repayment every', k: 'repaymentEvery', type: 'int', a: ['Repayment Frequency'], hint: "Must match the product's" },
+    { h: 'Repayment period', k: 'repaymentUnit', map: lookup(PERIOD, 'D, W, M or Y'), hint: "Must match the product's" },
+    { h: 'Principal interval', k: 'principalInterval', type: 'int', hint: '1 (principal in every installment)' },
+    { h: 'Grace installments', k: 'gracePeriods', type: 'int', a: ['# Grace Installments'] },
     { h: 'Interest rate', k: 'rate', type: 'number', hint: "In the product's rate frequency; default: the product's" },
-    { h: 'Disbursed on', k: 'disbursedOn', type: 'date', req: true },
-    { h: 'Principal outstanding', k: 'principalOutstanding', type: 'amount', req: true },
+    { h: 'Date applied', k: 'appliedOn', type: 'date' },
+    { h: 'Date approved', k: 'approvedOn', type: 'date' },
+    { h: 'Disbursed on', k: 'disbursedOn', type: 'date', a: ['Date Disbursed'] },
+    { h: 'Repayment start date', k: 'firstRepaymentDate', type: 'date', hint: 'The first due date' },
+    { h: 'Closed on', k: 'closedOn', type: 'date', hint: 'For a closed, withdrawn, rejected or written-off loan' },
+    { h: 'Principal paid', k: 'principalPaid', type: 'amount', hint: 'Or give the principal outstanding' },
+    { h: 'Interest paid', k: 'interestPaid', type: 'amount' },
+    { h: 'Principal outstanding', k: 'principalOutstanding', type: 'amount' },
+    { h: 'Principal in arrears', k: 'principalInArrears', type: 'amount', hint: 'Due and unpaid at the migration date; default: what the schedule leaves due' },
     { h: 'Interest outstanding', k: 'interestOutstanding', type: 'amount', hint: 'Accrued and unpaid' },
     { h: 'Fees outstanding', k: 'feesOutstanding', type: 'amount' },
     { h: 'Penalty outstanding', k: 'penaltyOutstanding', type: 'amount' },
-    { h: 'Branch ID', k: 'branch', hint: "Default: the member's" },
-    { h: 'Purpose', k: 'purpose' }, { h: 'Notes', k: 'notes' },
-  ], custom: true },
-  { key: 'schedule', name: 'Loan Schedule', note: 'Optional. A loan with rows here takes this schedule; one without is given the product\'s.', columns: [
-    { h: 'Account number', k: 'accountNo', req: true },
-    { h: 'Installment', k: 'number', type: 'int', req: true },
+    { h: 'Branch ID', k: 'branch', id: true, hint: "Default: the member's" },
+    { h: 'Purpose', k: 'purpose' }, { h: 'Notes', k: 'notes', notes: true },
+  ], custom: 'LOAN_ACCOUNT' },
+  { key: 'schedule', name: 'Loan Schedule', aliases: ['Loan Schedules', 'Schedules'], note: 'Optional, fixed-term loans only. A loan with rows here takes this schedule; one without is given the product\'s. Without paid columns, what the account sheet says was paid is applied oldest first.', columns: [
+    { h: 'Account number', k: 'accountNo', req: true, id: true, a: ['Account ID'] },
+    { h: 'Installment', k: 'number', type: 'int', hint: 'Default: the order of the due dates' },
     { h: 'Due date', k: 'dueDate', type: 'date', req: true },
-    { h: 'Principal due', k: 'principalDue', type: 'amount', req: true },
-    { h: 'Interest due', k: 'interestDue', type: 'amount', req: true },
-    { h: 'Fees due', k: 'feesDue', type: 'amount' },
+    { h: 'Principal due', k: 'principalDue', type: 'amount', req: true, a: ['Principal Expected'] },
+    { h: 'Interest due', k: 'interestDue', type: 'amount', req: true, a: ['Interest Expected'] },
+    { h: 'Fees due', k: 'feesDue', type: 'amount', a: ['Fees Expected'] },
+    { h: 'Penalty due', k: 'penaltyDue', type: 'amount', a: ['Penalty Expected'] },
     { h: 'Principal paid', k: 'principalPaid', type: 'amount' },
     { h: 'Interest paid', k: 'interestPaid', type: 'amount' },
     { h: 'Fees paid', k: 'feesPaid', type: 'amount' },
+    { h: 'Penalty paid', k: 'penaltyPaid', type: 'amount' },
+  ] },
+  { key: 'transactions', name: 'Loan Transactions', aliases: ['Transactions'], note: 'Optional, fixed-term loans only. Replayed in order, each loan\'s rows together, oldest first, starting with its DISBURSEMENT. They replace the paid and outstanding amounts on the account sheet. No journal entries.', columns: [
+    { h: 'Account number', k: 'accountNo', req: true, id: true, a: ['Account ID'] },
+    { h: 'Transaction type', k: 'type', req: true, map: lookup(TX, 'DISBURSEMENT, REPAYMENT, FEE or PENALTY') },
+    { h: 'Date', k: 'date', type: 'date', req: true },
+    { h: 'Amount', k: 'amount', type: 'amount', req: true },
+    { h: 'Notes', k: 'notes', notes: true },
   ] },
   { key: 'glBalances', name: 'GL Balances', note: 'The opening trial balance, posted as one entry on the migration date. Debits must equal credits.', columns: [
-    { h: 'GL code', k: 'glCode', req: true },
+    { h: 'GL code', k: 'glCode', req: true, id: true },
     { h: 'Debit', k: 'debit', type: 'amount' },
     { h: 'Credit', k: 'credit', type: 'amount' },
-    { h: 'Branch ID', k: 'branch' },
+    { h: 'Branch ID', k: 'branch', id: true },
   ] },
 ];
 const SETTINGS = 'Settings';
+const REFERENCE_SHEETS = ['Branches Data', 'Centres Data', 'Credit Officers', 'Loan Products', 'Deposit Products', 'Share Products', 'GL Accounts Data', 'ID Templates'];
 
-const norm = (s) => String(s ?? '').replace(/\*/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+// A heading, compared without case, spacing, the * of a required column,
+// a trailing colon, or a note in brackets such as "(dd.MM.yyyy)".
+const norm = (s) => String(s ?? '').replace(/\*/g, '').replace(/\([^)]*\)/g, '').replace(/:\s*$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
 const blank = (v) => v === null || v === undefined || (typeof v === 'string' && v.trim() === '');
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+/** A date as yyyy-MM-dd from yyyy-MM-dd, dd.MM.yyyy (the reference platform) or an Excel date cell. */
+function isoDate(v) {
+  const s = String(v).trim().slice(0, 10);
+  let y; let m; let d;
+  let r = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (r) [, y, m, d] = r;
+  else if ((r = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(String(v).trim()))) [, d, m, y] = r;
+  else return null;
+  const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  const t = new Date(`${iso}T00:00:00Z`);
+  return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === iso ? iso : null;
+}
 
 function convert(v, col) {
   if (blank(v)) return { value: null };
   const type = col.type || 'text';
+  if (col.map) {
+    const key = String(v).trim().toUpperCase().replace(/_/g, ' ').replace(/\s+/g, ' ');
+    const hit = col.map.table[key] ?? col.map.table[key.replace(/ /g, '_')];
+    if (hit === undefined) return { error: `must be ${col.map.label}` };
+    return { value: hit };
+  }
   if (type === 'text') {
-    let s = typeof v === 'number' ? String(v) : String(v).trim();
-    if (col.oneOf) {
-      s = s.toUpperCase();
-      if (!col.oneOf.includes(s)) return { error: `must be one of ${col.oneOf.join(', ')}` };
-    }
+    const s = typeof v === 'number' ? String(v) : String(v).trim();
+    const max = col.id ? MAX_ID : col.notes ? MAX_NOTES : MAX_TEXT;
+    if (s.length > max) return { error: `is longer than ${max} characters` };
     return { value: s };
   }
   if (type === 'date') {
-    const s = String(v).trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return { error: 'must be a date, yyyy-MM-dd' };
-    const d = new Date(`${s}T00:00:00Z`);
-    if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) return { error: 'is not a real date' };
-    return { value: s };
+    const iso = isoDate(v);
+    return iso ? { value: iso } : { error: 'must be a date, dd.MM.yyyy or yyyy-MM-dd' };
   }
   const n = typeof v === 'number' ? v : Number(String(v).replace(/,/g, '').trim());
   if (!Number.isFinite(n)) return { error: 'must be a number' };
-  if (type === 'amount') {
-    if (n < 0) return { error: 'cannot be negative' };
+  if (type === 'amount' || type === 'signed') {
+    if (type === 'amount' && n < 0) return { error: 'cannot be negative' };
     if (Math.abs(round2(n) - n) > 1e-9) return { error: 'has more than two decimals' };
     return { value: round2(n) };
   }
@@ -181,9 +262,45 @@ function convert(v, col) {
   return { value: n };
 }
 
+function groupBy(list, f) {
+  const m = new Map();
+  for (const x of list) { const k = f(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); }
+  return m;
+}
+const sum = (list, k) => round2(list.reduce((t, x) => t + Number(x[k] || 0), 0));
+/** The fields a row gave, without the blanks. */
+const given = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined));
+
+/** Map each column of a sheet's heading row to a column of its definition. */
+function readHeader(def, headerRow, report) {
+  const header = (headerRow || []).map(norm);
+  const idx = {};
+  const custom = [];
+  const names = {};
+  // The reference platform's clients sheet has Mobile/Cellphone and Phone: then Phone is the second number.
+  const hasMobile = def.key === 'members' && header.some((h) => ['mobile/cellphone', 'mobile', 'cellphone'].includes(h));
+  header.forEach((h, i) => {
+    if (!h) return;
+    if (hasMobile && h === 'phone') { idx.phone2 = i; names[i] = 'Phone 2'; return; }
+    let col = def.columns.find((c) => norm(c.h) === h && idx[c.k] === undefined);
+    if (!col) col = def.columns.find((c) => (c.a || []).some((a) => norm(a) === h) && idx[c.k] === undefined);
+    if (col) { idx[col.k] = i; names[i] = col.h; return; }
+    if (def.custom && h.startsWith('custom:')) {
+      const [setId, fieldId] = String(headerRow[i]).replace(/^\s*custom:\s*/i, '').replace(/\([^)]*\)/g, '').replace(/\*/g, '').trim().split('.');
+      if (setId && fieldId) { custom.push({ i, setId: setId.trim(), fieldId: fieldId.trim() }); names[i] = String(headerRow[i]); return; }
+      report.error(def.name, 1, headerRow[i], 'A custom field column is headed "Custom: _setId.fieldId"', i);
+      return;
+    }
+    report.warn(def.name, 1, headerRow[i], 'Column not recognised; ignored.', i);
+  });
+  return { idx, custom, names };
+}
+
 /**
  * Read and check the workbook on its own, before the database is asked
- * anything. Returns the rows by sheet, the migration date and the errors.
+ * anything. Returns the rows by sheet, the migration date, the errors and
+ * warnings, and where each sheet's columns are (for the error workbook and
+ * The reference platform's error format).
  */
 function parse(buffer, { today }) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) throw err('EMPTY_FILE');
@@ -191,58 +308,61 @@ function parse(buffer, { today }) {
   const book = XLSX.read(buffer);
   const errors = [];
   const warnings = [];
-  const e = (sheet, row, column, message) => errors.push({ sheet, row, column, message });
+  const layout = {};
+  const report = {
+    error: (sheet, row, column, message, index = null) => errors.push({ sheet, row, column, message, ...(index !== null ? { index } : {}) }),
+    warn: (sheet, row, column, message, index = null) => warnings.push({ sheet, row, column, message, ...(index !== null ? { index } : {}) }),
+  };
   const byName = new Map(book.map((s) => [norm(s.name), s]));
+  const find = (def) => byName.get(norm(def.name)) || (def.aliases || []).map((a) => byName.get(norm(a))).find(Boolean);
 
   // Settings: key/value rows.
   let asOf = null;
   const settings = byName.get(norm(SETTINGS));
-  if (!settings) e(SETTINGS, null, null, 'The Settings sheet is missing; it gives the migration date.');
+  if (!settings) report.error(SETTINGS, null, null, 'The Settings sheet is missing; it gives the migration date.');
   else {
     for (let i = 0; i < settings.rows.length; i += 1) {
       const [k, v] = settings.rows[i] || [];
       if (norm(k) === 'migration date') {
         const r = convert(v, { type: 'date' });
-        if (r.error || !r.value) e(SETTINGS, i + 1, 'Migration date', r.error ? `Migration date ${r.error}` : 'Migration date is required');
+        if (r.error || !r.value) report.error(SETTINGS, i + 1, 'Migration date', r.error ? `Migration date ${r.error}` : 'Migration date is required', 1);
         else asOf = r.value;
       }
     }
-    if (!asOf && !errors.some((x) => x.sheet === SETTINGS)) e(SETTINGS, null, 'Migration date', 'Migration date is required');
-    if (asOf && asOf > today) e(SETTINGS, null, 'Migration date', `Migration date ${asOf} is after today (${today})`);
+    if (!asOf && !errors.some((x) => x.sheet === SETTINGS)) report.error(SETTINGS, null, 'Migration date', 'Migration date is required');
+    if (asOf && asOf > today) report.error(SETTINGS, null, 'Migration date', `Migration date ${asOf} is after today (${today})`);
+  }
+  const groups = byName.get(norm('Groups'));
+  if (groups && groups.rows.slice(1).some((r) => r && !r.every(blank))) {
+    report.error('Groups', null, null, 'Groups are not part of this system; import their members as members');
   }
 
   const data = {};
   const counts = {};
   for (const def of SHEETS) {
     data[def.key] = [];
-    const sh = byName.get(norm(def.name));
+    const sh = find(def);
     if (!sh || !sh.rows.length) continue;
-    const header = (sh.rows[0] || []).map(norm);
-    const idx = {};
-    const custom = [];
-    header.forEach((h, i) => {
-      if (!h) return;
-      const col = def.columns.find((c) => norm(c.h) === h);
-      if (col) idx[col.k] = i;
-      else if (def.custom && h.startsWith('custom:')) {
-        const [setId, fieldId] = String(sh.rows[0][i]).replace(/^\s*custom:\s*/i, '').replace(/\*/g, '').trim().split('.');
-        if (setId && fieldId) custom.push({ i, setId, fieldId });
-        else e(def.name, 1, sh.rows[0][i], 'A custom field column is headed "Custom: _setId.fieldId"');
-      } else warnings.push({ sheet: def.name, row: 1, column: sh.rows[0][i], message: 'Column not recognised; ignored.' });
+    const sheetName = sh.name;
+    const { idx, custom, names } = readHeader(def, sh.rows[0], {
+      error: (s, r, c, m, i) => report.error(sheetName, r, c, m, i),
+      warn: (s, r, c, m, i) => report.warn(sheetName, r, c, m, i),
     });
-    for (const col of def.columns.filter((c) => c.req && idx[c.k] === undefined)) e(def.name, 1, col.h, `Column "${col.h}" is missing`);
-    if (def.columns.some((c) => c.req && idx[c.k] === undefined)) continue;
+    layout[def.key] = { sheet: sheetName, columns: Object.fromEntries(Object.entries(idx).map(([k, i]) => [def.columns.find((c) => c.k === k)?.h || k, i])) };
+    const missing = def.columns.filter((c) => c.req && idx[c.k] === undefined);
+    for (const col of missing) report.error(sheetName, 1, col.h, `Column "${col.h}" is missing`);
+    if (missing.length) continue;
     const body = sh.rows.slice(1);
-    if (body.length > MAX_ROWS) { e(def.name, null, null, `More than ${MAX_ROWS} rows`); continue; }
+    if (body.length > MAX_ROWS) { report.error(sheetName, null, null, `More than ${MAX_ROWS} rows`); continue; }
     body.forEach((cells, n) => {
       const rowNo = n + 2;
       if (!cells || cells.every(blank)) return;
-      const row = { _row: rowNo };
+      const row = { _row: rowNo, _sheet: sheetName };
       for (const col of def.columns) {
         const raw = idx[col.k] === undefined ? null : cells[idx[col.k]];
         const r = convert(raw, col);
-        if (r.error) e(def.name, rowNo, col.h, `${col.h} ${r.error}`);
-        else if (col.req && r.value === null) e(def.name, rowNo, col.h, `${col.h} is required`);
+        if (r.error) report.error(sheetName, rowNo, col.h, `${col.h} ${r.error}`, idx[col.k]);
+        else if (col.req && r.value === null) report.error(sheetName, rowNo, col.h, `${col.h} is required`, idx[col.k] ?? null);
         row[col.k] = r.value ?? null;
       }
       if (custom.length) {
@@ -256,122 +376,235 @@ function parse(buffer, { today }) {
       data[def.key].push(row);
     });
     counts[def.key] = data[def.key].length;
+    void names;
   }
+  const at = (key, name) => layout[key]?.columns?.[name] ?? null;
+  const e = (key, r, column, message) => report.error(layout[key]?.sheet || SHEETS.find((s) => s.key === key).name, r ? r._row : null, column, message, r ? at(key, column) : null);
 
   // Within the file: numbers used twice, references to rows not there,
   // amounts that cannot be right.
   const dupes = (key, field, label) => {
     const seen = new Map();
-    const def = SHEETS.find((s) => s.key === key);
     for (const r of data[key]) {
       const v = typeof r[field] === 'string' ? r[field].toUpperCase() : r[field];
       if (v === null) continue;
-      if (seen.has(v)) e(def.name, r._row, label, `${label} ${r[field]} is also on row ${seen.get(v)}`);
+      if (seen.has(v)) e(key, r, label, `${label} ${r[field]} is also on row ${seen.get(v)}`);
       else seen.set(v, r._row);
     }
   };
   dupes('glAccounts', 'code', 'Code');
+  dupes('chart', 'code', 'GL Code');
   dupes('branches', 'code', 'Branch ID');
   dupes('centres', 'code', 'Centre ID');
   dupes('members', 'memberNo', 'Member number');
   dupes('deposits', 'accountNo', 'Account number');
   dupes('shares', 'accountNo', 'Account number');
   dupes('loans', 'accountNo', 'Account number');
-  {
-    const seen = new Map();
-    for (const r of data.schedule) {
-      const k = `${r.accountNo}#${r.number}`;
-      if (seen.has(k)) e('Loan Schedule', r._row, 'Installment', `Installment ${r.number} of ${r.accountNo} is also on row ${seen.get(k)}`);
-      else seen.set(k, r._row);
-    }
-  }
   for (const r of data.branches) if (r.code) r.code = r.code.toUpperCase();
   for (const r of data.centres) {
     if (r.code) r.code = r.code.toUpperCase();
     if (r.branch) r.branch = r.branch.toUpperCase();
-    if (r.meetingDay) {
-      const d = DAYS.indexOf(r.meetingDay.toUpperCase());
-      if (d < 0) e('Centres', r._row, 'Meeting day', 'Meeting day must be a day of the week');
-      else r.meetingDay = d;
-    }
+    // One address line here: the rest of the reference platform's address is joined to it.
+    const rest = [r.address2, r.city, r.postcode, r.region, r.country].filter(Boolean);
+    if (rest.length) r.address = [r.address, ...rest].filter(Boolean).join(', ').slice(0, MAX_TEXT);
   }
-  const later = (sheet, r, field, label) => {
-    if (asOf && r[field] && r[field] > asOf) e(sheet, r._row, label, `${label} ${r[field]} is after the migration date ${asOf}`);
+  for (const r of data.members) {
+    if (r.groupId) e('members', r, 'Group ID', 'Groups are not part of this system; leave Group ID empty');
+    if ((r.idNumber && !r.idType) || (r.idType && !r.idNumber)) e('members', r, r.idNumber ? 'ID type' : 'ID number', 'An ID document needs both its type and its number');
+  }
+  const later = (key, r, field, label) => {
+    if (asOf && r[field] && r[field] > asOf) e(key, r, label, `${label} ${r[field]} is after the migration date ${asOf}`);
   };
-  for (const r of data.members) { later('Members', r, 'joinedOn', 'Joined on'); later('Members', r, 'dateOfBirth', 'Date of birth'); }
-  for (const r of data.deposits) later('Deposit Accounts', r, 'openedOn', 'Opened on');
+  for (const r of data.members) { later('members', r, 'joinedOn', 'Joined on'); later('members', r, 'dateOfBirth', 'Date of birth'); }
+  for (const r of data.deposits) {
+    later('deposits', r, 'openedOn', 'Opened on');
+    later('deposits', r, 'appliedOn', 'Date applied');
+    if (r.appliedOn && r.openedOn && r.appliedOn > r.openedOn) e('deposits', r, 'Date applied', 'Date applied is after the date the account opened');
+    const overdrawn = round2((r.overdraftDue || 0) + (r.overdraftInterestDue || 0) + (r.overdraftFeesDue || 0));
+    if (overdrawn > 0 && r.balance > 0) e('deposits', r, 'Balance', 'An account is in credit or overdrawn, not both');
+    if (overdrawn > 0 && !(r.overdraftLimit > 0)) e('deposits', r, 'Overdraft limit', 'An overdrawn account needs its overdraft limit');
+  }
+
+  // Loans: their schedules and transactions, and what each state needs.
   const loanNos = new Set(data.loans.map((r) => r.accountNo));
-  for (const r of data.loans) {
-    later('Loan Accounts', r, 'disbursedOn', 'Disbursed on');
-    if (r.principal !== null && r.principalOutstanding !== null && r.principalOutstanding > r.principal) {
-      e('Loan Accounts', r._row, 'Principal outstanding', 'Principal outstanding is more than the principal');
-    }
-    if (r.installments === 0) e('Loan Accounts', r._row, 'Installments', 'Installments must be at least 1');
-  }
-  for (const r of data.schedule) {
-    if (r.accountNo && !loanNos.has(r.accountNo)) e('Loan Schedule', r._row, 'Account number', `No loan ${r.accountNo} on the Loan Accounts sheet`);
-    for (const [paid, due, label] of [['principalPaid', 'principalDue', 'Principal'], ['interestPaid', 'interestDue', 'Interest'], ['feesPaid', 'feesDue', 'Fees']]) {
-      if ((r[paid] || 0) > (r[due] || 0)) e('Loan Schedule', r._row, `${label} paid`, `${label} paid is more than ${label.toLowerCase()} due`);
-    }
-  }
-  // Each loan's schedule must add up to the loan.
   const sched = groupBy(data.schedule, (r) => r.accountNo);
-  for (const r of data.loans) {
-    const rows = sched.get(r.accountNo);
-    if (!rows || r.principal === null) continue;
-    const due = round2(sum(rows, 'principalDue'));
-    const paid = round2(sum(rows, 'principalPaid'));
-    if (due !== r.principal) e('Loan Accounts', r._row, 'Principal', `The schedule's principal due adds up to ${due}, not ${r.principal}`);
-    if (r.principalOutstanding !== null && round2(due - paid) !== r.principalOutstanding) {
-      e('Loan Accounts', r._row, 'Principal outstanding', `The schedule leaves ${round2(due - paid)} principal unpaid, not ${r.principalOutstanding}`);
+  const txs = groupBy(data.transactions, (r) => r.accountNo);
+  for (const r of data.schedule) if (r.accountNo && !loanNos.has(r.accountNo)) e('schedule', r, 'Account number', `No loan ${r.accountNo} on the Loan Accounts sheet`);
+  for (const r of data.transactions) if (r.accountNo && !loanNos.has(r.accountNo)) e('transactions', r, 'Account number', `No loan ${r.accountNo} on the Loan Accounts sheet`);
+  // A loan's transactions sit together, as the reference platform requires.
+  {
+    let last = null;
+    const seen = new Set();
+    for (const r of data.transactions) {
+      if (r.accountNo !== last && seen.has(r.accountNo)) e('transactions', r, 'Account number', `The transactions of ${r.accountNo} must be together, one loan after another`);
+      seen.add(r.accountNo); last = r.accountNo;
     }
-    const feesLeft = round2(sum(rows, 'feesDue') - sum(rows, 'feesPaid'));
-    if (r.feesOutstanding !== null && feesLeft !== r.feesOutstanding) {
-      e('Loan Accounts', r._row, 'Fees outstanding', `The schedule leaves ${feesLeft} fees unpaid, not ${r.feesOutstanding}`);
-    }
-    const numbers = rows.map((x) => x.number).sort((a, b) => a - b);
-    if (numbers.some((n, i) => n !== i + 1)) e('Loan Accounts', r._row, 'Account number', 'The schedule\'s installments must be numbered 1, 2, 3 without gaps');
-    if (rows.length !== r.installments) e('Loan Accounts', r._row, 'Installments', `The schedule has ${rows.length} installments, not ${r.installments}`);
   }
-  // The opening trial balance.
+  for (const [no, rows] of sched) {
+    // Installment numbers default to the order of the due dates.
+    const sorted = [...rows].sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
+    if (rows.every((x) => x.number === null)) sorted.forEach((x, i) => { x.number = i + 1; });
+    const numbers = [...rows].map((x) => x.number).sort((a, b) => a - b);
+    if (numbers.some((n, i) => n !== i + 1)) e('schedule', rows[0], 'Installment', `The installments of ${no} must be numbered 1, 2, 3 without gaps`);
+    const byNo = [...rows].sort((a, b) => a.number - b.number);
+    for (let i = 1; i < byNo.length; i += 1) {
+      if (byNo[i].dueDate <= byNo[i - 1].dueDate) { e('schedule', byNo[i], 'Due date', `Due dates of ${no} must be in ascending order`); break; }
+    }
+    for (const x of rows) {
+      for (const [paid, due, label] of [['principalPaid', 'principalDue', 'Principal'], ['interestPaid', 'interestDue', 'Interest'], ['feesPaid', 'feesDue', 'Fees'], ['penaltyPaid', 'penaltyDue', 'Penalty']]) {
+        if ((x[paid] || 0) > (x[due] || 0)) e('schedule', x, `${label} paid`, `${label} paid is more than ${label.toLowerCase()} due`);
+      }
+    }
+  }
+  for (const r of data.loans) {
+    if (r.clientType === 'G') e('loans', r, 'Client type', 'Group loans are not part of this system');
+    r.state = r.state || 'ACTIVE';
+    if (r.principalOutstanding === null && r.principalPaid !== null && r.principal !== null) r.principalOutstanding = round2(r.principal - r.principalPaid);
+    if (r.principalOutstanding !== null && r.principalPaid !== null && r.principal !== null && round2(r.principal - r.principalPaid) !== r.principalOutstanding) {
+      e('loans', r, 'Principal outstanding', 'Principal paid and principal outstanding do not add up to the principal');
+    }
+    if (r.principal !== null && r.principalOutstanding !== null && r.principalOutstanding > r.principal) e('loans', r, 'Principal outstanding', 'Principal outstanding is more than the principal');
+    if (r.installments === 0) e('loans', r, 'Installments', 'Installments must be at least 1');
+    later('loans', r, 'disbursedOn', 'Disbursed on');
+    later('loans', r, 'approvedOn', 'Date approved');
+    later('loans', r, 'appliedOn', 'Date applied');
+    const rows = sched.get(r.accountNo);
+    const own = txs.get(r.accountNo) || [];
+    r._hasSchedulePaid = !!rows && rows.some((x) => ['principalPaid', 'interestPaid', 'feesPaid', 'penaltyPaid'].some((k) => x[k] !== null));
+    const spec = specOf(r, rows, own);
+    for (const p of LM.check(spec, { asOf })) e('loans', r, columnFor(p.field), p.message);
+    if (rows && r.principal !== null && !own.length) {
+      const due = sum(rows, 'principalDue');
+      if (due !== r.principal) e('loans', r, 'Principal', `The schedule's principal due adds up to ${due}, not ${r.principal}`);
+      if (r._hasSchedulePaid) {
+        const paid = sum(rows, 'principalPaid');
+        if (r.principalOutstanding !== null && round2(due - paid) !== r.principalOutstanding) {
+          e('loans', r, 'Principal outstanding', `The schedule leaves ${round2(due - paid)} principal unpaid, not ${r.principalOutstanding}`);
+        }
+        // Fees owed are those on installments due by the migration date
+        // (or partly paid already); later ones are not due yet.
+        const applied = rows.filter((x) => (asOf && x.dueDate <= asOf) || (x.feesPaid || 0) > 0);
+        const feesLeft = round2(sum(applied, 'feesDue') - sum(applied, 'feesPaid'));
+        if (r.feesOutstanding !== null && feesLeft !== r.feesOutstanding) {
+          e('loans', r, 'Fees outstanding', `The schedule leaves ${feesLeft} fees owed by the migration date, not ${r.feesOutstanding}`);
+        }
+        if (rows.some((x) => x.penaltyDue !== null)) {
+          const penLeft = round2(sum(rows, 'penaltyDue') - sum(rows, 'penaltyPaid'));
+          if (r.penaltyOutstanding !== null && penLeft !== r.penaltyOutstanding) {
+            e('loans', r, 'Penalty outstanding', `The schedule leaves ${penLeft} penalties unpaid, not ${r.penaltyOutstanding}`);
+          }
+        }
+      }
+      if (rows.length !== r.installments) e('loans', r, 'Installments', `The schedule has ${rows.length} installments, not ${r.installments}`);
+    }
+  }
+
+  // Opening balances: GL Balances (debit, credit) or the chart of accounts
+  // (a balance signed by the account's type), not both.
+  const chartBalances = data.chart.filter((r) => r.balance !== null && r.balance !== 0);
+  if (chartBalances.length && data.glBalances.length) {
+    report.error(layout.chart.sheet, null, 'Balance', 'Give the opening balances on the Chart of Accounts sheet or on GL Balances, not both');
+  }
+  for (const r of data.chart) if (asOf && r.date && r.date !== asOf) e('chart', r, 'Date', `The balances are at the migration date, ${asOf}, not ${r.date}`);
+  const lines = openingLines(data);
   let dr = 0;
   let cr = 0;
   for (const r of data.glBalances) {
-    if ((r.debit || 0) > 0 && (r.credit || 0) > 0) e('GL Balances', r._row, 'Debit', 'A line is a debit or a credit, not both');
-    if (!(r.debit > 0) && !(r.credit > 0)) e('GL Balances', r._row, 'Debit', 'A line needs a debit or a credit');
-    dr += r.debit || 0;
-    cr += r.credit || 0;
+    if ((r.debit || 0) > 0 && (r.credit || 0) > 0) e('glBalances', r, 'Debit', 'A line is a debit or a credit, not both');
+    if (!(r.debit > 0) && !(r.credit > 0)) e('glBalances', r, 'Debit', 'A line needs a debit or a credit');
   }
-  if (round2(dr) !== round2(cr)) e('GL Balances', null, null, `Debits (${round2(dr)}) do not equal credits (${round2(cr)})`);
+  for (const l of lines) { if (l.side === 'D') dr += l.amount; else cr += l.amount; }
+  if (round2(dr) !== round2(cr)) {
+    const key = data.glBalances.length ? 'glBalances' : 'chart';
+    report.error(layout[key]?.sheet || 'GL Balances', null, null, `Debits (${round2(dr)}) do not equal credits (${round2(cr)})`);
+  }
 
-  return { asOf, data, counts, errors, warnings };
+  return { asOf, data, counts, errors, warnings, layout };
 }
 
-/** The fields a row gave, without the blanks. */
-const given = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined));
+const COLUMN_OF = {
+  disbursedOn: 'Disbursed on', principalOutstanding: 'Principal outstanding', state: 'Account state', closedOn: 'Closed on',
+  principalInterval: 'Principal interval', appliedOn: 'Date applied', approvedOn: 'Date approved', firstRepaymentDate: 'Repayment start date',
+  transactions: 'Account number', principalInArrears: 'Principal in arrears',
+};
+const columnFor = (f) => COLUMN_OF[f] || 'Account number';
 
-function groupBy(list, f) {
-  const m = new Map();
-  for (const x of list) { const k = f(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); }
-  return m;
+/** The loan as ./loanMigration takes it, from its sheet rows. */
+function specOf(r, schedule, txs) {
+  return {
+    accountNo: r.accountNo, productId: r.productId, principal: r.principal, installments: r.installments, rate: r.rate,
+    gracePeriods: r.gracePeriods, repaymentEvery: r.repaymentEvery, repaymentUnit: r.repaymentUnit, principalInterval: r.principalInterval,
+    state: r.state || 'ACTIVE', appliedOn: r.appliedOn, approvedOn: r.approvedOn, disbursedOn: r.disbursedOn, closedOn: r.closedOn,
+    firstRepaymentDate: r.firstRepaymentDate, principalOutstanding: r.principalOutstanding, principalInArrears: r.principalInArrears,
+    interestOutstanding: r.interestOutstanding, feesOutstanding: r.feesOutstanding, penaltyOutstanding: r.penaltyOutstanding,
+    purpose: r.purpose, notes: r.notes, customFields: r.customFields || {},
+    // A schedule without paid columns: what the account says was paid is
+    // applied to it oldest first, as to a schedule the product draws.
+    schedule: schedule ? schedule.map((x) => ({ ...x, ...(r._hasSchedulePaid ? {} : { principalPaid: null, interestPaid: null, feesPaid: null, penaltyPaid: null }) })) : null,
+    schedulePaid: !!r._hasSchedulePaid,
+    transactions: (txs || []).map((x) => ({ type: x.type, date: x.date, amount: x.amount, notes: x.notes })),
+  };
 }
-const sum = (list, k) => list.reduce((t, x) => t + Number(x[k] || 0), 0);
+
+/** The opening balances as journal lines, from either sheet. */
+function openingLines(data) {
+  if (data.glBalances.length) {
+    return data.glBalances.filter((r) => (r.debit || 0) > 0 || (r.credit || 0) > 0)
+      .map((r) => ({ glCode: r.glCode, amount: r.debit || r.credit, side: r.debit > 0 ? 'D' : 'C', branch: r.branch, row: r }));
+  }
+  return data.chart.filter((r) => r.balance && r.type).map((r) => {
+    const debitNature = ['ASSET', 'EXPENSE'].includes(r.type);
+    const debit = debitNature ? r.balance > 0 : r.balance < 0;
+    return { glCode: r.code, amount: Math.abs(r.balance), side: debit ? 'D' : 'C', branch: null, row: r };
+  });
+}
+
+// --- prerequisites ----------------------------------------------------------
+
+/**
+ * The reference platform's import prerequisites: users (credit officers), branches, custom
+ * fields and products set up before the import. What is missing becomes a
+ * warning on the upload, and is listed on the template.
+ */
+async function prerequisites(c) {
+  const n = async (sql) => (await c.query(sql)).rows[0].n;
+  const users = await n(`SELECT count(*)::int AS n FROM platform.users u JOIN platform.tenants t ON t.id = u.tenant_id
+                          WHERE t.schema_name = current_schema() AND u.status = 'ACTIVE'`);
+  const out = [
+    { item: 'Users (credit officers)', count: users, ok: users > 1, detail: 'Staff users besides the first administrator, to assign members to' },
+    { item: 'Branches', count: await n('SELECT count(*)::int AS n FROM branches'), detail: 'Branches members and accounts belong to (or on the Branches sheet)' },
+    { item: 'Loan products', count: await n('SELECT count(*)::int AS n FROM loan_products WHERE is_active'), detail: 'Every product a loan is imported under' },
+    { item: 'Deposit products', count: await n('SELECT count(*)::int AS n FROM savings_products WHERE is_active'), detail: 'Every product a deposit account is imported under' },
+    { item: 'Custom field definitions', count: await n('SELECT count(*)::int AS n FROM custom_field_definitions WHERE is_active'), detail: 'Only if you import custom field values', optional: true },
+  ];
+  for (const x of out) if (x.ok === undefined) x.ok = x.optional ? true : x.count > 0;
+  return out;
+}
+
+// --- running it ---------------------------------------------------------------
 
 /**
  * Run the import against the database. Every row runs in its own savepoint
  * so one bad row is reported and the rest still tried; a row that depends
  * on one that failed (a loan for a member who did not import) says so. The
  * caller decides what happens to the whole: rolled back (validation) or
- * committed (approval, only when there are no errors).
+ * committed (approval, only when there are no errors). `onProgress(done,
+ * total)` is called as rows are done; `preview` collects each record as
+ * created, for the reviewer.
  */
-async function execute(c, { asOf, data }, { importId, createdBy, user }) {
+async function execute(c, { asOf, data, layout = {} }, { importId, createdBy, user, onProgress = null, preview = null }) {
   const errors = [];
   const warnings = [];
-  const created = { glAccounts: 0, branches: 0, centres: 0, members: 0, deposits: 0, shares: 0, loans: 0, installments: 0, openingEntryLines: 0 };
-  const failed = { member: new Map(), branch: new Map(), loan: new Map() };
+  const created = { glAccounts: 0, branches: 0, centres: 0, members: 0, deposits: 0, shares: 0, loans: 0, installments: 0, transactions: 0, openingEntryLines: 0 };
+  const failed = { member: new Map(), branch: new Map(), centre: new Map() };
   const members = new Map();
+  const total = ['glAccounts', 'chart', 'branches', 'centres', 'members', 'deposits', 'shares', 'loans'].reduce((t, k) => t + data[k].length, 0) + 1;
+  let done = 0;
+  const tick = () => { done += 1; if (onProgress) onProgress(done, total); };
+  const push = (k, x) => { if (preview) (preview[k] = preview[k] || []).push(x); };
   let sp = 0;
-  const row = async (sheet, r, column, fn) => {
+  const indexOf = (key, column) => layout[key]?.columns?.[column] ?? null;
+  const row = async (key, r, column, fn) => {
     sp += 1;
     const name = `import_row_${sp}`;
     await c.query(`SAVEPOINT ${name}`);
@@ -381,7 +614,9 @@ async function execute(c, { asOf, data }, { importId, createdBy, user }) {
       return out;
     } catch (e) {
       await c.query(`ROLLBACK TO SAVEPOINT ${name}`);
-      errors.push({ sheet, row: r._row, column, message: explain(e) });
+      const sheet = layout[key]?.sheet || SHEETS.find((s) => s.key === key)?.name || key;
+      const index = indexOf(key, column);
+      errors.push({ sheet, row: r._row ?? null, column, message: explain(e), ...(index !== null ? { index } : {}) });
       return undefined;
     }
   };
@@ -394,82 +629,156 @@ async function execute(c, { asOf, data }, { importId, createdBy, user }) {
     return (await B.resolve(c, String(code).toUpperCase())).id;
   };
 
-  // The chart of accounts: parents before children.
+  // Custom field values as the sheet wrote them, as the field wants them:
+  // True and False for a checkbox, a date in either form.
+  const defs = new Map();
+  const coerce = async (entity, values) => {
+    if (!values || !Object.keys(values).length) return {};
+    if (!defs.has(entity)) defs.set(entity, await CF.definitions(c, { entity, includeInactive: false }));
+    const list = defs.get(entity);
+    const out = {};
+    for (const [setId, fields] of Object.entries(values)) {
+      out[setId] = {};
+      for (const [fieldId, v] of Object.entries(fields)) {
+        const d = list.find((x) => x.id === fieldId && x.set_id === setId);
+        let x = v;
+        if (d && d.field_type === 'CHECKBOX') {
+          const s = String(v).trim().toLowerCase();
+          x = ['true', 'yes', 'y', '1'].includes(s) || v === true ? true : ['false', 'no', 'n', '0'].includes(s) || v === false ? false : v;
+        } else if (d && d.field_type === 'DATE') x = isoDate(v) || v;
+        out[setId][fieldId] = x;
+      }
+    }
+    return out;
+  };
+
+  // Credit officers are the tenant's own users.
+  const officers = new Map();
+  const officer = async (who) => {
+    if (!who) return null;
+    const k = String(who).trim().toLowerCase();
+    if (!officers.has(k)) {
+      const { rows: [u] } = await c.query(
+        `SELECT u.email FROM platform.users u JOIN platform.tenants t ON t.id = u.tenant_id
+         WHERE t.schema_name = current_schema() AND u.status = 'ACTIVE' AND lower(u.email) = $1`, [k]);
+      officers.set(k, u ? u.email : null);
+    }
+    const found = officers.get(k);
+    if (!found) throw err(`Credit officer ${who} is not an active user of this SACCO (Credit Officers sheet)`);
+    return found;
+  };
+
+  // The chart of accounts: parents before children, then the reference platform's chart sheet.
   const pending = [...data.glAccounts];
   const inFile = new Set(pending.map((r) => r.code));
-  const done = new Set();
+  const placed = new Set();
   let guard = pending.length + 1;
   while (pending.length && guard > 0) {
     guard -= 1;
     for (let i = 0; i < pending.length; i += 1) {
       const r = pending[i];
-      if (r.parentCode && inFile.has(r.parentCode) && !done.has(r.parentCode)) continue;
+      if (r.parentCode && inFile.has(r.parentCode) && !placed.has(r.parentCode)) continue;
       pending.splice(i, 1); i -= 1;
-      done.add(r.code);
-      const ok = await row('GL Accounts', r, 'Code', async () => {
+      placed.add(r.code);
+      const ok = await row('glAccounts', r, 'Code', async () => {
         if (r.parentCode) {
           const { rows: [p] } = await c.query('SELECT type FROM gl_accounts WHERE code = $1', [r.parentCode]);
           if (!p) throw err(`Parent code ${r.parentCode} is not in the chart of accounts`);
         }
         const { rowCount } = await c.query(
-          `INSERT INTO gl_accounts (code, name, type, parent_code, usage, import_id)
-           VALUES ($1,$2,$3,$4,COALESCE($5,'DETAIL'),$6) ON CONFLICT (code) DO NOTHING`,
-          [r.code, r.name, r.type, r.parentCode, r.usage, importId]);
+          `INSERT INTO gl_accounts (code, name, type, parent_code, usage, notes, import_id)
+           VALUES ($1,$2,$3,$4,COALESCE($5,'DETAIL'),$6,$7) ON CONFLICT (code) DO NOTHING`,
+          [r.code, r.name, r.type, r.parentCode, r.usage, r.notes, importId]);
         if (!rowCount) throw err(`GL account ${r.code} is already in the chart of accounts`);
+        push('glAccounts', { code: r.code, name: r.name, type: r.type, usage: r.usage || 'DETAIL', parent: r.parentCode });
         return true;
       });
+      tick();
       if (ok) created.glAccounts += 1;
     }
   }
   for (const r of pending) errors.push({ sheet: 'GL Accounts', row: r._row, column: 'Parent code', message: 'The parent codes form a loop' });
+  for (const r of data.chart) {
+    const ok = await row('chart', r, 'GL Code', async () => {
+      const { rows: [g] } = await c.query('SELECT code, type FROM gl_accounts WHERE code = $1', [r.code]);
+      if (g) {
+        if (g.type !== r.type) throw err(`GL account ${r.code} is ${g.type} in the chart of accounts, not ${r.type}`);
+        return false;
+      }
+      await c.query(
+        `INSERT INTO gl_accounts (code, name, type, usage, notes, import_id) VALUES ($1,$2,$3,COALESCE($4,'DETAIL'),$5,$6)`,
+        [r.code, r.name, r.type, r.usage, r.notes, importId]);
+      push('glAccounts', { code: r.code, name: r.name, type: r.type, usage: r.usage || 'DETAIL', parent: null });
+      return true;
+    });
+    tick();
+    if (ok) created.glAccounts += 1;
+  }
 
   for (const r of data.branches) {
-    const ok = await row('Branches', r, 'Branch ID', async () => {
+    const ok = await row('branches', r, 'Branch ID', async () => {
       const b = await B.create(c, { ...given({ name: r.name, town: r.town, phone: r.phone, email: r.email, address: r.address, notes: r.notes }),
-        code: r.code, customFields: r.customFields || {}, createdBy, user });
+        code: r.code, customFields: await coerce('BRANCH', r.customFields), createdBy, user });
       await c.query('UPDATE branches SET import_id = $2 WHERE id = $1', [b.id, importId]);
+      push('branches', { code: b.code, name: b.name, town: b.town });
       return b;
     });
+    tick();
     if (ok) created.branches += 1; else failed.branch.set(r.code, r._row);
   }
-  const failedCentres = new Map();
   for (const r of data.centres) {
-    const ok = await row('Centres', r, 'Centre ID', async () => {
+    const ok = await row('centres', r, 'Centre ID', async () => {
       await branchId(r.branch);
       const ce = await B.createCentre(c, { ...given({ name: r.name, address: r.address, notes: r.notes }),
-        code: r.code, branchId: r.branch, meetingDay: r.meetingDay ?? null, customFields: r.customFields || {}, createdBy, user });
+        code: r.code, branchId: r.branch, meetingDay: r.meetingDay ?? null, customFields: await coerce('CENTRE', r.customFields), createdBy, user });
       await c.query('UPDATE centres SET import_id = $2 WHERE id = $1', [ce.id, importId]);
+      push('centres', { code: ce.code, name: ce.name, branch: r.branch, meetingDay: ce.meeting_day });
       return ce;
     });
-    if (ok) created.centres += 1; else failedCentres.set(r.code, r._row);
+    tick();
+    if (ok) created.centres += 1; else failed.centre.set(r.code, r._row);
   }
 
   for (const r of data.members) {
-    const m = await row('Members', r, 'Member number', async () => {
+    const m = await row('members', r, 'Member number', async () => {
       const bId = await branchId(r.branch);
       if (r.branch) {
         const { rows: [b] } = await c.query('SELECT status FROM branches WHERE id = $1', [bId]);
         if (b.status !== 'ACTIVE') throw err(`Branch ${r.branch} is deactivated`);
       }
-      if (r.centre) dependsOn(failedCentres, String(r.centre).toUpperCase(), 'Centre');
+      if (r.centre) dependsOn(failed.centre, String(r.centre).toUpperCase(), 'Centre');
       const centre = r.centre ? await B.centreFor(c, String(r.centre).toUpperCase(), bId || null) : null;
-      const values = await CF.prepare(c, 'MEMBER', { patch: r.customFields || {}, user, creating: true });
+      const credit = await officer(r.creditOfficer);
+      const values = await CF.prepare(c, 'MEMBER', { patch: await coerce('MEMBER', r.customFields), user, creating: true });
+      // The ID document, against the ID templates (the reference platform: ID type, number,
+      // authority, valid until); mandatory templates apply as on the form.
+      let docs = [];
+      if (r.idNumber) {
+        const { rows: [t] } = await c.query('SELECT id FROM id_templates WHERE lower(id_type) = lower($1) OR id::text = $1 LIMIT 1', [r.idType]);
+        docs = [{ templateId: t ? t.id : 'OTHER', idType: r.idType, documentId: r.idNumber, issuingAuthority: r.idAuthority, validUntil: r.idValidUntil }];
+      }
+      const shaped = await IDT.forNewMember(c, docs);
       const { rows: [x] } = await c.query(
         `INSERT INTO members (member_no, first_name, middle_name, last_name, national_id, kra_pin, phone, phone2, email,
             date_of_birth, gender, employer, status, joined_on, branch_id, centre_id, address_line1, address_line2, city,
             postcode, region, country, credit_officer, prior_loan_cycles, notes, custom_fields, import_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13,'ACTIVE'),COALESCE($14::date,$15::date),$16,$17,$18,$19,$20,
                  $21,$22,$23,$24,COALESCE($25,0),$26,$27,$28)
-         RETURNING id, branch_id`,
+         RETURNING id, branch_id, member_no`,
         [r.memberNo, r.firstName, r.middleName, r.lastName, r.nationalId, r.kraPin, r.phone, r.phone2, r.email,
           r.dateOfBirth, r.gender, r.employer, r.status, r.joinedOn, asOf, bId || (centre ? centre.branch_id : null), centre ? centre.id : null,
-          r.addressLine1, r.addressLine2, r.city, r.postcode, r.region, r.country, r.creditOfficer, r.priorLoanCycles, r.notes,
+          r.addressLine1, r.addressLine2, r.city, r.postcode, r.region, r.country, credit, r.priorLoanCycles, r.notes,
           JSON.stringify(values), importId]);
+      await IDT.storeForMember(c, x.id, shaped, { createdBy });
       await c.query(
         `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'MEMBER_IMPORTED','member',$2,$3)`,
         [createdBy, x.id, JSON.stringify({ memberNo: r.memberNo, importId })]);
+      push('members', { memberNo: r.memberNo, name: [r.firstName, r.middleName, r.lastName].filter(Boolean).join(' '), branch: r.branch,
+        centre: r.centre, joinedOn: r.joinedOn || asOf, creditOfficer: credit, priorLoanCycles: r.priorLoanCycles || 0,
+        idDocuments: shaped.map((d) => `${d.id_type} ${d.document_id}`) });
       return x;
     });
+    tick();
     if (m) { created.members += 1; members.set(r.memberNo, m); } else failed.member.set(r.memberNo, r._row);
   }
   const member = async (no) => {
@@ -481,32 +790,53 @@ async function execute(c, { asOf, data }, { importId, createdBy, user }) {
     return m;
   };
 
-  const subledger = { deposits: new Map(), shares: new Map(), loans: new Map() };
-  const addTo = (map, gl, amount) => map.set(gl, round2((map.get(gl) || 0) + amount));
+  const subledger = { deposits: new Map(), overdrafts: new Map(), shares: new Map(), loans: new Map() };
+  const addTo = (map, gl, amount) => { if (gl && amount) map.set(gl, round2((map.get(gl) || 0) + amount)); };
 
   for (const r of data.deposits) {
-    const ok = await row('Deposit Accounts', r, 'Account number', async () => {
+    const ok = await row('deposits', r, 'Account number', async () => {
       const m = await member(r.memberNo);
       const bId = await branchId(r.branch);
       const a = await SV.open(c, { memberId: m.id, productId: r.productId, accountNo: r.accountNo, branchId: bId,
-        overdraftLimit: r.overdraftLimit || 0, openedOn: r.openedOn || asOf, customFields: r.customFields || {}, user });
-      await c.query(
-        'UPDATE savings_accounts SET balance = $2, accrued_through = $3::date, import_id = $4 WHERE id = $1',
-        [a.id, r.balance, asOf, importId]);
-      if (r.balance > 0) {
-        await SV.record(c, { reference: SV.ref('MG'), kind: 'MIGRATION_OPENING_BALANCE', memberId: m.id, savingsAccountId: a.id,
-          amount: r.balance, valueDate: asOf, narration: 'Balance brought forward (data import)', createdBy,
-          allocation: { importId } });
+        overdraftLimit: r.overdraftLimit || 0, openedOn: r.openedOn || asOf, customFields: await coerce('SAVINGS_ACCOUNT', r.customFields), user });
+      const { rows: [p] } = await c.query('SELECT * FROM savings_products WHERE id = $1', [r.productId]);
+      const odPrincipal = round2(r.overdraftDue || 0);
+      const odInterest = round2(r.overdraftInterestDue || 0);
+      const odFees = round2(r.overdraftFeesDue || 0);
+      const overdrawn = round2(odPrincipal + odInterest + odFees);
+      if (overdrawn > 0 && !p.allow_overdraft) throw err(`Product ${p.id} does not allow overdrafts`);
+      if (overdrawn > round2(r.overdraftLimit || 0) + 0.001 && !p.allow_technical_overdraft) {
+        throw err(`The account is overdrawn by ${overdrawn}, more than its limit of ${r.overdraftLimit || 0}`);
       }
-      const { rows: [p] } = await c.query('SELECT gl_liability FROM savings_products WHERE id = $1', [r.productId]);
-      addTo(subledger.deposits, p.gl_liability, r.balance);
+      if (r.overdraftRate !== null && !p.allow_overdraft) throw err(`Product ${p.id} does not allow overdrafts, so it takes no overdraft rate`);
+      const balance = overdrawn > 0 ? -overdrawn : r.balance;
+      // Under cash accounting overdraft interest and fees applied but unpaid
+      // are income when paid; under accrual they are in the receivables the
+      // opening balances carry.
+      const cash = p.accounting_method !== 'ACCRUAL';
+      await c.query(
+        `UPDATE savings_accounts SET balance = $2, accrued_through = $3::date, last_interest_applied_on = $3::date,
+           period_started_on = $3::date + 1, import_id = $4, applied_on = $5::date, notes = $6, overdraft_rate = $7,
+           od_interest_due = $8, od_fees_due = $9
+         WHERE id = $1`,
+        [a.id, balance, asOf, importId, r.appliedOn || r.openedOn || asOf, r.notes, r.overdraftRate, cash ? odInterest : 0, cash ? odFees : 0]);
+      if (balance !== 0) {
+        await SV.record(c, { reference: SV.ref('MG'), kind: 'MIGRATION_OPENING_BALANCE', memberId: m.id, savingsAccountId: a.id,
+          amount: Math.abs(balance), valueDate: r.openedOn || asOf, narration: 'Balance brought forward (data import)', createdBy,
+          allocation: { importId, ...(balance < 0 ? { overdrawn: true, odPrincipal, odInterest, odFees } : {}) } });
+      }
+      addTo(subledger.deposits, p.gl_liability, Math.max(0, balance));
+      addTo(subledger.overdrafts, p.gl_od_portfolio, odPrincipal);
+      push('deposits', { accountNo: r.accountNo, memberNo: r.memberNo, product: r.productId, balance, overdraftLimit: r.overdraftLimit || 0,
+        overdraftRate: r.overdraftRate, openedOn: r.openedOn || asOf });
       return a;
     });
+    tick();
     if (ok) created.deposits += 1;
   }
 
   for (const r of data.shares) {
-    const ok = await row('Share Accounts', r, 'Account number', async () => {
+    const ok = await row('shares', r, 'Account number', async () => {
       const m = await member(r.memberNo);
       const { rows: [p] } = await c.query('SELECT * FROM share_products WHERE id = $1', [r.productId]);
       if (!p) throw err(`No share product ${r.productId}`);
@@ -518,163 +848,103 @@ async function execute(c, { asOf, data }, { importId, createdBy, user }) {
         `INSERT INTO share_movements (account_id, member_id, units, unit_price, amount, kind, value_date)
          VALUES ($1,$2,$3,$4,$5,'MIGRATION',$6)`, [a.id, m.id, r.units, p.unit_price, amount, asOf]);
       addTo(subledger.shares, p.gl_equity, amount);
+      push('shares', { accountNo: r.accountNo, memberNo: r.memberNo, product: r.productId, units: r.units, value: amount });
       return a;
     });
+    tick();
     if (ok) created.shares += 1;
   }
 
+  // Loans: the closed ones first, so a member's old loans are history
+  // before the running one is opened (a product may allow one at a time).
   const schedules = groupBy(data.schedule, (x) => x.accountNo);
-  for (const r of data.loans) {
-    const ok = await row('Loan Accounts', r, 'Account number', async () => {
+  const transactions = groupBy(data.transactions, (x) => x.accountNo);
+  const rank = { CLOSED: 0, WITHDRAWN: 0, REJECTED: 0, WRITTEN_OFF: 1, ACTIVE: 2, APPROVED: 3, PENDING_APPROVAL: 3 };
+  const loans = [...data.loans].sort((a, b) => (rank[a.state || 'ACTIVE'] ?? 2) - (rank[b.state || 'ACTIVE'] ?? 2));
+  for (const r of loans) {
+    const ok = await row('loans', r, 'Account number', async () => {
       const m = await member(r.memberNo);
-      const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1', [r.productId]);
-      if (!p) throw err(`No loan product ${r.productId}`);
-      if (!['FIXED_TERM', 'DYNAMIC_TERM'].includes(p.product_type || 'FIXED_TERM')) {
-        throw err(`Loans under ${p.product_type} products are not imported; open them in the system`);
-      }
-      if (p.interest_rate_source === 'INDEX') throw err('Loans with an index interest rate are not imported; open them in the system');
       const bId = await branchId(r.branch);
-      const l0 = await L.apply(c, {
-        memberId: m.id, productId: r.productId, principal: r.principal, termMonths: r.installments,
-        ...(r.rate !== null ? { monthlyRate: r.rate } : {}),
-        accountNo: r.accountNo, ...(bId !== undefined ? { branchId: bId } : {}),
-        purpose: r.purpose, notes: r.notes, customFields: r.customFields || {}, createdBy, user,
-      });
-      if (l0.rate_plan) throw err('Loans with adjustable interest periods are not imported; open them in the system');
-      await c.query(
-        `UPDATE loan_accounts SET status = 'ACTIVE', approved_on = $2::date, approved_by = $3, disbursed_on = $2::date,
-           disbursed_by = $3, principal_disbursed = principal, accrued_through = $4::date, import_id = $5
-         WHERE id = $1`, [l0.id, r.disbursedOn, createdBy, asOf, importId]);
-      // The product's penalty and arrears settings, frozen as at an approval.
-      await workflow.freezeSettings(c, l0.id);
-      await workflow.history(c, l0.id, { from: l0.status, to: 'ACTIVE', action: 'IMPORT', actor: createdBy, note: `data import, balances at ${asOf}` });
-
-      let l = await L.lock(c, l0.id);
-      const given = schedules.get(r.accountNo);
-      if (given) {
-        await c.query('DELETE FROM loan_installments WHERE loan_id = $1', [l.id]);
-        for (const s of [...given].sort((a, b) => a.number - b.number)) {
-          await c.query(
-            `INSERT INTO loan_installments (loan_id, number, due_date, nominal_due, principal_due, interest_due, fee_due,
-               principal_paid, interest_paid, fee_paid, status)
-             VALUES ($1,$2,$3::date,$3::date,$4,$5,$6,$7,$8,$9,'PENDING')`,
-            [l.id, s.number, s.dueDate, s.principalDue, s.interestDue, s.feesDue || 0, s.principalPaid || 0, s.interestPaid || 0, s.feesPaid || 0]);
+      const spec = specOf(r, schedules.get(r.accountNo), transactions.get(r.accountNo));
+      spec.memberId = m.id;
+      if (bId !== undefined) spec.branchId = bId;
+      spec.customFields = await coerce('LOAN_ACCOUNT', r.customFields);
+      const out = await LM.migrate(c, spec, { asOf, importId, createdBy, user });
+      for (const w of out.warnings) warnings.push({ sheet: layout.loans?.sheet || 'Loan Accounts', row: r._row, column: 'Account number', message: w });
+      addTo(subledger.loans, out.loan.gl_portfolio, out.principalOutstanding);
+      created.installments += out.installments;
+      created.transactions += spec.transactions.length;
+      if (preview) {
+        const b = L.balances(out.loan);
+        const item = { accountNo: r.accountNo, memberNo: r.memberNo, product: r.productId, status: out.loan.status, principal: Number(out.loan.principal),
+          principalOutstanding: b.principal, interestOutstanding: b.interest, feesOutstanding: b.fees, penaltyOutstanding: b.penalty,
+          arrearsSince: out.loan.arrears_since, disbursedOn: out.loan.disbursed_on, installments: out.installments };
+        if ((preview.loans || []).length < PREVIEW_SCHEDULES) {
+          item.schedule = (await c.query(
+            `SELECT number, due_date, principal_due, principal_paid, interest_due, interest_paid, fee_due, fee_paid, status, late_fee_exempt
+             FROM loan_installments WHERE loan_id = $1 ORDER BY number`, [out.loan.id])).rows;
         }
-      } else {
-        await L.buildSchedule(c, l);
-        // The principal repaid, oldest installments first, with their
-        // interest and fees treated as paid.
-        let left = round2(r.principal - r.principalOutstanding);
-        const { rows: insts } = await c.query('SELECT * FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]);
-        for (const i of insts) {
-          if (!(left > 0)) break;
-          const take = round2(Math.min(left, Number(i.principal_due)));
-          await c.query(
-            'UPDATE loan_installments SET principal_paid = $2, interest_paid = interest_due, fee_paid = fee_due WHERE id = $1',
-            [i.id, take]);
-          left = round2(left - take);
-        }
+        push('loans', item);
       }
-      await c.query(
-        `UPDATE loan_installments SET status = CASE
-            WHEN principal_paid >= principal_due AND interest_paid >= interest_due AND fee_paid >= fee_due THEN 'PAID'
-            WHEN principal_paid + interest_paid + fee_paid > 0 THEN 'PARTIALLY_PAID'
-            WHEN status = 'GRACE' THEN 'GRACE'
-            ELSE 'PENDING' END
-         WHERE loan_id = $1`, [l.id]);
-      const { rows: [t] } = await c.query(
-        `SELECT COALESCE(sum(principal_paid),0) AS pp, COALESCE(sum(interest_paid),0) AS ip, COALESCE(sum(fee_paid),0) AS fp, count(*)::int AS n
-         FROM loan_installments WHERE loan_id = $1`, [l.id]);
-      const feesLeft = round2(r.feesOutstanding || 0);
-      await c.query(
-        `UPDATE loan_accounts SET principal_paid = $2::numeric, interest_paid = $3::numeric, interest_accrued = $3::numeric + $4::numeric,
-           fees_paid = $5::numeric, fees_due = $5::numeric + $6::numeric, penalty_accrued = $7::numeric
-         WHERE id = $1`,
-        [l.id, round2(r.principal - r.principalOutstanding), t.ip, r.interestOutstanding || 0, t.fp, feesLeft, r.penaltyOutstanding || 0]);
-      // Fees still owed become one fee, on the oldest unpaid installment
-      // when the product drew the schedule (a given schedule already has them).
-      if (feesLeft > 0) {
-        const { rows: [first] } = await c.query(
-          "SELECT id FROM loan_installments WHERE loan_id = $1 AND status <> 'PAID' ORDER BY number LIMIT 1", [l.id]);
-        const placeOn = !given && first ? first.id : null;
-        if (placeOn) await c.query('UPDATE loan_installments SET fee_due = fee_due + $2, status = CASE WHEN status = \'PAID\' THEN \'PARTIALLY_PAID\' ELSE status END WHERE id = $1', [placeOn, feesLeft]);
-        await c.query(
-          `INSERT INTO loan_fees (loan_id, installment_id, name, fee_type, amount, paid, applied_on, status, note, created_by)
-           VALUES ($1,$2,'Fees brought forward','MANUAL',$3,0,$4::date,'DUE','data import',$5)`,
-          [l.id, placeOn, feesLeft, asOf, createdBy]);
-      }
-      // Arrears as at the migration date, on the product's own rules.
-      await workflow.markArrears(c, { asOf, loanId: l.id });
-      // Late before the migration date: no late fee, and penalties count
-      // from the migration date.
-      const { rows: late } = await c.query(
-        `UPDATE loan_installments SET late_fee_exempt = true
-         WHERE loan_id = $1 AND due_date < $2::date AND status NOT IN ('PAID', 'GRACE') RETURNING id, due_date`, [l.id, asOf]);
-      for (const i of late) {
-        await c.query(
-          `INSERT INTO penalty_charges (loan_id, installment_id, charged_on, days_late, basis_amount, rate, amount, forfeited, period_from, days_charged)
-           VALUES ($1,$2,$3::date,($3::date - $4::date),0,0,0,true,$4::date,0)`,
-          [l.id, i.id, asOf, i.due_date]);
-      }
-      l = await L.lock(c, l.id);
-      addTo(subledger.loans, l.gl_portfolio, r.principalOutstanding);
-      created.installments += t.n;
-      return l;
+      return out.loan;
     });
-    if (ok) created.loans += 1; else failed.loan.set(r.accountNo, r._row);
+    tick();
+    if (ok) created.loans += 1;
   }
 
-  // The opening trial balance, one entry on the migration date.
+  // The opening balances, one entry on the migration date.
   let entryId = null;
   const sheetGl = new Map();
-  if (data.glBalances.length) {
-    const lines = [];
+  const lines = openingLines(data);
+  if (lines.length) {
+    const posted = [];
     let good = true;
-    for (const r of data.glBalances) {
-      const ok = await row('GL Balances', r, 'GL code', async () => {
-        const { rows: [g] } = await c.query('SELECT code, type, usage FROM gl_accounts WHERE code = $1', [r.glCode]);
-        if (!g) throw err(`No GL account ${r.glCode}, in the chart or on the GL Accounts sheet`);
-        if (g.usage === 'HEADER') throw err(`GL account ${r.glCode} is a header account and takes no postings`);
-        const bId = await branchId(r.branch);
-        lines.push({ glCode: r.glCode, amount: r.debit || r.credit, side: r.debit > 0 ? 'D' : 'C', branchId: bId || null });
-        sheetGl.set(r.glCode, round2((sheetGl.get(r.glCode) || 0) + (r.debit || 0) - (r.credit || 0)));
+    const key = data.glBalances.length ? 'glBalances' : 'chart';
+    for (const l of lines) {
+      const ok = await row(key, l.row, key === 'glBalances' ? 'GL code' : 'GL Code', async () => {
+        const { rows: [g] } = await c.query('SELECT code, type, usage FROM gl_accounts WHERE code = $1', [l.glCode]);
+        if (!g) throw err(`No GL account ${l.glCode}, in the chart or on the GL Accounts sheet`);
+        if (g.usage === 'HEADER') throw err(`GL account ${l.glCode} is a header account and takes no postings`);
+        const bId = await branchId(l.branch);
+        posted.push({ glCode: l.glCode, amount: l.amount, side: l.side, branchId: bId || null });
+        sheetGl.set(l.glCode, round2((sheetGl.get(l.glCode) || 0) + (l.side === 'D' ? l.amount : -l.amount)));
         return true;
       });
       if (!ok) good = false;
     }
-    if (good && lines.length) {
-      const ok = await row('GL Balances', { _row: null }, null, async () => {
-        const e = await acct.post(c, {
-          debits: lines.filter((x) => x.side === 'D'),
-          credits: lines.filter((x) => x.side === 'C'),
-          bookingDate: asOf,
-          narration: 'Opening balances (data import)',
-          sourceType: 'DATA_IMPORT', sourceId: importId, createdBy,
-        });
-        return e;
-      });
-      if (ok) { entryId = ok.entryId; created.openingEntryLines = ok.lineCount; }
+    if (good && posted.length) {
+      const ok = await row(key, { _row: null }, null, async () => acct.post(c, {
+        debits: posted.filter((x) => x.side === 'D'),
+        credits: posted.filter((x) => x.side === 'C'),
+        bookingDate: asOf,
+        narration: 'Opening balances (data import)',
+        sourceType: 'DATA_IMPORT', sourceId: importId, createdBy,
+      }));
+      if (ok) {
+        entryId = ok.entryId; created.openingEntryLines = ok.lineCount;
+        if (preview) preview.openingEntry = posted.map((x) => ({ glCode: x.glCode, debit: x.side === 'D' ? x.amount : 0, credit: x.side === 'C' ? x.amount : 0 }));
+      }
     }
-
-    // Subledgers against the trial balance: a loan portfolio is a debit
-    // balance, deposits and share capital credit balances.
+    // Subledgers against the opening balances: loan and overdraft
+    // portfolios are debit balances, deposits and share capital credits.
     const compare = (map, sign, what) => {
-      for (const [gl, total] of map) {
+      for (const [gl, t] of map) {
         const inSheet = round2((sheetGl.get(gl) || 0) * sign);
-        if (round2(total) !== inSheet) {
-          warnings.push({ sheet: 'GL Balances', row: null, column: 'GL code',
-            message: `${what} add up to ${round2(total)} on GL account ${gl}; the GL Balances sheet has ${inSheet}` });
+        if (round2(t) !== inSheet) {
+          warnings.push({ sheet: layout[key]?.sheet || 'GL Balances', row: null, column: 'GL code',
+            message: `${what} add up to ${round2(t)} on GL account ${gl}; the opening balances have ${inSheet}` });
         }
       }
     };
     compare(subledger.loans, 1, 'Loan principal outstanding');
+    compare(subledger.overdrafts, 1, 'Overdrawn deposit accounts');
     compare(subledger.deposits, -1, 'Deposit balances');
     compare(subledger.shares, -1, 'Share capital');
   } else if (data.loans.length || data.deposits.length || data.shares.length) {
     warnings.push({ sheet: 'GL Balances', row: null, column: null,
-      message: 'Accounts are imported with balances but there is no GL Balances sheet: the general ledger will not show them until an opening entry is posted.' });
+      message: 'Accounts are imported with balances but there are no opening balances (GL Balances or Chart of Accounts): the general ledger will not show them until an opening entry is posted.' });
   }
-
+  tick();
   return { errors, warnings, created, entryId };
 }
 
@@ -691,114 +961,195 @@ function explain(e) {
   return String(e.message || e).replace(/_/g, ' ').replace(/^([A-Z ]+):/, (m) => m.charAt(0) + m.slice(1).toLowerCase());
 }
 
-// --- the workbook people download -----------------------------------------
+// --- the workbook people download ---------------------------------------------
 
+/**
+ * The template: Instructions and Settings, a sheet to fill in per kind of
+ * record (green headings, with a column for every custom field defined for
+ * it), and the reference sheets of what is already in the system (grey
+ * headings; anything typed there is ignored).
+ */
 async function template(c, { today = new Date().toISOString().slice(0, 10) } = {}) {
-  const sheets = [];
+  const pre = await prerequisites(c);
+  const defs = await CF.definitions(c, { includeInactive: false });
+  const customFor = (entity) => defs
+    .filter((d) => d.entity === entity && d.set_id && d.set_type !== 'GROUPED')
+    .map((d) => `Custom: ${d.set_id}.${d.id} (${d.name}${d.field_type === 'CHECKBOX' ? ', True or False' : d.field_type === 'SELECTION' ? `, ${(d.options || []).map((o) => o.label || o.id).join('/')}` : ''})`);
   const intro = [
     ['Data import'],
-    ['Fill in the sheets you need and leave the others empty. Columns marked * are required. Dates are yyyy-MM-dd (or Excel dates). Amounts are plain numbers.'],
-    ['Balances are as at the end of the migration date on the Settings sheet. Nothing is created until the upload is reviewed and approved.'],
-    ['Custom fields: add a column headed "Custom: _setId.fieldId" to Members, Branches, Centres, Deposit Accounts or Loan Accounts.'],
+    ['Fill in the sheets you need and leave the others empty. Columns marked * are required. Dates are dd.MM.yyyy or yyyy-MM-dd (or Excel dates). Amounts are plain numbers, no formulas or formatting.'],
+    ['IDs are at most 32 characters and other text 255. Balances are as at the end of the migration date on the Settings sheet. Nothing is created until the upload is reviewed and approved.'],
+    ['Sheets with green headings are for your data; those with grey headings list what is already in the system, to copy IDs from, and are not imported.'],
+    [],
+    ['Before you import', 'In place', 'Count', 'What it is for'],
+    ...pre.map((p) => [p.item, p.ok ? 'yes' : 'no', p.count, p.detail]),
     [],
     ['Sheet', 'Column', 'Required', 'Notes'],
   ];
+  const headRow = intro.length;
   for (const def of SHEETS) {
     if (def.note) intro.push([def.name, '', '', def.note]);
-    for (const col of def.columns) intro.push([def.name, col.h, col.req ? 'yes' : '', [col.oneOf ? `One of ${col.oneOf.join(', ')}` : '', col.hint || '', col.type ? `(${col.type})` : ''].filter(Boolean).join(' ')]);
+    for (const col of def.columns) {
+      intro.push([def.name, col.h, col.req ? 'yes' : '', [col.map ? col.map.label : '', col.hint || '', col.type ? `(${col.type === 'signed' ? 'amount, may be negative' : col.type})` : '',
+        col.a ? `Also read as: ${col.a.join(', ')}` : ''].filter(Boolean).join('. ')]);
+    }
   }
-  sheets.push({ name: 'Instructions', rows: intro, headerRows: 0, widths: [22, 26, 10, 80],
-    styles: { A1: 'bold', A6: 'bold', B6: 'bold', C6: 'bold', D6: 'bold' } });
-  sheets.push({ name: SETTINGS, rows: [['Setting', 'Value'], ['Migration date', today]], widths: [22, 16] });
+  const sheets = [{ name: 'Instructions', rows: intro, headerRows: 0, widths: [24, 26, 10, 90],
+    styles: { A1: 'bold', A6: 'bold', B6: 'bold', C6: 'bold', D6: 'bold', [`A${headRow}`]: 'bold', [`B${headRow}`]: 'bold', [`C${headRow}`]: 'bold', [`D${headRow}`]: 'bold' } }];
+  sheets.push({ name: SETTINGS, rows: [['Setting', 'Value'], ['Migration date', today]], widths: [22, 16], headerStyle: 'input' });
   for (const def of SHEETS) {
-    sheets.push({ name: def.name, rows: [def.columns.map((col) => (col.req ? `${col.h}*` : col.h))], widths: def.columns.map((col) => Math.max(12, col.h.length + 4)) });
+    const headers = [...def.columns.map((col) => (col.req ? `${col.h}*` : col.h)), ...(def.custom ? customFor(def.custom) : [])];
+    sheets.push({ name: def.name, rows: [headers], widths: headers.map((h) => Math.max(12, Math.min(40, h.length + 4))), headerStyle: 'input' });
   }
-  // What the tenant already has, to copy IDs from.
-  const ref = [['Kind', 'ID', 'Name', 'Detail']];
-  const add = (kind, rows) => rows.forEach((x) => ref.push([kind, x.id, x.name, x.detail || '']));
-  add('Loan product', (await c.query("SELECT id, name, product_type AS detail FROM loan_products WHERE is_active ORDER BY id")).rows);
-  add('Deposit product', (await c.query('SELECT id, name, gl_liability AS detail FROM savings_products WHERE is_active ORDER BY id')).rows);
-  add('Share product', (await c.query("SELECT id, name, 'unit price ' || unit_price AS detail FROM share_products WHERE is_active ORDER BY id")).rows);
-  add('Branch', (await c.query('SELECT code AS id, name, status AS detail FROM branches ORDER BY code')).rows);
-  add('Centre', (await c.query('SELECT c.code AS id, c.name, b.code AS detail FROM centres c JOIN branches b ON b.id = c.branch_id ORDER BY c.code')).rows);
-  add('GL account', (await c.query("SELECT code AS id, name, type || ' ' || usage AS detail FROM gl_accounts WHERE is_active ORDER BY code")).rows);
-  sheets.push({ name: 'Reference', rows: ref, widths: [16, 16, 36, 24] });
+  // What the tenant already has, one reference sheet per kind (the reference platform).
+  const ref = async (name, header, sql) => sheets.push({ name, rows: [header, ...(await c.query(sql)).rows.map((x) => Object.values(x))],
+    widths: header.map(() => 22), headerStyle: 'reference' });
+  await ref('Branches Data', ['Branch ID', 'Name', 'Town', 'Status'], 'SELECT code, name, town, status FROM branches ORDER BY code');
+  await ref('Centres Data', ['Centre ID', 'Name', 'Branch ID', 'Status'], 'SELECT ce.code, ce.name, b.code AS branch, ce.status FROM centres ce JOIN branches b ON b.id = ce.branch_id ORDER BY ce.code');
+  await ref('Credit Officers', ['Username (email)', 'Name', 'Role', 'Branch ID'],
+    `SELECT u.email, u.full_name, u.role, b.code FROM platform.users u JOIN platform.tenants t ON t.id = u.tenant_id
+     LEFT JOIN branches b ON b.id = u.branch_id WHERE t.schema_name = current_schema() AND u.status = 'ACTIVE' ORDER BY lower(u.email)`);
+  await ref('Loan Products', ['Product ID', 'Name', 'Type', 'Repays every', 'Rate', 'Installments'],
+    `SELECT id, name, product_type, repayment_interval_count || ' ' || lower(repayment_interval_unit), monthly_rate, COALESCE(min_term::text || '-', '') || max_term
+     FROM loan_products WHERE is_active ORDER BY id`);
+  await ref('Deposit Products', ['Product ID', 'Name', 'Annual rate', 'Overdraft'],
+    "SELECT id, name, annual_rate, CASE WHEN allow_overdraft THEN 'yes' ELSE 'no' END FROM savings_products WHERE is_active ORDER BY id");
+  await ref('Share Products', ['Product ID', 'Name', 'Unit price'], 'SELECT id, name, unit_price FROM share_products WHERE is_active ORDER BY id');
+  await ref('GL Accounts Data', ['GL Code', 'Name', 'Type', 'Usage'], 'SELECT code, name, type, usage FROM gl_accounts WHERE is_active ORDER BY code');
+  await ref('ID Templates', ['ID type', 'Issuing authority', 'Format', 'Mandatory'],
+    "SELECT id_type, issuing_authority, mask, CASE WHEN mandatory THEN 'yes' ELSE 'no' END FROM id_templates ORDER BY id_type");
   return XLSX.write(sheets);
 }
 
-/** The uploaded workbook back, with an Errors column on each sheet that has errors. */
+/**
+ * The uploaded workbook back with its errors (the reference platform): each offending cell
+ * red, an Errors column on the sheet saying what to fix, and an Errors sheet
+ * last listing them all.
+ */
 function errorWorkbook(buffer, errors) {
   const book = XLSX.read(buffer);
   const bySheet = groupBy(errors, (x) => norm(x.sheet));
-  const out = [{
-    name: 'Errors',
-    rows: [['Sheet', 'Row', 'Column', 'Error'], ...errors.map((x) => [x.sheet, x.row, x.column, x.message])],
-    widths: [20, 8, 22, 90],
-  }];
+  const out = [];
   for (const sh of book) {
     if (norm(sh.name) === 'errors') continue;
     const errs = bySheet.get(norm(sh.name)) || [];
     const width = Math.max(0, ...sh.rows.map((r) => r.length));
     const styles = {};
-    const col = XLSX.colName(width);
+    const noteCol = XLSX.colName(width);
+    const header = (sh.rows[0] || []).map(norm);
     const rows = sh.rows.map((r, i) => {
       const mine = errs.filter((x) => x.row === i + 1 || (i === 0 && x.row === null));
       const cells = [...r, ...Array(Math.max(0, width - r.length)).fill(null)];
       if (i === 0 && errs.length) cells.push('Errors');
-      else if (mine.length) { cells.push(mine.map((x) => x.message).join('; ')); styles[`${col}${i + 1}`] = 'error'; }
+      else if (mine.length) {
+        cells.push(mine.map((x) => x.message).join('; '));
+        styles[`${noteCol}${i + 1}`] = 'error';
+        for (const x of mine) {
+          const at = x.index ?? (x.column ? header.indexOf(norm(x.column)) : -1);
+          if (at !== null && at >= 0) styles[`${XLSX.colName(at)}${i + 1}`] = 'bad';
+        }
+      }
       return cells;
     });
     out.push({ name: sh.name, rows, styles });
   }
+  out.push({
+    name: 'Errors',
+    rows: [['Sheet', 'Row', 'Column', 'Error'], ...errors.map((x) => [x.sheet, x.row, x.column, x.message])],
+    widths: [20, 8, 22, 90],
+  });
   return XLSX.write(out);
 }
 
-// --- the life of an import ------------------------------------------------
+// --- the life of an import ------------------------------------------------------
 
-const PUBLIC = `id, file_name, file_size, sha256, status, as_of, summary, errors, warnings, entry_id,
-                created_by, created_at, decided_by, decided_at, decision_note, (error_file IS NOT NULL) AS has_error_file`;
+const PUBLIC = `id, file_name, file_size, sha256, status, as_of, summary, errors, warnings, entry_id, progress, progress_at,
+                started_at, finished_at, created_by, created_at, decided_by, decided_at, decision_note,
+                (error_file IS NOT NULL) AS has_error_file, (preview IS NOT NULL) AS has_preview,
+                CASE status WHEN 'PENDING_APPROVAL' THEN 'DRAFT' WHEN 'REJECTED' THEN 'REVERTED' ELSE status END AS import_state`;
+const STALE_MINUTES = 30;
 
-/** Upload: check, dry-run, and record as INVALID or PENDING_APPROVAL. */
-async function upload(c, { buffer, fileName }, { createdBy, user, today }) {
+/** Store an upload, QUEUED for the background run (./ops/importRunner). */
+async function submit(c, { buffer, fileName }, { createdBy }) {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) throw err('SEND_THE_WORKBOOK_AS_THE_REQUEST_BODY');
+  if (buffer.length > MAX_FILE) throw err(`FILE_TOO_LARGE: the limit is ${MAX_FILE} bytes`, 413);
   const name = String(fileName || 'import.xlsx').replace(/[^A-Za-z0-9 ._-]/g, '_').slice(0, 200);
-  const sha256 = crypto.createHash('sha256').update(buffer || Buffer.alloc(0)).digest('hex');
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+  const { rows: [imp] } = await c.query(
+    `INSERT INTO data_imports (file_name, file_size, sha256, status, file, created_by)
+     VALUES ($1,$2,$3,'QUEUED',$4,$5) RETURNING ${PUBLIC}`, [name, buffer.length, sha256, buffer, createdBy]);
+  await c.query(
+    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'DATA_IMPORT_UPLOADED','data_import',$2,$3)`,
+    [createdBy, imp.id, JSON.stringify({ fileName: name, size: buffer.length })]);
+  return imp;
+}
+
+/**
+ * The validation run for a QUEUED import: check the workbook, run the
+ * import in a savepoint and roll it back, and record the outcome with the
+ * preview. `progress(percent)` is called as it goes (the runner writes it
+ * on its own connection so it can be seen while this transaction is open).
+ */
+async function validate(c, id, { user, today, progress = null }) {
+  // Not locked: the runner writes progress to this row from another
+  // connection while this transaction is open.
+  const { rows: [imp] } = await c.query('SELECT * FROM data_imports WHERE id = $1', [id]);
+  if (!imp) throw err('IMPORT_NOT_FOUND', 404);
+  if (!['QUEUED', 'IN_PROGRESS'].includes(imp.status)) return get(c, id);
   let parsed;
   try {
-    parsed = parse(buffer, { today });
+    parsed = parse(imp.file, { today });
   } catch (e) {
-    if (e.status === 413) throw e;
-    parsed = { asOf: null, data: null, counts: {}, errors: [{ sheet: null, row: null, column: null, message: explain(e) }], warnings: [] };
+    parsed = { asOf: null, data: null, counts: {}, errors: [{ sheet: null, row: null, column: null, message: explain(e) }], warnings: [], layout: {} };
   }
-  const { rows: [imp] } = await c.query(
-    `INSERT INTO data_imports (file_name, file_size, sha256, status, as_of, file, created_by)
-     VALUES ($1,$2,$3,'INVALID',$4,$5,$6) RETURNING id`, [name, buffer.length, sha256, parsed.asOf, buffer, createdBy]);
-
+  if (progress) progress(10);
   let run = { errors: [], warnings: [], created: {} };
+  const preview = {};
   if (!parsed.errors.length) {
+    const pre = await prerequisites(c);
+    const need = {
+      'Loan products': parsed.data.loans.length, 'Deposit products': parsed.data.deposits.length,
+      Branches: parsed.data.members.some((r) => r.branch) && !parsed.data.branches.length,
+      'Users (credit officers)': parsed.data.members.some((r) => r.creditOfficer),
+    };
+    for (const p of pre) {
+      if (!p.ok && need[p.item]) parsed.warnings.push({ sheet: null, row: null, column: null, message: `Prerequisite missing: ${p.item} (${p.detail})` });
+    }
     await c.query('SAVEPOINT import_dry_run');
     try {
-      run = await execute(c, parsed, { importId: imp.id, createdBy, user });
+      run = await execute(c, parsed, {
+        importId: id, createdBy: imp.created_by, user, preview,
+        onProgress: progress ? (done, total) => progress(10 + Math.floor((85 * done) / total)) : null,
+      });
     } finally {
       await c.query('ROLLBACK TO SAVEPOINT import_dry_run');
     }
   }
   const errors = [...parsed.errors, ...run.errors];
   const warnings = [...parsed.warnings, ...run.warnings];
-  const status = errors.length ? 'INVALID' : 'PENDING_APPROVAL';
+  const status = errors.length ? (parsed.data ? 'INVALID' : 'ERROR') : 'PENDING_APPROVAL';
   let errorFile = null;
   if (errors.length && parsed.data) {
-    try { errorFile = errorWorkbook(buffer, errors); } catch { errorFile = null; }
+    try { errorFile = errorWorkbook(imp.file, errors); } catch { errorFile = null; }
   }
   const summary = { rows: parsed.counts, creates: errors.length ? null : run.created };
   const { rows: [out] } = await c.query(
-    `UPDATE data_imports SET status = $2, summary = $3, errors = $4, warnings = $5, error_file = $6, pending = $7
+    `UPDATE data_imports SET status = $2, as_of = $3, summary = $4, errors = $5, warnings = $6, error_file = $7, pending = $8,
+       preview = $9, progress = 100, progress_at = now(), finished_at = now()
      WHERE id = $1 RETURNING ${PUBLIC}`,
-    [imp.id, status, JSON.stringify(summary), JSON.stringify(errors.slice(0, 5000)), JSON.stringify(warnings), errorFile,
-      status === 'PENDING_APPROVAL' ? JSON.stringify({ asOf: parsed.asOf, data: parsed.data }) : null]);
+    [id, status, parsed.asOf, JSON.stringify(summary), JSON.stringify(errors.slice(0, 5000)), JSON.stringify(warnings), errorFile,
+      status === 'PENDING_APPROVAL' ? JSON.stringify({ asOf: parsed.asOf, data: parsed.data, layout: parsed.layout }) : null,
+      status === 'PENDING_APPROVAL' ? JSON.stringify(preview) : null]);
   await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'DATA_IMPORT_UPLOADED','data_import',$2,$3)`,
-    [createdBy, imp.id, JSON.stringify({ fileName: name, status, errors: errors.length })]);
+    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'DATA_IMPORT_VALIDATED','data_import',$2,$3)`,
+    [imp.created_by, id, JSON.stringify({ status, errors: errors.length })]);
   return out;
+}
+
+/** Upload and validate in one transaction (the CLI, and callers that wait). */
+async function upload(c, { buffer, fileName }, { createdBy, user, today }) {
+  const imp = await submit(c, { buffer, fileName }, { createdBy });
+  return validate(c, imp.id, { user, today });
 }
 
 async function lockImport(c, id) {
@@ -848,12 +1199,20 @@ async function reject(c, id, { createdBy, note = null }) {
   const imp = await lockImport(c, id);
   if (!['PENDING_APPROVAL', 'INVALID'].includes(imp.status)) throw err(`IMPORT_IS_${imp.status}`, 409);
   const { rows: [out] } = await c.query(
-    `UPDATE data_imports SET status = 'REJECTED', pending = NULL, decided_by = $2, decided_at = now(), decision_note = $3
+    `UPDATE data_imports SET status = 'REJECTED', pending = NULL, preview = NULL, decided_by = $2, decided_at = now(), decision_note = $3
      WHERE id = $1 RETURNING ${PUBLIC}`, [imp.id, createdBy, note]);
   await c.query(
     `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'DATA_IMPORT_REJECTED','data_import',$2,$3)`,
     [createdBy, imp.id, JSON.stringify({ note })]);
   return out;
+}
+
+/** A run that stopped moving (the process went away) is not left IN_PROGRESS for ever. */
+async function markStale(c) {
+  await c.query(
+    `UPDATE data_imports SET status = 'ERROR', finished_at = now(),
+       errors = '[{"sheet":null,"row":null,"column":null,"message":"The validation run was interrupted; upload the file again"}]'
+     WHERE status IN ('QUEUED', 'IN_PROGRESS') AND COALESCE(progress_at, created_at) < now() - make_interval(mins => $1)`, [STALE_MINUTES]);
 }
 
 async function list(c, { limit = 50 } = {}) {
@@ -867,6 +1226,24 @@ async function get(c, id) {
   return imp;
 }
 
+/**
+ * The preview, one kind of record at a time and paged: what approval would
+ * create, as it will be (the reference platform shows the draft data in its screens; here
+ * nothing exists before approval, so the validation run keeps a copy).
+ */
+async function previewOf(c, id, { kind = null, offset = 0, limit = 50 } = {}) {
+  const { rows: [imp] } = await c.query('SELECT status, preview FROM data_imports WHERE id::text = $1', [String(id)]);
+  if (!imp) throw err('IMPORT_NOT_FOUND', 404);
+  if (!imp.preview) throw err(`NO_PREVIEW: the import is ${imp.status}`, 409);
+  const kinds = Object.fromEntries(Object.entries(imp.preview).map(([k, v]) => [k, Array.isArray(v) ? v.length : 0]));
+  if (!kind) return { kinds };
+  if (!(kind in imp.preview)) throw err(`UNKNOWN_KIND: ${Object.keys(imp.preview).join(', ')}`, 404);
+  const all = imp.preview[kind] || [];
+  const off = Math.max(0, Number(offset) || 0);
+  const lim = Math.min(500, Math.max(1, Number(limit) || 50));
+  return { kind, total: all.length, offset: off, limit: lim, items: all.slice(off, off + lim) };
+}
+
 async function fileOf(c, id, which) {
   const col = which === 'errors' ? 'error_file' : 'file';
   const { rows: [imp] } = await c.query(`SELECT file_name, ${col} AS data FROM data_imports WHERE id::text = $1`, [String(id)]);
@@ -875,4 +1252,27 @@ async function fileOf(c, id, which) {
   return { fileName: which === 'errors' ? imp.file_name.replace(/(\.xlsx)?$/i, '-errors.xlsx') : imp.file_name, data: imp.data };
 }
 
-module.exports = { SHEETS, parse, execute, template, errorWorkbook, upload, approve, reject, list, get, fileOf, MAX_FILE };
+/**
+ * The import in the reference platform's terms (GET /data/import/{importKey}): the job's
+ * state, the event to approve or reject once validation has passed, and the
+ * errors with the sheet, row and column (name and position).
+ */
+function apiStatus(imp) {
+  const running = ['QUEUED', 'IN_PROGRESS'].includes(imp.status);
+  const state = running ? imp.status : imp.status === 'ERROR' ? 'ERROR' : 'COMPLETE';
+  return {
+    importKey: imp.id,
+    state,
+    progress: imp.progress,
+    eventKey: ['PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'FAILED'].includes(imp.status) ? imp.id : null,
+    importState: imp.import_state,
+    errors: (imp.errors || []).map((x) => ({
+      sheet: x.sheet, row: x.row, column: x.column || x.index !== undefined ? { name: x.column || null, index: x.index ?? null } : null, errorMessage: x.message,
+    })),
+  };
+}
+
+module.exports = {
+  SHEETS, REFERENCE_SHEETS, parse, execute, template, errorWorkbook, prerequisites, submit, validate, upload, approve, reject,
+  list, get, previewOf, fileOf, markStale, apiStatus, isoDate, MAX_FILE,
+};

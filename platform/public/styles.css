@@ -156,3 +156,6 @@ table.editor td.n { color: var(--muted, #667); width: 2.5em; }
 .login-logo { display: block; max-width: 300px; max-height: 60px; margin: 0 auto 12px; }
 .sacco-icon { width: 20px; height: 20px; object-fit: contain; margin-right: 6px; vertical-align: middle; }
 textarea { width: 100%; font: inherit; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; box-sizing: border-box; }
+
+/* The import's background check: a bar that fills as it runs. */
+#imp-progress progress { width: 260px; vertical-align: middle; accent-color: var(--accent); }

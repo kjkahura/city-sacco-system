@@ -37,18 +37,21 @@ function colIndex(ref) {
   return n - 1;
 }
 
-// Styles: 0 plain, 1 bold (headers), 2 red (error notes), 3 grey italic (hints).
+// Styles: 0 plain, 1 bold (headers), 2 red (error notes), 3 grey italic (hints),
+// 4 bold on green, 5 bold on grey, 6 red fill.
 const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <fonts count="4"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><color rgb="FFC00000"/><name val="Calibri"/></font><font><i/><sz val="10"/><color rgb="FF666666"/><name val="Calibri"/></font></fonts>
-<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+<fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9D9D9"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/><bgColor indexed="64"/></patternFill></fill></fills>
 <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>
+<cellXfs count="7"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="1" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1"/></cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`;
 
-const STYLE = { bold: 1, error: 2, hint: 3 };
+// input: a green header (a sheet to fill in); reference: a grey header (a
+// sheet of what is already in the system); bad: a red cell (an error).
+const STYLE = { bold: 1, error: 2, hint: 3, input: 4, reference: 5, bad: 6 };
 
 function cellXml(v, ref, style) {
   const s = style ? ` s="${style}"` : '';
@@ -73,7 +76,7 @@ function write(sheets) {
     const rows = sh.rows.map((r, ri) => {
       const cells = r.map((v, ci) => {
         const ref = `${colName(ci)}${ri + 1}`;
-        const st = sh.styles?.[ref] ? STYLE[sh.styles[ref]] : ri < header ? STYLE.bold : 0;
+        const st = sh.styles?.[ref] ? STYLE[sh.styles[ref]] : ri < header ? STYLE[sh.headerStyle || 'bold'] : 0;
         return cellXml(v, ref, st);
       }).join('');
       return `<row r="${ri + 1}">${cells}</row>`;

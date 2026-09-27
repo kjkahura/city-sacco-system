@@ -49,7 +49,8 @@ const PRODUCT_COLUMNS = `
   p.accounting_method, p.interest_accrued_accounting, p.accrual_granularity, p.interest_paid_into_account,
   p.interest_calc_balance, p.interest_day_count, p.interest_application, p.min_balance_for_interest,
   p.allow_negative_rate, p.withholding_tax_percent, p.allow_overdraft, p.max_overdraft_limit,
-  p.overdraft_annual_rate, p.allow_technical_overdraft`;
+  p.overdraft_annual_rate AS product_overdraft_rate, p.allow_technical_overdraft,
+  COALESCE(a.overdraft_rate, p.overdraft_annual_rate) AS overdraft_annual_rate`;
 
 async function lock(c, accountId) {
   const { rows } = await c.query(
