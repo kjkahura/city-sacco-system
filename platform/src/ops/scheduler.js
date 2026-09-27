@@ -76,11 +76,12 @@ const lastRunOn = new Map();
 
 async function tick({ log = console.log } = {}) {
   const hour = localHour();
-  const today = new Date().toISOString().slice(0, 10);
+  // The day in the scheduler's zone, the same zone the hour is read in.
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: process.env.SCHEDULER_TZ || 'Africa/Nairobi' }).format(new Date());
   const fired = [];
 
   for (const task of TASKS) {
-    const key = task.hour === 'EVERY' ? `${today}T${new Date().getUTCHours()}` : today;
+    const key = task.hour === 'EVERY' ? `${today}T${hour}` : today;
     if (task.hour !== 'EVERY' && hour !== task.hour) continue;
     if (lastRunOn.get(task.name) === key) continue;
     lastRunOn.set(task.name, key);

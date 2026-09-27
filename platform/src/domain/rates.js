@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
@@ -220,7 +221,7 @@ async function start(c, l, { date, shift, createdBy } = {}) {
  * Returns the change made, or null.
  */
 async function reviewLoan(c, loanId, { date, createdBy = 'EOD' } = {}) {
-  const asOf = date ? ymd(date) : isoDate(new Date());
+  const asOf = date ? ymd(date) : (await orgToday(c));
   let l = await ledger.lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) return null;
   const periods = await periodsOf(c, l.id);
@@ -261,7 +262,7 @@ async function reviewAll(c, { date, createdBy = 'EOD' } = {}) {
     `SELECT DISTINCT l.id FROM loan_accounts l JOIN loan_rate_periods p ON p.loan_id = l.id
      WHERE l.status IN ('ACTIVE', 'IN_ARREARS') AND ${G.EXCLUDED_SQL('l')}`);
   const changed = [];
-  const run = await G.eachLoan(c, { job: 'reviewRates', date: date ? ymd(date) : isoDate(new Date()) }, rows, async (id) => {
+  const run = await G.eachLoan(c, { job: 'reviewRates', date: date ? ymd(date) : (await orgToday(c)) }, rows, async (id) => {
     const out = await reviewLoan(c, id, { date, createdBy });
     if (out) changed.push(out);
   });
@@ -293,7 +294,7 @@ async function changeRate(c, loanId, { rate = null, spread = null, effectiveFrom
   const l = await ledger.lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`RATE_NOT_CHANGEABLE_IN_STATE_${l.status}`, 409);
   if (l.product_type === 'INTEREST_FREE') throw err('AN_INTEREST_FREE_LOAN_HAS_NO_RATE', 409);
-  const today = isoDate(new Date());
+  const today = await orgToday(c);
   const date = effectiveFrom ? ymd(effectiveFrom) : today;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw err('INVALID_EFFECTIVE_DATE', 400);
   if (l.disbursed_on && date < ymd(l.disbursed_on)) throw err(`RATE_CHANGE_BEFORE_DISBURSEMENT: ${ymd(l.disbursed_on)}`, 400);
@@ -410,7 +411,7 @@ async function deleteSource(c, id, { createdBy } = {}) {
 
 /** A value already in force that something uses is history: it cannot be edited or deleted. */
 async function assertValueChangeable(c, s, validFrom) {
-  if (ymd(validFrom) < isoDate(new Date()) && await sourceUse(c, s.id) > 0) {
+  if (ymd(validFrom) < (await orgToday(c)) && await sourceUse(c, s.id) > 0) {
     throw err(`RATE_VALUE_IN_USE: ${s.id} from ${ymd(validFrom)} is in force for accounts using it`, 409);
   }
 }
@@ -426,7 +427,7 @@ async function editIndexRate(c, sourceId, validFrom, { rate, notes } = {}, { cre
     [s.id, ymd(validFrom), rate === undefined ? null : Number(rate), notes ?? null]);
   await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'INDEX_RATE_CHANGED','index_rate',$2,$3,$4)`,
     [createdBy || 'SYSTEM', s.id, JSON.stringify(before), JSON.stringify(after)]);
-  if (s.kind !== 'INTEREST') await updateTaxRates(c, { date: isoDate(new Date()) });
+  if (s.kind !== 'INTEREST') await updateTaxRates(c, { date: (await orgToday(c)) });
   return after;
 }
 
@@ -438,7 +439,7 @@ async function deleteIndexRate(c, sourceId, validFrom, { createdBy } = {}) {
   await c.query('DELETE FROM index_rates WHERE source_id = $1 AND valid_from = $2::date', [s.id, ymd(validFrom)]);
   await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'INDEX_RATE_DELETED','index_rate',$2,$3)`,
     [createdBy || 'SYSTEM', s.id, JSON.stringify(before)]);
-  if (s.kind !== 'INTEREST') await updateTaxRates(c, { date: isoDate(new Date()) });
+  if (s.kind !== 'INTEREST') await updateTaxRates(c, { date: (await orgToday(c)) });
   return { deleted: { sourceId: s.id, validFrom: ymd(validFrom) } };
 }
 
@@ -447,7 +448,8 @@ async function deleteIndexRate(c, sourceId, validFrom, { createdBy } = {}) {
  * deposit product with a withholding tax source takes the source's value in
  * force on `date`. Products without a source keep their own percentage.
  */
-async function updateTaxRates(c, { date = isoDate(new Date()) } = {}) {
+async function updateTaxRates(c, { date = null } = {}) {
+  if (!date) date = await orgToday(c);
   const { rows: loans } = await c.query(
     `UPDATE loan_products p SET tax_rate_percent = r.rate, updated_at = now()
      FROM (SELECT DISTINCT ON (source_id) source_id, rate FROM index_rates WHERE valid_from <= $1::date ORDER BY source_id, valid_from DESC) r
@@ -475,7 +477,7 @@ async function setIndexRate(c, sourceId, { validFrom, rate, notes = null, create
     [createdBy || 'SYSTEM', sourceId, JSON.stringify(r)]);
   // A tax rate already in force reaches its products at once.
   const { rows: [src] } = await c.query('SELECT kind FROM index_rate_sources WHERE id = $1', [sourceId]);
-  if (src.kind !== 'INTEREST' && ymd(r.valid_from) <= isoDate(new Date())) await updateTaxRates(c, { date: isoDate(new Date()) });
+  if (src.kind !== 'INTEREST' && ymd(r.valid_from) <= (await orgToday(c))) await updateTaxRates(c, { date: (await orgToday(c)) });
   return r;
 }
 

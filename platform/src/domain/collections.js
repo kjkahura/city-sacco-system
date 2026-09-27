@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
@@ -34,7 +35,7 @@ const { isoDate } = S;
  */
 
 const RUNNING = ['ACTIVE', 'IN_ARREARS', 'LOCKED'];
-const today = () => isoDate(new Date());
+const today = (c) => orgToday(c);
 const dateOr = (v, fallback) => (v ? String(v).slice(0, 10) : fallback);
 
 async function sheet(c, { view = 'REPAYMENTS', from = null, to = null, asOf = null, branchId = null, productId = null, memberId = null } = {}) {
@@ -43,7 +44,7 @@ async function sheet(c, { view = 'REPAYMENTS', from = null, to = null, asOf = nu
   const where = `l.status = ANY($1) AND ($2::uuid IS NULL OR l.branch_id = $2::uuid) AND ($3::text IS NULL OR l.product_id = $3)
     AND ($4::uuid IS NULL OR l.member_id = $4::uuid)`;
   if (v === 'REPAYMENTS') {
-    const start = dateOr(from, today());
+    const start = dateOr(from, (await today(c)));
     const end = dateOr(to, start);
     if (end < start) throw err('THE_RANGE_ENDS_BEFORE_IT_STARTS', 400);
     const { rows } = await c.query(
@@ -57,7 +58,7 @@ async function sheet(c, { view = 'REPAYMENTS', from = null, to = null, asOf = nu
     return { view: 'REPAYMENTS', from: start, to: end, rows: out, total: round2(out.reduce((a, r) => a + r.expected, 0)) };
   }
   if (v === 'ACCOUNTS') {
-    const date = dateOr(asOf || to || from, today());
+    const date = dateOr(asOf || to || from, (await today(c)));
     const { rows } = await c.query(
       `SELECT l.id AS loan_id, l.account_no, l.branch_id, l.product_id, m.member_no, m.first_name || ' ' || m.last_name AS member_name,
               l.status, (l.penalty_accrued - l.penalty_paid)::float8 AS penalty,
@@ -101,7 +102,7 @@ async function post(c, { rows = [], channelId = null, valueDate = null, referenc
   if (rows.length > 2000) throw err('A_BATCH_TAKES_AT_MOST_2000_ROWS', 400);
   const { rows: [g] } = await c.query("SELECT pg_try_advisory_xact_lock(hashtext(current_schema() || ':loan-collection')) AS ok");
   if (!g.ok) throw err('ANOTHER_PROCESS_IS_IN_PROGRESS: a collection batch is being posted', 409);
-  const batchDate = dateOr(valueDate, today());
+  const batchDate = dateOr(valueDate, (await today(c)));
   // Oldest first within a loan, so two rows for one loan post in date order.
   const ordered = rows.map((r, k) => ({ ...r, k, date: dateOr(r.valueDate, batchDate) }))
     .sort((a, b) => String(a.loanId).localeCompare(String(b.loanId)) || a.date.localeCompare(b.date) || a.k - b.k);

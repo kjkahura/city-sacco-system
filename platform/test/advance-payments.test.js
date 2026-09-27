@@ -10,6 +10,7 @@
  *   - the endpoint the console's schedule editor reads
  */
 
+const { orgDay } = require('./_org');
 const app = require('../src/server');
 const { pool } = require('../src/db/pool');
 const { withTenant, withTenantRead } = require('../src/db/tenantContext');
@@ -38,7 +39,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
 const Rd = (fn) => withTenantRead(SCHEMA, fn);
 const round = (n) => Math.round(n * 100) / 100;
 const iso = (d) => d.toISOString().slice(0, 10);
-const inDays = (n) => iso(new Date(Date.now() + n * 86400000));
+const inDays = (n) => orgDay(n);
 
 let server;
 let token;

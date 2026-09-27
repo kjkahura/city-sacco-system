@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const { err, round2 } = acct;
 
@@ -182,7 +183,7 @@ async function render(c, code, { from = null, to = null, asAt = null } = {}) {
     name: t.name,
     periodKind: t.period_kind,
     period: pointInTime
-      ? { asAt: windowTo || new Date().toISOString().slice(0, 10) }
+      ? { asAt: windowTo || (await orgToday(c)) }
       : { from, to },
     official: t.is_official,
     sourceNote: t.source_note,

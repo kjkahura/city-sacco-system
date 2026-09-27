@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
@@ -173,7 +174,7 @@ async function orgContext(c) {
   const ctx = {
     'organization.name': t.name, 'organization.address': s.street_address, 'organization.city': s.city, 'organization.region': s.region,
     'organization.postcode': s.postcode, 'organization.country': s.country, 'organization.phone': s.phone, 'organization.email': s.email,
-    'organization.currency': t.currency_code, today: fmt.date(new Date().toISOString().slice(0, 10)), now: fmt.dateTime(new Date().toISOString()),
+    'organization.currency': t.currency_code, today: fmt.date((await orgToday(c))), now: fmt.dateTime(new Date().toISOString()),
   };
   return { ctx, fmt };
 }

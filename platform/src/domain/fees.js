@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const savings = require('./savings');
 const tax = require('./tax');
@@ -40,7 +41,7 @@ const { err, round2 } = acct;
 const ymd = (d) => (d instanceof Date
   ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   : String(d).slice(0, 10));
-const today = () => new Date().toISOString().slice(0, 10);
+const today = (c) => orgToday(c);
 
 
 async function productFees(c, productId, types = null) {
@@ -191,7 +192,7 @@ async function recordFee(c, l, { productFeeId = null, name, feeType, amount, val
   installmentId = null, glIncome, glReceivable, note = null, taxable = true, allocation = null, amortize = null, booked = true }) {
   const net = round2(amount);
   if (!(net > 0)) return null;
-  const date = valueDate ? ymd(valueDate) : today();
+  const date = valueDate ? ymd(valueDate) : (await today(c));
   const gl = { glIncome: glIncome || l.gl_fee_inc || l.gl_interest_inc, glReceivable: glReceivable || l.gl_fee_rec };
   const nonScheduled = allocation === 'NO_ALLOCATION';
   // Tax on fees, where the product charges it: the member owes the gross.
@@ -363,9 +364,9 @@ const FEE_STATES = ['ACTIVE', 'IN_ARREARS', 'LOCKED'];
  * paid; otherwise the allocation decides.
  */
 async function placement(c, l, { valueDate, installmentNumber, allocation }) {
-  const date = valueDate ? ymd(valueDate) : today();
-  if (date > today()) throw err('A_FEE_CANNOT_BE_DATED_IN_THE_FUTURE', 400);
-  if (valueDate && date < today()) {
+  const date = valueDate ? ymd(valueDate) : (await today(c));
+  if (date > (await today(c))) throw err('A_FEE_CANNOT_BE_DATED_IN_THE_FUTURE', 400);
+  if (valueDate && date < (await today(c))) {
     if (l.disbursed_on && date < ymd(l.disbursed_on)) throw err(`FEE_BEFORE_DISBURSEMENT: ${ymd(l.disbursed_on)}`, 400);
     const { rows: [later] } = await c.query(
       `SELECT reference, value_date FROM transactions WHERE loan_account_id = $1 AND kind = 'LOAN_REPAYMENT' AND reversed_by IS NULL

@@ -7,6 +7,7 @@
  * loan, and paid out by settling the old loan first.
  */
 
+const { orgDay } = require('./_org');
 const app = require('../src/server');
 const { pool } = require('../src/db/pool');
 const { withTenant, withTenantRead } = require('../src/db/tenantContext');
@@ -38,7 +39,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
 const Rd = (fn) => withTenantRead(SCHEMA, fn);
 const round = (n) => Math.round(n * 100) / 100;
 const bal = (code) => Rd((c) => acct.balance(c, code));
-const plus = (n, from = new Date()) => new Date(from.getTime() + n * 86400000).toISOString().slice(0, 10);
+const plus = (n) => orgDay(n);
 
 let server;
 const tokens = {};

@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
@@ -32,14 +33,14 @@ const { ymd, isoDate } = S;
  * This module stands above ./loans, like ./restructure.
  */
 
-const today = () => isoDate(new Date());
+const today = (c) => orgToday(c);
 
 async function loanFor(c, loanId, asOf) {
   const l = await ledger.lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   if (types.forLoan(l).basis !== 'SCHEDULE') throw err('POSTDATED_PAYMENTS_ARE_FOR_FIXED_TERM_LOANS', 409);
   if (!l.allow_postdated_payments) throw err('PRODUCT_DOES_NOT_ALLOW_POSTDATED_PAYMENTS', 409);
-  return { l, date: asOf ? ymd(asOf) : today() };
+  return { l, date: asOf ? ymd(asOf) : (await today(c)) };
 }
 
 async function channel(c, channelId) {
@@ -134,7 +135,7 @@ async function forLoan(c, loanId) {
  * recorded as FAILED without undoing the others.
  */
 async function applyDue(c, { asOf = null, createdBy = 'EOD', loanId = null } = {}) {
-  const date = asOf ? ymd(asOf) : today();
+  const date = asOf ? ymd(asOf) : (await today(c));
   const { rows } = await c.query(
     `SELECT * FROM loan_postdated_payments WHERE status = 'PENDING' AND value_date <= $1::date
        AND ${G.EXCLUDED_ID_SQL('loan_id')} AND ($2::uuid IS NULL OR loan_id = $2::uuid)

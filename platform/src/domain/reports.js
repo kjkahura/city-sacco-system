@@ -1,7 +1,8 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
-const { pageQuery } = require('../lib/page');
+const PF = require('./portfolio');
 const { round2 } = acct;
 
 /**
@@ -22,18 +23,20 @@ const { round2 } = acct;
  * counted whatever the dates say, which is how a statement for one month ends
  * up reporting the whole book.
  */
-async function byType(c, { from = null, to = null, includeClosing = true } = {}) {
-  const movement = includeClosing ? acct.MOVEMENT_SQL : acct.MOVEMENT_SQL_TRADING;
+async function byType(c, { from = null, to = null, includeClosing = true, branchId = null } = {}) {
+  const mv = acct.movement({ from, to, branchId, trading: !includeClosing });
   const { rows } = await c.query(
     `SELECT g.code, g.name, g.type, g.regulatory_class,
             COALESCE(m.debit, 0) - COALESCE(m.credit, 0) AS net
      FROM gl_accounts g
-     LEFT JOIN (${movement}) m ON m.gl_code = g.code
+     LEFT JOIN (${mv.sql}) m ON m.gl_code = g.code
      ORDER BY g.code`,
-    [from, to]
+    mv.params
   );
   return rows.map((r) => ({ ...r, net: round2(r.net) }));
 }
+
+const branchOut = (b) => (b ? { id: b.id, code: b.code, name: b.name } : null);
 
 const sum = (rows, pred) => round2(rows.filter(pred).reduce((s, r) => s + r.net, 0));
 
@@ -65,12 +68,13 @@ function pageLines(lines, { offset = 0, limit = null } = {}) {
  * earnings on the balance sheet.
  */
 async function incomeStatement(c, {
-  from = null, to = null, offset = 0, limit = null, includeClosing = false,
+  from = null, to = null, offset = 0, limit = null, includeClosing = false, branchId = null,
 } = {}) {
+  const branch = await acct.branchScope(c, branchId);
   // Trading only by default: the year-end sweep and the reserve transfer are
   // postings, not performance, and counting them makes a closed year look
   // like it broke exactly even.
-  const rows = await byType(c, { from, to, includeClosing });
+  const rows = await byType(c, { from, to, includeClosing, branchId: branch ? branch.id : null });
   const income = rows.filter((r) => r.type === 'INCOME' && r.net !== 0)
     .map((r) => ({ code: r.code, name: r.name, amount: round2(-r.net) }));
   const expenses = rows.filter((r) => r.type === 'EXPENSE' && r.net !== 0)
@@ -84,6 +88,7 @@ async function incomeStatement(c, {
 
   return {
     period: { from, to },
+    branch: branchOut(branch),
     income: i.page,
     expenses: e.page,
     page: { income: i.meta, expenses: e.meta },
@@ -101,8 +106,20 @@ async function incomeStatement(c, {
  * not happened yet. Without that line the sheet would not balance, and a
  * balance sheet that does not balance is worse than no balance sheet.
  */
-async function balanceSheet(c, { asAt = null, offset = 0, limit = null } = {}) {
-  const rows = await byType(c, { to: asAt });
+async function balanceSheet(c, { asAt = null, month = null, offset = 0, limit = null, branchId = null } = {}) {
+  const today = await orgToday(c);
+  const branch = await acct.branchScope(c, branchId);
+  // The reference platform's two modes: Date, everything from the start of the book to the
+  // date; Month, that month's postings only (to today, for the current month).
+  let from = null;
+  let to = asAt || today;
+  if (month) {
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(month))) throw acct.err(`INVALID_MONTH: ${month} (use yyyy-MM)`, 400);
+    from = `${month}-01`;
+    const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10);
+    to = last < today ? last : today;
+  }
+  const rows = await byType(c, { from, to, branchId: branch ? branch.id : null });
 
   const assets = rows.filter((r) => r.type === 'ASSET' && r.net !== 0)
     .map((r) => ({ code: r.code, name: r.name, amount: r.net }));
@@ -132,7 +149,10 @@ async function balanceSheet(c, { asAt = null, offset = 0, limit = null } = {}) {
   const q = pageLines(equity, { offset, limit });
 
   return {
-    asAt: asAt || new Date().toISOString().slice(0, 10),
+    asAt: to,
+    mode: month ? 'MONTH' : 'DATE',
+    ...(month ? { month, period: { from, to } } : {}),
+    branch: branchOut(branch),
     assets: a.page,
     liabilities: l.page,
     equity: q.page,
@@ -155,6 +175,7 @@ async function balanceSheet(c, { asAt = null, offset = 0, limit = null } = {}) {
  * right; the limits are yours to confirm.
  */
 async function prudentialRatios(c, { asAt = null } = {}) {
+  asAt = asAt || await orgToday(c);
   const rows = await byType(c, { to: asAt });
   const cls = (name) => sum(rows, (r) => r.regulatory_class === name);
 
@@ -221,7 +242,7 @@ async function prudentialRatios(c, { asAt = null } = {}) {
   });
 
   return {
-    asAt: asAt || new Date().toISOString().slice(0, 10),
+    asAt: asAt || (await orgToday(c)),
     inputs: {
       totalAssets, liquidAssets, loanPortfolio, otherAssets,
       memberDeposits, shortTermLiabilities: shortTerm,
@@ -236,74 +257,18 @@ async function prudentialRatios(c, { asAt = null } = {}) {
   };
 }
 
-/** Loan portfolio quality, the other half of what a board looks at. */
-async function portfolioAtRisk(c, { asAt = null } = {}) {
-  const date = asAt || new Date().toISOString().slice(0, 10);
-  const { rows } = await c.query(
-    `WITH arrears AS (${PAR_ARREARS_SQL})
-     SELECT ${PAR_BUCKET_SQL} AS bucket,
-       count(*)::int AS loans,
-       COALESCE(SUM(l.principal_disbursed - l.principal_paid), 0) AS outstanding
-     FROM arrears a JOIN loan_accounts l ON l.id = a.id
-     GROUP BY 1 ORDER BY 1`,
-    [date]
-  );
-
-  const total = round2(rows.reduce((s, r) => s + Number(r.outstanding), 0));
-  const atRisk = round2(rows.filter((r) => r.bucket !== 'CURRENT')
-    .reduce((s, r) => s + Number(r.outstanding), 0));
-
-  return {
-    asAt: date,
-    buckets: rows.map((r) => ({ ...r, outstanding: round2(r.outstanding) })),
-    totalOutstanding: total,
-    atRisk,
-    parPercent: total > 0 ? round2((atRisk / total) * 100) : 0,
-  };
+/**
+ * Loan portfolio quality, the other half of what a board looks at. The
+ * positions, buckets and thresholds live in ./portfolio, which the risk
+ * report, the indicators and the management reports share.
+ */
+async function portfolioAtRisk(c, opts = {}) {
+  return PF.portfolioAtRisk(c, opts);
 }
 
-/**
- * The loans behind the PAR buckets, one row each.
- *
- * This is the report a credit committee actually works from, and it is the
- * one that grows without limit, so it pages in SQL. The bucket boundaries are
- * the same expression as the summary above; they live in one SQL fragment so
- * the two cannot drift apart and report different numbers for the same day.
- */
-const PAR_BUCKET_SQL = `
-  CASE
-    WHEN a.days_late IS NULL OR a.days_late = 0 THEN 'CURRENT'
-    WHEN a.days_late <= 30  THEN 'PAR_1_30'
-    WHEN a.days_late <= 90  THEN 'PAR_31_90'
-    WHEN a.days_late <= 180 THEN 'PAR_91_180'
-    WHEN a.days_late <= 360 THEN 'PAR_181_360'
-    ELSE 'PAR_OVER_360'
-  END`;
-
-const PAR_ARREARS_SQL = `
-  SELECT l.id, GREATEST(0, MAX($1::date - i.due_date)) AS days_late
-  FROM loan_accounts l
-  LEFT JOIN loan_installments i
-    ON i.loan_id = l.id AND i.status <> 'PAID' AND i.due_date < $1::date
-  WHERE l.status IN ('ACTIVE','IN_ARREARS')
-  GROUP BY l.id`;
-
-async function portfolioAtRiskLoans(c, { asAt = null, bucket = null, offset = 0, limit = 50 } = {}) {
-  const date = asAt || new Date().toISOString().slice(0, 10);
-  const sql = `
-    WITH arrears AS (${PAR_ARREARS_SQL})
-    SELECT l.account_no, l.status, m.member_no, m.first_name, m.last_name,
-           COALESCE(a.days_late, 0)::int AS days_late,
-           ${PAR_BUCKET_SQL} AS bucket,
-           round(l.principal_disbursed - l.principal_paid, 2) AS outstanding
-    FROM arrears a
-    JOIN loan_accounts l ON l.id = a.id
-    JOIN members m ON m.id = l.member_id
-    WHERE ($2::text IS NULL OR ${PAR_BUCKET_SQL} = $2::text)
-    ORDER BY COALESCE(a.days_late, 0) DESC, l.account_no`;
-
-  const p = await pageQuery(c, sql, [date, bucket], { offset, limit });
-  return { asAt: date, bucket: bucket || 'ALL', ...p };
+/** The loans behind the PAR buckets, one row each, paged in SQL. */
+async function portfolioAtRiskLoans(c, opts = {}) {
+  return PF.loans(c, opts);
 }
 
 module.exports = {

@@ -73,18 +73,19 @@ const OPERATORS = {
   BEFORE_INCLUSIVE: (v, val) => new Date(v) <= new Date(val),
   STARTS_WITH: (v, val) => String(v ?? '').toLowerCase().startsWith(String(val).toLowerCase()),
   IN: (v, _val, _v2, values) => (values || []).includes(v),
-  TODAY: (v) => String(v).slice(0, 10) === new Date().toISOString().slice(0, 10),
+  // The organization's today, passed in by the caller (lib/orgDate).
+  TODAY: (v, _val, _v2, _values, today) => today != null && String(v).slice(0, 10) === today,
   EMPTY: (v) => v === null || v === undefined || v === '',
   NOT_EMPTY: (v) => !(v === null || v === undefined || v === ''),
 };
 
-function applyFilterCriteria(rows, criteria = []) {
+function applyFilterCriteria(rows, criteria = [], { today = null } = {}) {
   if (!Array.isArray(criteria) || !criteria.length) return rows;
   return rows.filter((row) =>
     criteria.every((c) => {
       const op = OPERATORS[String(c.operator || 'EQUALS').toUpperCase()];
       if (!op) return true;
-      return op(row?.[c.field], c.value, c.secondValue, c.values);
+      return op(row?.[c.field], c.value, c.secondValue, c.values, today);
     })
   );
 }

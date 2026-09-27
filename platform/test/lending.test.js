@@ -10,6 +10,7 @@
  * operation including the corrections.
  */
 
+const { orgDay } = require('./_org');
 const app = require('../src/server');
 const { pool } = require('../src/db/pool');
 const { withTenant, withTenantRead } = require('../src/db/tenantContext');
@@ -158,7 +159,7 @@ async function assertBalanced(label) {
     section('interest accrual then allocation');
     // Interest accrues per day now. Thirty days at 1% a month under 30E/360
     // is exactly one month's interest, which is what the schedule promises.
-    const plus30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+    const plus30 = orgDay(30);
     await T((c) => L.accrueInterest(c, loan.id, { valueDate: plus30, createdBy: 'test' }));
     bal = await T(async (c) => L.balances(await L.lock(c, loan.id)));
     check('interest accrued at 1% of principal for thirty days', bal.interest === 1200, String(bal.interest));

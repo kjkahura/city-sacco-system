@@ -9,6 +9,7 @@
  * that was reported but never enforced.
  */
 
+const { orgDay } = require('./_org');
 const app = require('../src/server');
 const { pool } = require('../src/db/pool');
 const { withTenant, withTenantRead } = require('../src/db/tenantContext');
@@ -37,7 +38,7 @@ const PORT = 4094;
 const T = (fn) => withTenant(SCHEMA, fn);
 const Rd = (fn) => withTenantRead(SCHEMA, fn);
 const bal = (code) => Rd((c) => acct.balance(c, code));
-const plus = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+const plus = (n) => orgDay(n);
 const today = plus(0);
 
 let server;

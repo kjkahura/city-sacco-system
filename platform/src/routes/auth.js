@@ -95,7 +95,7 @@ router.post('/login', loginRateLimit(), async (req, res, next) => {
     res.json({
       ...pair,
       user: { id: user.id, email: user.email, role: user.role, name: user.full_name },
-      tenant: { slug: req.tenant.slug, name: req.tenant.name, currency: req.tenant.currency_code },
+      tenant: { slug: req.tenant.slug, name: req.tenant.name, currency: req.tenant.currency_code, timezone: req.tenant.timezone },
     });
   } catch (e) { next(e); }
 });

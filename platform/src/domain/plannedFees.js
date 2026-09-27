@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
@@ -23,7 +24,7 @@ const { ymd, isoDate } = S;
  * holiday.
  */
 
-const today = () => isoDate(new Date());
+const today = (c) => orgToday(c);
 const OPEN = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'IN_ARREARS'];
 const RUNNING = ['ACTIVE', 'IN_ARREARS'];
 
@@ -64,11 +65,11 @@ async function figure(c, l, { fee, name, amount }) {
   return { productFeeId: null, name: String(name), amount: round2(amount) };
 }
 
-function checkApplyOn(applyOn, asOf) {
+async function checkApplyOn(c, applyOn, asOf) {
   if (applyOn === undefined || applyOn === null) return null;
   const d = String(applyOn).slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw err(`INVALID_DATE: ${applyOn}`, 400);
-  if (d <= (asOf || today())) throw err(`APPLY_ON_MUST_BE_AFTER_TODAY: ${d}`, 400);
+  if (d <= (asOf || (await today(c)))) throw err(`APPLY_ON_MUST_BE_AFTER_TODAY: ${d}`, 400);
   return d;
 }
 
@@ -80,7 +81,7 @@ async function add(c, loanId, { installment, fee = null, name = null, amount = n
   const { rows: [r] } = await c.query(
     `INSERT INTO loan_planned_fees (loan_id, installment_number, product_fee_id, name, amount, apply_on, note, created_by)
      VALUES ($1,$2,$3,$4,$5,$6::date,$7,$8) RETURNING *`,
-    [l.id, Number(installment), f.productFeeId, f.name, f.amount, checkApplyOn(applyOn, asOf), note, createdBy || 'SYSTEM']);
+    [l.id, Number(installment), f.productFeeId, f.name, f.amount, await checkApplyOn(c, applyOn, asOf), note, createdBy || 'SYSTEM']);
   return r;
 }
 
@@ -103,7 +104,7 @@ async function edit(c, id, { installment, amount, applyOn, note, asOf = null, cr
     if (!(round2(amount) > 0)) throw err('PLANNED_FEE_AMOUNT_MUST_BE_POSITIVE', 400);
     set('amount', round2(amount));
   }
-  if (applyOn !== undefined) set('apply_on', checkApplyOn(applyOn, asOf));
+  if (applyOn !== undefined) set('apply_on', await checkApplyOn(c, applyOn, asOf));
   if (note !== undefined) set('note', note);
   if (!sets.length) throw err('NO_UPDATABLE_FIELDS', 400);
   vals.push(id);
@@ -146,12 +147,12 @@ async function applyNow(c, p, { date, createdBy }) {
  */
 async function apply(c, loanId, { ids = null, applyOn = null, asOf = null, createdBy } = {}) {
   const l = await ledger.lock(c, loanId);
-  const date = asOf ? ymd(asOf) : today();
+  const date = asOf ? ymd(asOf) : (await today(c));
   const { rows } = await c.query(
     `SELECT * FROM loan_planned_fees WHERE loan_id = $1 AND status = 'PLANNED' AND ($2::bigint[] IS NULL OR id = ANY($2::bigint[]))
      ORDER BY installment_number, id FOR UPDATE`, [l.id, ids && ids.length ? ids.map(Number) : null]);
   if (!rows.length) throw err('NO_PLANNED_FEE_TO_APPLY', 409);
-  const on = checkApplyOn(applyOn, date);
+  const on = await checkApplyOn(c, applyOn, date);
   const out = [];
   for (const p of rows) {
     if (on) {
@@ -169,7 +170,7 @@ async function apply(c, loanId, { ids = null, applyOn = null, asOf = null, creat
  * was paid before its due date is skipped.
  */
 async function applyDue(c, { asOf = null, createdBy = 'EOD', loanId = null } = {}) {
-  const date = asOf ? ymd(asOf) : today();
+  const date = asOf ? ymd(asOf) : (await today(c));
   const { rows } = await c.query(
     `SELECT p.*, i.status AS installment_status, i.due_date FROM loan_planned_fees p
      JOIN loan_accounts l ON l.id = p.loan_id

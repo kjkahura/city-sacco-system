@@ -1,6 +1,7 @@
 'use strict';
 
 const { pool } = require('./pool');
+const { orgToday } = require('../lib/orgDate');
 
 /**
  * Tenant selection.
@@ -34,6 +35,18 @@ function assertSchemaName(schemaName) {
 }
 
 /**
+ * The transaction's schema and its clock. The session time zone is the
+ * tenant's, so current_date, now()::date and a DATE column's default are the
+ * organization's calendar day rather than the server's: in Nairobi between
+ * midnight and 03:00 the UTC day is still yesterday. Both settings are LOCAL
+ * and revert when the transaction ends. A tenant without a row (a schema made
+ * by hand in a test) keeps the server's zone.
+ */
+const BIND_SQL = `SELECT set_config('search_path', format('%I, public', $1::text), true),
+  set_config('TimeZone', COALESCE(
+    (SELECT timezone FROM platform.tenants WHERE schema_name = $1::text), current_setting('TimeZone')), true)`;
+
+/**
  * Run fn inside a transaction bound to one tenant's schema.
  * Commits on success, rolls back on throw.
  */
@@ -44,7 +57,7 @@ async function withTenant(schemaName, fn) {
     await client.query('BEGIN');
     // format('%I') applies quote_ident server-side; the regex above already
     // guarantees the value is a bare lowercase identifier. Belt and braces.
-    await client.query("SELECT set_config('search_path', format('%I, public', $1::text), true)", [schemaName]);
+    await client.query(BIND_SQL, [schemaName]);
 
     // Prove the schema exists rather than silently falling through to public,
     // which would read the wrong tables or none at all.
@@ -72,7 +85,7 @@ async function withTenantRead(schemaName, fn) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN READ ONLY');
-    await client.query("SELECT set_config('search_path', format('%I, public', $1::text), true)", [schemaName]);
+    await client.query(BIND_SQL, [schemaName]);
     const out = await fn(client);
     await client.query('COMMIT');
     return out;
@@ -84,4 +97,4 @@ async function withTenantRead(schemaName, fn) {
   }
 }
 
-module.exports = { withTenant, withTenantRead, assertSchemaName, TenantError, SCHEMA_RE };
+module.exports = { withTenant, withTenantRead, orgToday, assertSchemaName, TenantError, SCHEMA_RE };

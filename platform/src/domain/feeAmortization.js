@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
@@ -166,7 +167,7 @@ async function openRows(c, loanId, where = '', params = []) {
  * daily one in proportion to the days elapsed.
  */
 async function run(c, { asOf = null, createdBy = 'EOD', loanId = null } = {}) {
-  const date = asOf ? ymd(asOf) : S.isoDate(new Date());
+  const date = asOf ? ymd(asOf) : (await orgToday(c));
   const { rows: loans } = await c.query(
     `SELECT DISTINCT loan_id FROM loan_fee_amortization WHERE status = 'OPEN' AND period_start < $1::date
        AND ${G.EXCLUDED_ID_SQL('loan_id')} AND ($2::uuid IS NULL OR loan_id = $2::uuid)`, [date, loanId]);
@@ -223,7 +224,7 @@ async function recogniseRemaining(c, loanId, { date, createdBy, rows = null } = 
     for (const a of open) await c.query("UPDATE loan_fee_amortization SET status = 'DONE' WHERE id = $1", [a.id]);
     return 0;
   }
-  const on = date ? ymd(date) : S.isoDate(new Date());
+  const on = date ? ymd(date) : (await orgToday(c));
   const entryId = await recognise(c, l, items.map(({ a, delta }) => ({ deferred: a.gl_deferred, income: a.gl_income || incomeGl(l, null), amount: delta })),
     on, createdBy, 'Deferred fee income recognised at closure');
   let total = 0;

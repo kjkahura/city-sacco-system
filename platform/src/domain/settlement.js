@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
@@ -45,7 +46,7 @@ async function dueNow(c, l, asOf) {
 }
 
 async function run(c, { asOf = null, createdBy = 'EOD', loanId = null } = {}) {
-  const date = asOf ? ymd(asOf) : isoDate(new Date());
+  const date = asOf ? ymd(asOf) : (await orgToday(c));
   const { rows } = await c.query(
     `SELECT l.id FROM loan_accounts l JOIN loan_products p ON p.id = l.product_id
      WHERE l.settlement_account_id IS NOT NULL AND l.status IN ('ACTIVE', 'IN_ARREARS')

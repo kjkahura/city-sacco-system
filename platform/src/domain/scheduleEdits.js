@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
@@ -57,7 +58,7 @@ const { ymd, isoDate, toUTC } = S;
  */
 
 const EDITS = ['PAYMENT_DATES', 'PRINCIPAL', 'INTEREST', 'FEES', 'PAYMENT_HOLIDAYS', 'NUMBER_OF_INSTALLMENTS'];
-const today = () => isoDate(new Date());
+const today = (c) => orgToday(c);
 const r2 = (n, d) => S.roundTo(n, d);
 
 async function load(c, loanId, kind, asOf, { forUpdate = true } = {}) {
@@ -69,7 +70,7 @@ async function load(c, loanId, kind, asOf, { forUpdate = true } = {}) {
   const allowed = new Set(l.schedule_editing || []);
   if (kind && !allowed.has(kind)) throw err(`PRODUCT_DOES_NOT_ALLOW_${kind}_EDITING`, 409);
   const { rows } = await c.query('SELECT * FROM loan_installments WHERE loan_id = $1 ORDER BY number', [l.id]);
-  const date = asOf ? ymd(asOf) : today();
+  const date = asOf ? ymd(asOf) : (await today(c));
   // Where interest has been earned to: a fixed-term installment may change
   // only if its period starts on or after that day.
   const earned = l.accrued_through ? ymd(l.accrued_through) : ymd(l.disbursed_on);
@@ -318,7 +319,7 @@ async function applyHolidayInterest(c, loanId, { amount = null, note = null, cre
   if (!(pending > 0)) throw err('NO_HOLIDAY_INTEREST_IS_HELD', 409);
   const amt = amount === null || amount === undefined || amount === '' ? pending : round2(amount);
   if (!(amt > 0) || amt > pending) throw err(`HOLIDAY_INTEREST_TO_APPLY_IS_MORE_THAN_NOTHING_AND_AT_MOST: ${pending}`, 400);
-  const date = today();
+  const date = (await today(c));
   const type = types.forLoan(l);
   const { rows: open } = await c.query(
     `SELECT * FROM loan_installments WHERE loan_id = $1 AND status NOT IN ('PAID') AND NOT payment_holiday ORDER BY number`, [l.id]);
@@ -450,7 +451,7 @@ async function editApplication(c, l, { installments, note, asOf, createdBy }) {
   const allowed = new Set(l.schedule_editing || []);
   const need = (kind) => { if (!allowed.has(kind)) throw err(`PRODUCT_DOES_NOT_ALLOW_${kind}_EDITING`, 409); };
   const decimals = await ledger.currencyDecimals(c);
-  const date = asOf ? ymd(asOf) : today();
+  const date = asOf ? ymd(asOf) : (await today(c));
   const { rows: [p] } = await c.query('SELECT min_term, max_term FROM loan_products WHERE id = $1', [l.product_id]);
   const n = installments.length;
   if (n > p.max_term) throw err(`TERM_EXCEEDS_PRODUCT_MAX: ${p.max_term}`, 400);

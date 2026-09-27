@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const savings = require('./savings');
@@ -61,7 +62,7 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   if (!running) return null;
   if (l.interest_accrual === 'NONE' || !type.accrues(l)) return null;
 
-  let date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  let date = valueDate ? ymd(valueDate) : (await orgToday(c));
   const from = l.accrued_through || l.disbursed_on;
   if (!from) return null;
   const fromIso = ymd(from);
@@ -195,7 +196,7 @@ async function capitalizeInterest(c, loanId, { valueDate, createdBy } = {}) {
   const l = await lock(c, loanId);
   const amt = Math.max(0, round2(l.interest_accrued - l.interest_paid));
   if (!(amt > 0)) return null;
-  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const date = valueDate ? ymd(valueDate) : (await orgToday(c));
   await c.query(
     `UPDATE loan_accounts SET interest_accrued = interest_accrued - $1,
        principal_capitalized = principal_capitalized + $1, updated_at = now() WHERE id = $2`, [amt, l.id]);
@@ -228,7 +229,7 @@ async function applyPrepaidInterest(c, loanId, { valueDate, createdBy } = {}) {
   const owed = round2(Number(l.interest_accrued) - Number(l.interest_paid));
   const amt = round2(Math.min(prepaid, owed));
   if (!(amt > 0)) return 0;
-  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const date = valueDate ? ymd(valueDate) : (await orgToday(c));
   await c.query(
     'UPDATE loan_accounts SET interest_paid = interest_paid + $1, interest_prepaid = interest_prepaid - $1, updated_at = now() WHERE id = $2',
     [amt, l.id]);
@@ -251,7 +252,7 @@ async function recognisePrepaidInterest(c, loanId, { valueDate, createdBy } = {}
   const l = await lock(c, loanId);
   const amt = round2(Number(l.interest_prepaid || 0));
   if (!(amt > 0)) return 0;
-  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const date = valueDate ? ymd(valueDate) : (await orgToday(c));
   const s = tax.splitPaid(l, 'INTEREST', amt);
   await c.query(
     `UPDATE loan_accounts SET interest_accrued = interest_accrued + $1, interest_paid = interest_paid + $1,
@@ -279,7 +280,7 @@ async function prepaidToPrincipal(c, loanId, { valueDate, createdBy } = {}) {
   const l = await lock(c, loanId);
   const amt = round2(Math.min(Number(l.interest_prepaid || 0), Number(l.principal_disbursed) + Number(l.principal_capitalized) - Number(l.principal_paid)));
   if (!(amt > 0)) return 0;
-  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const date = valueDate ? ymd(valueDate) : (await orgToday(c));
   await c.query(
     'UPDATE loan_accounts SET principal_paid = principal_paid + $1, interest_prepaid = interest_prepaid - $1, updated_at = now() WHERE id = $2',
     [amt, l.id]);

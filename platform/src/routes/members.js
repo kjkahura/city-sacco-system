@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
@@ -62,13 +63,16 @@ const SEARCH_SCAN_CAP = 5000;
 
 const searchMembers = [requireAuth(), async (req, res, next) => {
   try {
-    const rows = await withTenantRead(req.tenant.schema_name, async (c) =>
-      (await c.query(
+    let today = null;
+    const rows = await withTenantRead(req.tenant.schema_name, async (c) => {
+      today = await orgToday(c);
+      return (await c.query(
         `SELECT ${COLUMNS} FROM members ORDER BY last_name, first_name, id LIMIT $1`,
         [SEARCH_SCAN_CAP + 1]
-      )).rows);
+      )).rows;
+    });
     const truncated = rows.length > SEARCH_SCAN_CAP;
-    const filtered = applyFilterCriteria(rows.slice(0, SEARCH_SCAN_CAP), req.body?.filterCriteria);
+    const filtered = applyFilterCriteria(rows.slice(0, SEARCH_SCAN_CAP), req.body?.filterCriteria, { today });
     const p = paginate(req, filtered);
     res.set('items-scan-cap', String(SEARCH_SCAN_CAP));
     res.set('items-truncated', String(truncated));

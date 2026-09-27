@@ -17,6 +17,8 @@ const G = require('../domain/eodGuard');
 const CAL = require('../domain/calendar');
 const ORG = require('../domain/organization');
 const EX = require('../domain/eodExclusions');
+const PORTFOLIO = require('../domain/portfolio');
+const AREP = require('../domain/accountingReports');
 
 /**
  * End-of-day processing.
@@ -188,6 +190,28 @@ const JOBS = {
   },
 
   /**
+   * The day's loan positions, for reports on past dates (../domain/portfolio).
+   * Last, so the positions show the day after its arrears, penalties and
+   * closures. A rerun for a date before yesterday stores nothing: the loan
+   * tables hold the present, not that day.
+   */
+  async snapshotPortfolio(tenant, businessDate) {
+    return withTenant(tenant.schema_name, async (c) => {
+      try {
+        return await PORTFOLIO.snapshot(c, { date: businessDate, takenBy: 'EOD' });
+      } catch (e) {
+        if (/SNAPSHOT_DATE_MUST_BE_TODAY_OR_YESTERDAY/.test(e.message)) return { skipped: 'PAST_BUSINESS_DATE' };
+        throw e;
+      }
+    });
+  },
+
+  /** Remove accounting reports past their 24 hours. */
+  async pruneReports(tenant) {
+    return withTenant(tenant.schema_name, async (c) => ({ accountingReports: await AREP.prune(c) }));
+  },
+
+  /**
    * Revolving loans: generate the installment for every billing date that
    * has come, interest brought up to the date first.
    */
@@ -261,7 +285,7 @@ const JOBS = {
 
 /** Run one job for one tenant, once per business date. */
 async function runJob(tenant, job, { businessDate = null, force = false } = {}) {
-  const date = businessDate || new Date().toISOString().slice(0, 10);
+  const date = businessDate || ORG.localClock(tenant.timezone || 'Africa/Nairobi').date;
   const fn = JOBS[job];
   if (!fn) throw new Error(`UNKNOWN_JOB: ${job}`);
 
@@ -292,7 +316,7 @@ async function runJob(tenant, job, { businessDate = null, force = false } = {}) 
  * provisioning last because it reads the arrears the others just produced.
  */
 const DEFAULT_JOBS = ['ensureFinancialYear', 'syncCalendar', 'billRevolving', 'reviewRates', 'updateTaxRates', 'accrueInterest', 'applyPostdatedPayments', 'accrueSavings', 'applyPlannedFees', 'collectSettlements', 'markArrears', 'accruePenalties',
-  'applyFees', 'amortizeFees', 'enforceControls', 'provision', 'postAccruals', 'autoClosure'];
+  'applyFees', 'amortizeFees', 'enforceControls', 'provision', 'postAccruals', 'autoClosure', 'snapshotPortfolio', 'pruneReports'];
 
 async function runAll({ businessDate = null, jobs = DEFAULT_JOBS, force = false } = {}) {
   const { rows: tenants } = await pool.query(
@@ -300,7 +324,7 @@ async function runAll({ businessDate = null, jobs = DEFAULT_JOBS, force = false 
   const results = [];
   for (const t of tenants) {
     // One tenant failing must not stop the rest of the fleet.
-    results.push(...(await runTenant(t, { businessDate: businessDate || new Date().toISOString().slice(0, 10), jobs, force, trigger: 'MANUAL', createdBy: 'PLATFORM' })).jobs);
+    results.push(...(await runTenant(t, { businessDate, jobs, force, trigger: 'MANUAL', createdBy: 'PLATFORM' })).jobs);
   }
   return results;
 }

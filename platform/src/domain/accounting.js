@@ -298,37 +298,101 @@ const MOVEMENT_SQL_BRANCH = `
     AND b.branch_key = $3::uuid
   GROUP BY b.gl_code`;
 
-async function trialBalance(c, { from = null, to = null, offset = 0, limit = null, branchId = null } = {}) {
-  const movement = branchId ? MOVEMENT_SQL_BRANCH : MOVEMENT_SQL;
-  const params = branchId ? [from, to, branchId === 'NONE' ? NIL : branchId] : [from, to];
-  const sql = `
-    SELECT g.code, g.name, g.type,
-           COALESCE(m.debit, 0) AS debit,
-           COALESCE(m.credit, 0) AS credit
-    FROM gl_accounts g
-    JOIN (${movement}) m ON m.gl_code = g.code
-    WHERE COALESCE(m.debit, 0) + COALESCE(m.credit, 0) > 0
-    ORDER BY g.code`;
+/**
+ * The movement aggregate for a period, the whole book or one branch, with or
+ * without the year-end sweep. Returns the SQL and its parameters ($1 from,
+ * $2 to, and $3 the branch). Lines posted without a branch are branch 'NONE'.
+ */
+function movement({ from = null, to = null, branchId = null, trading = false } = {}) {
+  if (!branchId) return { sql: trading ? MOVEMENT_SQL_TRADING : MOVEMENT_SQL, params: [from, to] };
+  return {
+    sql: `${MOVEMENT_SQL_BRANCH.replace(/\n  GROUP BY b\.gl_code$/, '')}${trading ? '\n    AND NOT b.is_closing' : ''}
+  GROUP BY b.gl_code`,
+    params: [from, to, branchId === 'NONE' ? NIL : branchId],
+  };
+}
 
-  const { rows: [t] } = await c.query(
-    `SELECT COALESCE(SUM(debit),0) AS debit, COALESCE(SUM(credit),0) AS credit,
-            count(*)::int AS accounts
-     FROM (${sql}) s`,
-    params
-  );
-  const totals = { debit: round2(t.debit), credit: round2(t.credit) };
+/** A branch filter as given (id, code or NONE) to the branch id, or a 404. */
+async function branchScope(c, v) {
+  if (v === null || v === undefined || v === '') return null;
+  if (String(v).toUpperCase() === 'NONE') return { id: 'NONE', code: null, name: 'No branch' };
+  const { rows: [b] } = await c.query('SELECT id, code, name FROM branches WHERE id::text = $1 OR code = $1', [String(v)]);
+  if (!b) throw err(`BRANCH_NOT_FOUND: ${v}`, 404);
+  return b;
+}
 
-  const take = limit === null ? null : Math.max(1, Number(limit));
-  const n = params.length;
-  const { rows } = take === null
-    ? await c.query(sql, params)
-    : await c.query(`${sql} LIMIT $${n + 1} OFFSET $${n + 2}`, [...params, take, Math.max(0, Number(offset) || 0)]);
+/** Assets and expenses read debit-positive; the rest credit-positive. */
+const DEBIT_NATURE = ['ASSET', 'EXPENSE'];
+const natural = (type, debitPositive) => round2(DEBIT_NATURE.includes(type) ? debitPositive : -debitPositive);
 
+const dayBefore = (iso) => {
+  const d = new Date(`${String(iso).slice(0, 10)}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+};
+
+/**
+ * Trial balance for a period (the reference platform's Trial Balance, and the lines of its
+ * accounting reports API).
+ *
+ * Every row carries the period's debits and credits, and the opening
+ * balance, net change and closing balance in the account's own sign: an
+ * asset or expense reads debit minus credit, a liability, equity or income
+ * account credit minus debit. By default an account with no debit or credit
+ * in the period is left out, as the reference platform leaves out zero balance accounts;
+ * zeroBalances includes every active account.
+ *
+ * The rows are bounded by the chart of accounts, so they are built whole and
+ * the page is cut after; the totals are over the whole period either way.
+ */
+async function trialBalance(c, {
+  from = null, to = null, offset = 0, limit = null, branchId = null, zeroBalances = false, glTypes = null,
+} = {}) {
+  const branch = await branchScope(c, branchId);
+  const bId = branch ? branch.id : null;
+  const period = movement({ from, to, branchId: bId });
+  const { rows: moved } = await c.query(period.sql, period.params);
+  let opening = [];
+  if (from) {
+    const o = movement({ from: null, to: dayBefore(from), branchId: bId });
+    opening = (await c.query(o.sql, o.params)).rows;
+  }
+  const { rows: accounts } = await c.query('SELECT code, name, type, is_active FROM gl_accounts ORDER BY code');
+  const m = new Map(moved.map((r) => [r.gl_code, r]));
+  const o = new Map(opening.map((r) => [r.gl_code, r]));
+  const types = glTypes && glTypes.length ? glTypes.map((t) => String(t).toUpperCase()) : null;
+
+  const all = [];
+  for (const g of accounts) {
+    if (types && !types.includes(g.type)) continue;
+    const mv = m.get(g.code);
+    const debit = round2(mv ? mv.debit : 0);
+    const credit = round2(mv ? mv.credit : 0);
+    const op = o.get(g.code);
+    const openDp = op ? Number(op.debit) - Number(op.credit) : 0;
+    const active = debit + credit > 0;
+    if (!active && !(zeroBalances && (g.is_active || openDp !== 0))) continue;
+    const openingBalance = natural(g.type, openDp);
+    const netChange = natural(g.type, debit - credit);
+    all.push({
+      code: g.code, name: g.name, type: g.type,
+      debit, credit, balance: round2(debit - credit),
+      openingBalance, netChange, closingBalance: round2(openingBalance + netChange),
+    });
+  }
+  const totals = {
+    debit: round2(all.reduce((s, r) => s + r.debit, 0)),
+    credit: round2(all.reduce((s, r) => s + r.credit, 0)),
+  };
+  const take = limit === null || limit === undefined ? null : Math.max(1, Number(limit));
+  const off = Math.max(0, Number(offset) || 0);
   return {
     period: { from, to },
-    branchId: branchId || null,
-    rows: rows.map((r) => ({ ...r, balance: round2(r.debit - r.credit) })),
-    page: { offset: Number(offset) || 0, limit: take, total: t.accounts },
+    branchId: branch ? branch.id : null,
+    branch: branch ? { id: branch.id, code: branch.code, name: branch.name } : null,
+    zeroBalances: Boolean(zeroBalances),
+    rows: take === null ? all : all.slice(off, off + take),
+    page: { offset: take === null ? 0 : off, limit: take, total: all.length },
     totals,
     balanced: totals.debit === totals.credit,
   };
@@ -355,5 +419,6 @@ async function balances(c, { from = null, to = null } = {}) {
 
 module.exports = {
   post, reverse, balance, balances, trialBalance, verifyRollup, round2, err, closedThrough, isoDay, cutoffDay,
+  movement, branchScope, natural, dayBefore, DEBIT_NATURE,
   MOVEMENT_SQL, MOVEMENT_SQL_TRADING, MOVEMENT_SQL_FROM_LINES,
 };

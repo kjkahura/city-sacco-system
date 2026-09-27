@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
@@ -39,8 +40,8 @@ accounting.delete('/closures/:id', requireAuth(...ADMIN), run((c, req) => B.reop
 accounting.get('/settings', requireAuth(...LEDGER), run((c) => B.settings(c)));
 accounting.put('/settings', requireAuth(...ADMIN), run((c, req) => B.updateSettings(c, { ...req.body, createdBy: req.auth.email }), { write: true }));
 accounting.get('/accruals/:entryId', requireAuth(...LEDGER), run((c, req) => accruals.breakdown(c, req.params.entryId)));
-accounting.post('/accruals/post', requireAuth(...ADMIN), run((c, req) => accruals.flush(c, {
-  date: req.body?.date || new Date().toISOString().slice(0, 10), createdBy: req.auth.email,
+accounting.post('/accruals/post', requireAuth(...ADMIN), run(async (c, req) => accruals.flush(c, {
+  date: req.body?.date || await orgToday(c), createdBy: req.auth.email,
 }), { write: true }));
 
 module.exports = { branches, accounting };

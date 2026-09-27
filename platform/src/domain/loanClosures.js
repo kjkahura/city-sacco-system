@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const savings = require('./savings');
@@ -46,7 +47,7 @@ const { ymd, isoDate } = S;
  * This module stands above ./loans, like ./restructure.
  */
 
-const today = () => isoDate(new Date());
+const today = (c) => orgToday(c);
 const RUNNING = ['ACTIVE', 'IN_ARREARS', 'LOCKED'];
 
 // --------------------------------------------------------------------------
@@ -81,14 +82,14 @@ function owed(l) {
  * booked.
  */
 async function payOffQuote(c, loanId, { valueDate = null } = {}) {
-  const date = valueDate ? ymd(valueDate) : today();
+  const date = valueDate ? ymd(valueDate) : (await today(c));
   await c.query('SAVEPOINT pay_off_quote');
   try {
     let l = await ledger.lock(c, loanId);
     if (!RUNNING.includes(l.status)) throw err(`LOAN_NOT_RUNNING: ${l.status}`, 409);
     // A date to come (the reference platform's pay-off preview for a future date): the
     // arrears and penalties the end of day would add by then, as well.
-    if (date > today()) {
+    if (date > (await today(c))) {
       await loans.accrueInterest(c, l.id, { valueDate: date, createdBy: 'QUOTE' });
       await workflow.markArrears(c, { asOf: date, loanId: l.id });
       await penalties.accrueForLoan(c, l.id, { asOf: date, createdBy: 'QUOTE' });
@@ -118,8 +119,8 @@ async function payOff(c, loanId, { channelId = 'cash', valueDate = null, interes
   if (!RUNNING.includes(l.status)) throw err(`LOAN_NOT_RUNNING: ${l.status}`, 409);
   await controls.assertMayPayOff(c, { user });
   if (l.status === 'LOCKED') await controls.assertMayPostOnLocked(c, { user });
-  const date = valueDate ? ymd(valueDate) : today();
-  if (date > today()) throw err('PAY_OFF_CANNOT_BE_DATED_IN_THE_FUTURE', 400);
+  const date = valueDate ? ymd(valueDate) : (await today(c));
+  if (date > (await today(c))) throw err('PAY_OFF_CANNOT_BE_DATED_IN_THE_FUTURE', 400);
   await loans.assertNoLaterRepayment(c, l.id, date);
   if (Number(l.credit_balance) > 0) throw err(`LOAN_HAS_A_CREDIT_BALANCE: ${l.credit_balance}; it must be drawn or refunded first`, 409);
   // Penalties charged after a back date are worked out again to it first, as
@@ -193,8 +194,8 @@ async function assertTerminable(c, l) {
 async function terminate(c, loanId, { valueDate = null, note = null, createdBy } = {}) {
   let l = await ledger.lock(c, loanId);
   await assertTerminable(c, l);
-  const date = valueDate ? ymd(valueDate) : today();
-  if (date > today()) throw err('TERMINATION_CANNOT_BE_DATED_IN_THE_FUTURE', 400);
+  const date = valueDate ? ymd(valueDate) : (await today(c));
+  if (date > (await today(c))) throw err('TERMINATION_CANNOT_BE_DATED_IN_THE_FUTURE', 400);
   if (l.disbursed_on && date < ymd(l.disbursed_on)) throw err(`TERMINATION_BEFORE_DISBURSEMENT: ${ymd(l.disbursed_on)}`, 400);
   await loans.assertNoLaterRepayment(c, l.id, date);
   if (types.forLoan(l).bringsInterestToDate) {
@@ -285,8 +286,8 @@ async function undoTerminate(c, loanId, { note = null, createdBy } = {}) {
   }
   await c.query('UPDATE loan_accounts SET terminated_on = NULL, terminated_by = NULL, termination = NULL, updated_at = now() WHERE id = $1', [l.id]);
   let fresh = await ledger.lock(c, l.id);
-  if (fresh.status === 'IN_ARREARS') await workflow.refreshArrears(c, fresh, today());
-  await penalties.accrueForLoan(c, l.id, { asOf: today(), createdBy });
+  if (fresh.status === 'IN_ARREARS') await workflow.refreshArrears(c, fresh, (await today(c)));
+  await penalties.accrueForLoan(c, l.id, { asOf: (await today(c)), createdBy });
   await workflow.history(c, l.id, { from: l.status, to: (await ledger.lock(c, l.id)).status, action: 'UNDO_TERMINATE', actor: createdBy, note });
   if (tt) {
     const rev = await savings.record(c, {
@@ -318,7 +319,7 @@ async function undoTerminate(c, loanId, { note = null, createdBy } = {}) {
 async function collectSecurities(c, loanId, { valueDate = null, createdBy, user = null } = {}) {
   const l = await ledger.lock(c, loanId);
   if (!RUNNING.includes(l.status)) throw err(`LOAN_NOT_RUNNING: ${l.status}`, 409);
-  const date = valueDate ? ymd(valueDate) : today();
+  const date = valueDate ? ymd(valueDate) : (await today(c));
   const { rows: pledges } = await c.query(
     "SELECT * FROM loan_guarantors WHERE loan_id = $1 AND status = 'PLEDGED' AND pledged_amount > recovered ORDER BY created_at, id", [l.id]);
   const out = [];

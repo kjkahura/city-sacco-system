@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const savings = require('./savings');
 const S = require('./schedule');
@@ -139,7 +140,7 @@ async function nextAccountNo(c, p) {
 async function apply(c, params, { refinance = null, settles = refinance?.of || null } = {}) {
   const { memberId, productId = 'NL01', principal, termMonths, purpose, notes, name, accountNo, createdBy,
     tranches: plannedTranches = null, fundingSources = null, collateral = null, branchId = undefined,
-    customFields = {}, carriedCustomFields = null, user = null } = params;
+    customFields = {}, carriedCustomFields = null, user = null, creditOfficer = undefined } = params;
   const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1 AND is_active', [productId]);
   if (!p) throw err('UNKNOWN_LOAN_PRODUCT', 404);
 
@@ -160,7 +161,7 @@ async function apply(c, params, { refinance = null, settles = refinance?.of || n
   const no = accountNo || await nextAccountNo(c, p);
   const status = p.initial_state || 'PENDING_APPROVAL';
   // The loan sits in its member's branch unless told otherwise.
-  const { rows: [mem] } = await c.query('SELECT branch_id FROM members WHERE id = $1', [memberId]);
+  const { rows: [mem] } = await c.query('SELECT branch_id, credit_officer FROM members WHERE id = $1', [memberId]);
   const loanBranch = branchId === undefined ? mem?.branch_id || null : branchId;
   // The product must be offered in the loan's branch (the reference platform's product
   // availability); a restructure stays with the product it was given.
@@ -176,6 +177,8 @@ async function apply(c, params, { refinance = null, settles = refinance?.of || n
     branch_id: loanBranch, custom_fields: JSON.stringify(values),
     account_no: no, member_id: memberId, product_id: productId, principal: amount, term_months: term,
     product_type: p.product_type || 'FIXED_TERM', status, purpose: purpose || null, notes: notes || null, name: name ? String(name).slice(0, 200) : null,
+    // The officer responsible: the member's unless the application names one.
+    credit_officer: creditOfficer === undefined ? mem?.credit_officer || null : (creditOfficer || null),
     ...own,
     ...(refinance ? { refinance_of: refinance.of, refinance_arrears: refinance.arrears, top_up_requested: refinance.topUp } : {}),
   };
@@ -248,7 +251,7 @@ async function disburse(c, loanId, { amount, channelId = null, valueDate, narrat
   if (!first && !again) throw err(`LOAN_NOT_APPROVED: ${l.status}`, 409);
   // A top-up application pays out by settling the loan it refinances.
   if (l.refinance_of) throw err('TOP_UP_APPLICATION_DISBURSES_THROUGH_REFINANCE', 409);
-  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const date = valueDate ? ymd(valueDate) : (await orgToday(c));
   // The channel given, else the one in the disbursement details, else bank.
   channelId = channelId || (first && l.disbursement_channel_id) || 'bank';
   // The first repayment date: given now (which needs the Set Disbursement
@@ -547,7 +550,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   const ch = await channels.assertUsable(c, channelId, { side: 'LOAN', type: 'REPAYMENT', amount: left, productId: l.product_id, user });
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
 
-  const asOf = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const asOf = valueDate ? ymd(valueDate) : (await orgToday(c));
   await assertNoLaterRepayment(c, l.id, asOf);
   // A custom allocation needs the product to allow it and the user the
   // permission (the reference platform). A pay-off allocates its own amounts (`internal`).
@@ -793,7 +796,7 @@ async function unwindPrepaidInterest(c, tx, amount, { narration, createdBy }) {
       debits: creditsFor(l, 'INTEREST', earned, l.member_id),
       credits: [{ glCode: l.gl_deferred_interest, amount: earned, memberId: l.member_id }],
       narration: `${narration}: prepaid interest earned since ${tx.reference}`,
-      sourceType: 'LOAN_PREPAID_INTEREST', sourceId: l.id, bookingDate: isoDate(new Date()), createdBy,
+      sourceType: 'LOAN_PREPAID_INTEREST', sourceId: l.id, bookingDate: (await orgToday(c)), createdBy,
     });
   }
 }
@@ -866,7 +869,7 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
       );
     }
     if (a.funding) {
-      await funding.undistribute(c, { id: tx.loan_account_id }, a.funding, { date: isoDate(new Date()), createdBy });
+      await funding.undistribute(c, { id: tx.loan_account_id }, a.funding, { date: (await orgToday(c)), createdBy });
     }
     // Rebuild installment allocation from what survives. A dynamic loan's
     // schedule may have been redrawn by the payment being reversed, so it
@@ -890,7 +893,7 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
          AND reversed_by IS NULL AND id <> $2`,
       [tx.loan_account_id, tx.id]
     );
-    const today = isoDate(new Date());
+    const today = await orgToday(c);
     await applyToInstallments(c, tx.loan_account_id, {
       principal: Number(remaining[0].p), interest: Number(remaining[0].i), fees: Number(remaining[0].f),
     }, type.installmentScope(today, restored));

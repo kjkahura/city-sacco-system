@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const fees = require('./fees');
@@ -68,7 +69,7 @@ async function buildSchedule(c, l, { persist = true, custom = true } = {}) {
   const count = Number(l.term_months);
   const principal = Number(l.principal_disbursed) > 0 ? principalOutstanding(l) : Number(l.principal);
   if (!principal || !count) throw err('LOAN_MISSING_PRINCIPAL_OR_TERM');
-  const start = l.disbursed_on ? ymd(l.disbursed_on) : isoDate(new Date());
+  const start = l.disbursed_on ? ymd(l.disbursed_on) : (await orgToday(c));
 
   // What happens to a date on a non-working day is the product's rule
   // (The reference platform's "Installments on Non-Working Days"). Extend Schedule is applied

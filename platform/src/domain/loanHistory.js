@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const { err, round2 } = acct;
@@ -85,7 +86,7 @@ async function forMember(c, memberId) {
             l.approved_on, l.disbursed_on, l.closed_on, l.written_off_amount
      FROM loan_accounts l JOIN loan_products p ON p.id = l.product_id
      WHERE l.member_id = $1 ORDER BY COALESCE(l.closed_on, l.applied_on) DESC, l.account_no`, [m.id]);
-  const today = isoDate(new Date());
+  const today = await orgToday(c);
   const closed = [];
   for (const l of rows.filter((x) => CLOSED_HOW[x.status])) {
     const asOf = l.closed_on ? ymd(l.closed_on) : today;

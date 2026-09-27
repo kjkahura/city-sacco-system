@@ -7,6 +7,7 @@
  * idempotent end-of-day run.
  */
 
+const { orgDay } = require('./_org');
 const fs = require('fs');
 const path = require('path');
 const app = require('../src/server');
@@ -210,7 +211,7 @@ async function call(method, p, { token, tenant = SLUG, body } = {}) {
     section('end of day is idempotent');
     const tenantRow = (await pool.query('SELECT * FROM platform.tenants WHERE slug=$1', [SLUG])).rows[0];
     // Business dates after disbursement, since accrual now counts days.
-    const plus = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+    const plus = (n) => orgDay(n);
     const day = plus(10);
     const run1 = await eod.runJob(tenantRow, 'accrueInterest', { businessDate: day });
     check('first accrual run does work', run1.accrued > 0, JSON.stringify(run1));

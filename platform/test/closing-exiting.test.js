@@ -11,6 +11,7 @@
  * permissions; and a pay-off preview for a date to come.
  */
 
+const { orgDay } = require('./_org');
 const app = require('../src/server');
 const { pool } = require('../src/db/pool');
 const { withTenant, withTenantRead } = require('../src/db/tenantContext');
@@ -36,7 +37,7 @@ const PASSWORD = 'a sufficiently long passphrase';
 const T = (fn) => withTenant(SCHEMA, fn);
 const Rd = (fn) => withTenantRead(SCHEMA, fn);
 const round = (n) => Math.round(n * 100) / 100;
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => orgDay(0);
 const addDays = (d, n) => new Date(new Date(`${d}T00:00:00Z`).getTime() + n * 86400000).toISOString().slice(0, 10);
 
 let server;

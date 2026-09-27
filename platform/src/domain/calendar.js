@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
@@ -25,7 +26,7 @@ const { ymd, isoDate } = S;
  * are; installments already due are left alone, so arrears do not move.
  */
 
-const today = () => isoDate(new Date());
+const today = (c) => orgToday(c);
 const RECALC_STATES = ['ACTIVE', 'IN_ARREARS', 'LOCKED'];
 
 async function markChanged(c, from) {
@@ -94,7 +95,7 @@ async function add(c, { date, description, name, recurring = false, id = null, b
      ON CONFLICT DO NOTHING RETURNING *`,
     [day, label, recurring === true || recurring === 'true', branch, currency, createdBy || 'SYSTEM', ...(id ? [String(id)] : [])]);
   if (!h) throw err('HOLIDAY_EXISTS: that date or ID is already a holiday in this scope', 409);
-  await markChanged(c, h.recurring ? today() : day);
+  await markChanged(c, h.recurring ? (await today(c)) : day);
   await audit(c, createdBy, 'HOLIDAY_ADDED', h.id, null, shape(h));
   return shape(h);
 }
@@ -114,7 +115,7 @@ async function update(c, ref, { date, description, name, recurring } = {}, { cre
   const rec = recurring === undefined ? h.recurring : (recurring === true || recurring === 'true');
   const { rows: [after] } = await c.query(
     'UPDATE holidays SET holiday_date = $2::date, name = $3, recurring = $4 WHERE key = $1 RETURNING *', [h.key, day, String(label).trim(), rec]);
-  await markChanged(c, (rec || h.recurring) ? today() : (day < ymd(h.holiday_date) ? day : ymd(h.holiday_date)));
+  await markChanged(c, (rec || h.recurring) ? (await today(c)) : (day < ymd(h.holiday_date) ? day : ymd(h.holiday_date)));
   await audit(c, createdBy, 'HOLIDAY_CHANGED', h.id, shape(h), shape(after));
   return shape(after);
 }
@@ -122,7 +123,7 @@ async function update(c, ref, { date, description, name, recurring } = {}, { cre
 async function remove(c, ref, { createdBy } = {}) {
   const h = await find(c, ref);
   await c.query('DELETE FROM holidays WHERE key = $1', [h.key]);
-  await markChanged(c, h.recurring ? today() : ymd(h.holiday_date));
+  await markChanged(c, h.recurring ? (await today(c)) : ymd(h.holiday_date));
   await audit(c, createdBy, 'HOLIDAY_DELETED', h.id, shape(h), null);
   return { deleted: h.id };
 }
@@ -135,7 +136,7 @@ async function setNonWorkingDays(c, days, { createdBy } = {}) {
   if (set.length >= 7) throw err('AT_LEAST_ONE_DAY_MUST_BE_A_WORKING_DAY', 400);
   const { rows: [s] } = await c.query('SELECT non_working_days FROM organization_settings WHERE id = 1');
   await c.query('UPDATE organization_settings SET non_working_days = $1::smallint[], updated_at = now(), updated_by = $2 WHERE id = 1', [set, createdBy || 'SYSTEM']);
-  await markChanged(c, today());
+  await markChanged(c, (await today(c)));
   await audit(c, createdBy, 'NON_WORKING_DAYS_CHANGED', null, { days: s.non_working_days }, { days: set });
   return { nonWorkingDays: set };
 }
@@ -149,7 +150,7 @@ async function setNonWorkingDays(c, days, { createdBy } = {}) {
 async function sync(c, { createdBy = 'EOD', force = false } = {}) {
   const { rows: [s] } = await c.query('SELECT calendar_changed_from FROM organization_settings WHERE id = 1');
   if (!s.calendar_changed_from && !force) return { synced: false, loans: 0, installments: 0 };
-  const from = today();
+  const from = (await today(c));
   const { rows: loans } = await c.query(
     `SELECT DISTINCT i.loan_id FROM loan_installments i JOIN loan_accounts l ON l.id = i.loan_id
      WHERE l.status = ANY($1::text[]) AND i.status NOT IN ('PAID') AND i.due_date > $2::date`, [RECALC_STATES, from]);

@@ -9,6 +9,7 @@
  * shipped migration carries a rate at all.
  */
 
+const { orgDay } = require('./_org');
 const { pool } = require('../src/db/pool');
 const { withTenant, withTenantRead } = require('../src/db/tenantContext');
 const { migratePlatform, migrateAllTenants } = require('../src/db/migrate');
@@ -35,8 +36,8 @@ const SLUG = 'pvtest';
 const SCHEMA = `tenant_${SLUG}`;
 const T = (fn) => withTenant(SCHEMA, fn);
 const Rd = (fn) => withTenantRead(SCHEMA, fn);
-const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
-const daysOn = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+const daysAgo = (n) => orgDay(-n);
+const daysOn = (n) => orgDay(n);
 
 async function assertBalanced(label) {
   const tb = await Rd((c) => acct.trialBalance(c));

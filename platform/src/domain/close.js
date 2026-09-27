@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const { err, round2 } = acct;
 
@@ -273,7 +274,7 @@ async function reopen(c, year, { reason = '', createdBy = 'SYSTEM' } = {}) {
  * the date, whatever its shape, nothing happens.
  */
 async function ensureYearFor(c, date, { createdBy = 'EOD' } = {}) {
-  const d = date || new Date().toISOString().slice(0, 10);
+  const d = date || (await orgToday(c));
   const { rows: [existing] } = await c.query(
     'SELECT year, status FROM financial_years WHERE $1::date BETWEEN starts_on AND ends_on', [d]);
   if (existing) return { year: existing.year, status: existing.status, opened: false };

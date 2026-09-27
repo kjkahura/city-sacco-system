@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const savings = require('./savings');
@@ -59,7 +60,7 @@ async function disburseToDeposit(c, loanId, { savingsAccountId = null, valueDate
   if ((l.accounting_method === 'NONE') !== (a.accounting_method === 'NONE')) {
     throw err('DEPOSIT_ACCOUNT_ACCOUNTING_DIFFERS: both products must be linked to the ledger, or neither', 409);
   }
-  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const date = valueDate ? ymd(valueDate) : (await orgToday(c));
   const loanTx = await loans.disburse(c, l.id, {
     ...rest, channelId: CHANNEL, valueDate: date, createdBy, user,
     narration: narration || `Disbursement of ${l.account_no} into ${a.account_no}`,
@@ -80,7 +81,7 @@ async function repayFromDeposit(c, loanId, { savingsAccountId, amount, valueDate
   if (a.is_funding_account) throw err('A_FUNDING_ACCOUNT_CANNOT_REPAY_A_LOAN', 409);
   const amt = round2(amount);
   if (!(amt > 0)) throw err('INVALID_REPAYMENT_AMOUNT', 400);
-  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const date = valueDate ? ymd(valueDate) : (await orgToday(c));
   const savingsTx = await savings.withdraw(c, a.id, {
     amount: amt, channelId: CHANNEL, valueDate: date, createdBy,
     narration: `Repayment of loan ${l.account_no}`,

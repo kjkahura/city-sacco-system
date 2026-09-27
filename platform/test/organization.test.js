@@ -9,6 +9,7 @@
  * end-of-day settings, custom fields and product documents.
  */
 
+const { orgDay } = require('./_org');
 const app = require('../src/server');
 const { pool } = require('../src/db/pool');
 const { withTenant, withTenantRead } = require('../src/db/tenantContext');
@@ -276,7 +277,7 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwA
     check('a loan product takes its rate from the source', r.status === 201 && r.body.taxSourceId === 'VAT16'
       && Number((await Rd((c) => c.query("SELECT tax_rate_percent FROM loan_products WHERE id = 'TAXED'"))).rows[0]?.tax_rate_percent) === 16, `${r.status} ${r.text.slice(0, 300)}`);
     check('an interest index is not a VAT source', (await call('PATCH', '/api/loan-products/FX', { taxSourceId: 'NOPE' })).status >= 400);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = orgDay(0);
     await call('POST', '/api/index-rates/VAT16/rates', { validFrom: today, rate: 18 });
     check('a new value in force reaches the product at once', Number((await Rd((c) => c.query("SELECT tax_rate_percent FROM loan_products WHERE id = 'TAXED'"))).rows[0].tax_rate_percent) === 18);
     r = await call('PATCH', '/api/index-rates/VAT16/rates/2026-01-01', { rate: 10 });

@@ -1,5 +1,7 @@
 'use strict';
 
+const reportRoutes = require('./reports');
+const { orgToday } = require('../lib/orgDate');
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
@@ -101,7 +103,7 @@ router.post('/:id/overdraft/write-off', ...tx(async (c, req, res, { actor }) => 
 // application date (or when told to). The end of day does both for every
 // account; this is for one.
 router.post('/:id/interest', ...tx(async (c, req, _res, { actor }) => {
-  const date = req.body?.date || new Date().toISOString().slice(0, 10);
+  const date = req.body?.date || await orgToday(c);
   const accrued = await S.accrueInterest(c, req.params.id, { date, createdBy: actor });
   const applied = req.body?.apply ? await S.applyInterest(c, req.params.id, { date, createdBy: actor }) : [];
   return { accrued, applied };
@@ -136,17 +138,9 @@ const accounting = express.Router();
 
 const LEDGER_READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR'];
 
-accounting.get('/trial-balance', requireAuth(...LEDGER_READER), async (req, res, next) => {
-  try {
-    // Unlike the statements, the trial balance pages by default: it is the
-    // one report that lists every account that moved, and a mature chart of
-    // accounts is long.
-    const { offset, limit } = pageParams(req.query);
-    res.json(await withTenantRead(req.tenant.schema_name, (c) => acct.trialBalance(c, {
-      from: req.query.from || null, to: req.query.to || null, offset, limit, branchId: req.query.branchId || null,
-    })));
-  } catch (e) { next(e); }
-});
+// Trial balance: opening balance, debits, credits, net change and closing
+// balance per account; ?zeroBalances=true, ?glTypes=, ?branchId=, ?format=.
+accounting.get('/trial-balance', requireAuth(...LEDGER_READER), reportRoutes.trialBalance);
 
 accounting.get('/journal', requireAuth(...LEDGER_READER), async (req, res, next) => {
   try {

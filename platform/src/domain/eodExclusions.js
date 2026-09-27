@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
@@ -84,7 +85,7 @@ async function include(c, loanId, { asOf = null, note = null, createdBy } = {}) 
   const { rows: [x] } = await c.query(
     'SELECT * FROM loan_eod_exclusions WHERE loan_id = $1 AND included_at IS NULL FOR UPDATE', [l.id]);
   if (!x) throw err('LOAN_IS_NOT_EXCLUDED_FROM_THE_END_OF_DAY', 409);
-  const date = asOf ? ymd(asOf) : isoDate(new Date());
+  const date = asOf ? ymd(asOf) : (await orgToday(c));
   // Off the list first, so the jobs run for it.
   await c.query('UPDATE loan_eod_exclusions SET included_at = now(), included_by = $2 WHERE id = $1', [x.id, createdBy || 'SYSTEM']);
   let done;

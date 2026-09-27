@@ -36,7 +36,8 @@ const money = (n) => (n === null || n === undefined || n === ''
   ? '' : Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 
 const day = (d) => (d ? String(d).slice(0, 10) : '');
-const today = () => new Date().toISOString().slice(0, 10);
+// The organization's day, in its own time zone, as the server counts it.
+const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: S.sacco?.timezone || 'Africa/Nairobi' }).format(new Date());
 
 function toast(message, bad = false) {
   const t = el('toast');
@@ -403,6 +404,13 @@ async function scheduleEditor(e, title) {
     });
     dlg.showModal();
   });
+}
+
+/** Open a view from code, as the navigation does. */
+function go(name) {
+  S.view = name;
+  for (const n of el('nav').children) n.classList.toggle('active', n.dataset.view === name);
+  render();
 }
 
 function render() {
@@ -1508,52 +1516,112 @@ async function tellerView() {
 // Reports
 // --------------------------------------------------------------------------
 
-const reportState = { which: 'trial-balance', from: '', to: '', asAt: '', offset: 0, limit: 50 };
+const reportState = { which: 'trial-balance', from: '', to: '', asAt: '', branch: '', groupBy: '', interval: 'MONTHLY', zero: false, offset: 0, limit: 50 };
+let branchList = null;
+
+// Which filters each report takes, and the export it offers.
+const REPORTS = [
+  ['trial-balance', 'Trial balance', { dates: true, branch: true, exp: '/api/accounting/trial-balance' }],
+  ['balance-sheet', 'Balance sheet', { dates: true, branch: true, exp: '/api/reports/balance-sheet' }],
+  ['income-statement', 'Income statement', { dates: true, branch: true, exp: '/api/reports/income-statement' }],
+  ['portfolio-at-risk', 'Portfolio at risk', { asAt: true, branch: true, exp: '/api/reports/portfolio-at-risk' }],
+  ['par-loans', 'Loans at risk', { asAt: true, branch: true, exp: '/api/reports/portfolio-at-risk/loans' }],
+  ['risk', 'Risk', { asAt: true, branch: true, group: ['BRANCH', 'CREDIT_OFFICER', 'CENTRE', 'PRODUCT'], exp: '/api/reports/risk' }],
+  ['indicators', 'Indicators', { branch: true, exp: '/api/reports/indicators' }],
+  ['portfolio', 'Portfolio', { dates: true, branch: true, interval: true, exp: '/api/reports/portfolio' }],
+  ['organization', 'Organization', { exp: '/api/reports/organization' }],
+  ['earnings', 'Earnings', { dates: true, branch: true, group: ['PRODUCT', 'BRANCH'], exp: '/api/reports/earnings' }],
+  ['cashflow', 'Cashflow', { dates: true, branch: true, exp: '/api/reports/cashflow' }],
+  ['outreach', 'Outreach', { dates: true, exp: '/api/reports/outreach' }],
+  ['write-offs', 'Written-off loans', { dates: true }],
+  ['prudential', 'Prudential ratios', { asAt: true }],
+];
+const reportDef = (w) => (REPORTS.find(([v]) => v === w) || REPORTS[0])[2];
 
 async function reportsView() {
   const R = reportState;
+  if (!branchList) {
+    const b = await api('GET', '/api/branches');
+    branchList = b.ok ? b.body : [];
+  }
+  const d = reportDef(R.which);
   view().innerHTML = `
     <div class="toolbar">
       <label>Report<select id="r-which">
-        ${[['trial-balance', 'Trial balance'], ['balance-sheet', 'Balance sheet'],
-    ['income-statement', 'Income statement'], ['portfolio-at-risk', 'Portfolio at risk'],
-    ['par-loans', 'Loans at risk'], ['write-offs', 'Written-off loans'], ['prudential', 'Prudential ratios']].map(([v, label]) =>
-    `<option value="${v}" ${R.which === v ? 'selected' : ''}>${label}</option>`).join('')}
+        ${REPORTS.map(([v, label]) => `<option value="${v}" ${R.which === v ? 'selected' : ''}>${label}</option>`).join('')}
       </select></label>
-      <label>From<input id="r-from" type="date" value="${R.from}"></label>
-      <label>To<input id="r-to" type="date" value="${R.to}"></label>
+      ${d.dates ? `<label>From<input id="r-from" type="date" value="${R.from}"></label>` : ''}
+      ${d.dates || d.asAt ? `<label>${d.asAt ? 'As at' : 'To'}<input id="r-to" type="date" value="${R.to}"></label>` : ''}
+      ${d.branch ? `<label>Branch<select id="r-branch"><option value="">All branches</option>
+        ${branchList.map((b) => `<option value="${esc(b.code)}" ${R.branch === b.code ? 'selected' : ''}>${esc(b.code)} ${esc(b.name)}</option>`).join('')}</select></label>` : ''}
+      ${d.group ? `<label>By<select id="r-group">${d.group.map((g) => `<option ${R.groupBy === g ? 'selected' : ''}>${g}</option>`).join('')}</select></label>` : ''}
+      ${d.interval ? `<label>Interval<select id="r-interval">${['DAILY', 'WEEKLY', 'MONTHLY'].map((g) => `<option ${R.interval === g ? 'selected' : ''}>${g}</option>`).join('')}</select></label>` : ''}
+      ${R.which === 'trial-balance' ? `<label class="check"><input id="r-zero" type="checkbox" ${R.zero ? 'checked' : ''}> Zero balance accounts</label>` : ''}
       <button id="r-run">Run</button>
+      ${d.exp ? '<button class="secondary" id="r-csv">CSV</button><button class="secondary" id="r-xlsx">Excel</button>' : ''}
     </div>
     <div id="r-out"><p class="hint">Loading…</p></div>`;
 
-  $('#r-which').addEventListener('change', (e) => { R.which = e.target.value; R.offset = 0; reportsView(); });
-  $('#r-from').addEventListener('change', (e) => { R.from = e.target.value; });
-  $('#r-to').addEventListener('change', (e) => { R.to = e.target.value; });
-  $('#r-run').addEventListener('click', runReport);
+  $('#r-which').addEventListener('change', (e) => { R.which = e.target.value; R.offset = 0; R.groupBy = ''; reportsView(); });
+  if ($('#r-from')) $('#r-from').addEventListener('change', (e) => { R.from = e.target.value; });
+  if ($('#r-to')) $('#r-to').addEventListener('change', (e) => { R.to = e.target.value; });
+  if ($('#r-branch')) $('#r-branch').addEventListener('change', (e) => { R.branch = e.target.value; });
+  if ($('#r-group')) $('#r-group').addEventListener('change', (e) => { R.groupBy = e.target.value; });
+  if ($('#r-interval')) $('#r-interval').addEventListener('change', (e) => { R.interval = e.target.value; });
+  if ($('#r-zero')) $('#r-zero').addEventListener('change', (e) => { R.zero = e.target.checked; });
+  $('#r-run').addEventListener('click', () => { R.offset = 0; runReport(); });
+  const download = (fmt) => {
+    const qs = reportQuery();
+    qs.set('format', fmt);
+    openFile(`${d.exp}?${qs}`, `${R.which}.${fmt}`, { save: true });
+  };
+  if ($('#r-csv')) $('#r-csv').addEventListener('click', () => download('csv'));
+  if ($('#r-xlsx')) $('#r-xlsx').addEventListener('click', () => download('xlsx'));
   runReport();
 }
+
+function reportQuery() {
+  const R = reportState;
+  const d = reportDef(R.which);
+  const qs = new URLSearchParams();
+  if (d.dates && R.from) qs.set('from', R.from);
+  if (R.to) { qs.set('to', R.to); qs.set('asAt', R.to); }
+  if (d.branch && R.branch) {
+    if (R.which === 'indicators') { qs.set('entityType', 'BRANCH'); qs.set('entityId', R.branch); } else qs.set('branchId', R.branch);
+  }
+  if (d.group) qs.set('groupBy', R.groupBy || d.group[0]);
+  if (d.interval) qs.set('interval', R.interval);
+  if (R.which === 'trial-balance' && R.zero) qs.set('zeroBalances', 'true');
+  return qs;
+}
+
+const pctText = (n) => (n === null || n === undefined ? '' : `${Number(n).toFixed(2)}%`);
+const sourceNote = (p) => (p.source === 'SNAPSHOT' ? `<p class="hint">From the end of day's positions for ${esc(p.asAt)}.</p>` : '');
 
 async function runReport() {
   const R = reportState;
   const out = el('r-out');
-  const qs = new URLSearchParams();
-  if (R.from) qs.set('from', R.from);
-  if (R.to) { qs.set('to', R.to); qs.set('asAt', R.to); }
+  const qs = reportQuery();
+  const fail = (r) => void (out.innerHTML = `<p class="error">${esc(r.error)}</p>`);
 
   if (R.which === 'trial-balance') {
     qs.set('offset', R.offset); qs.set('limit', R.limit);
     const r = await api('GET', `/api/accounting/trial-balance?${qs}`);
-    if (!r.ok) return void (out.innerHTML = `<p class="error">${esc(r.error)}</p>`);
+    if (!r.ok) return fail(r);
     const t = r.body;
     out.innerHTML = table([
       { label: 'Code', key: 'code' }, { label: 'Account', key: 'name' },
+      { label: 'Opening', num: true, value: (x) => money(x.openingBalance) },
       { label: 'Debit', num: true, value: (x) => money(x.debit) },
       { label: 'Credit', num: true, value: (x) => money(x.credit) },
+      { label: 'Net change', num: true, value: (x) => money(x.netChange) },
+      { label: 'Closing', num: true, value: (x) => money(x.closingBalance) },
     ], t.rows) + `<table><tbody><tr class="total">
         <td>Total (whole book, not this page)</td>
         <td class="num">${money(t.totals.debit)}</td><td class="num">${money(t.totals.credit)}</td>
       </tr></tbody></table>`
       + (t.balanced ? '' : '<p class="error">The trial balance does not balance.</p>')
+      + '<p class="hint">Assets and expenses read debit minus credit; liabilities, equity and income credit minus debit.</p>'
       + pager({ offset: t.page.offset, limit: t.page.limit || R.limit }, t.page.total);
     wirePager(R, runReport);
     return;
@@ -1561,12 +1629,13 @@ async function runReport() {
 
   if (R.which === 'balance-sheet') {
     const r = await api('GET', `/api/reports/balance-sheet?${qs}`);
+    if (!r.ok) return fail(r);
     const b = r.body;
     const block = (title, rows, total) => card(title, table([
       { label: 'Code', value: (x) => x.code || '' }, { label: 'Account', key: 'name' },
       { label: 'Amount', num: true, value: (x) => money(x.amount) },
     ], rows) + `<p class="num"><strong>${money(total)}</strong></p>`);
-    out.innerHTML = `<div class="grid">
+    out.innerHTML = `<p class="hint">As at ${esc(b.asAt)}${b.branch ? `, branch ${esc(b.branch.code)}` : ''}.</p><div class="grid">
       ${block('Assets', b.assets, b.totalAssets)}
       ${block('Liabilities', b.liabilities, b.totalLiabilities)}
       ${block('Equity', b.equity, b.totalEquity)}
@@ -1576,6 +1645,7 @@ async function runReport() {
 
   if (R.which === 'income-statement') {
     const r = await api('GET', `/api/reports/income-statement?${qs}`);
+    if (!r.ok) return fail(r);
     const s = r.body;
     out.innerHTML = `<div class="grid">
       ${card('Income', table([{ label: 'Account', key: 'name' },
@@ -1593,33 +1663,150 @@ async function runReport() {
 
   if (R.which === 'portfolio-at-risk') {
     const r = await api('GET', `/api/reports/portfolio-at-risk?${qs}`);
+    if (!r.ok) return fail(r);
     const p = r.body;
-    out.innerHTML = table([
-      { label: 'Bucket', key: 'bucket' }, { label: 'Loans', num: true, key: 'loans' },
-      { label: 'Outstanding', num: true, value: (x) => money(x.outstanding) },
-    ], p.buckets) + `<p class="hint">PAR ${p.parPercent}% of ${money(p.totalOutstanding)} outstanding.</p>`;
+    out.innerHTML = sourceNote(p) + `<div class="grid">
+      ${card('Buckets', table([
+    { label: 'Bucket', key: 'bucket' }, { label: 'Loans', num: true, key: 'loans' },
+    { label: 'Outstanding', num: true, value: (x) => money(x.outstanding) },
+  ], p.buckets))}
+      ${card('PAR', table([{ label: 'Measure', key: 'k' }, { label: 'Loans', num: true, key: 'loans' },
+    { label: 'Outstanding', num: true, value: (x) => money(x.outstanding) }, { label: 'Of portfolio', num: true, value: (x) => pctText(x.percent) }],
+  Object.entries(p.par).map(([k, x]) => ({ k, ...x }))))}
+      ${card('VAR', table([{ label: 'Measure', key: 'k' }, { label: 'Loans', num: true, key: 'loans' },
+    { label: 'Overdue', num: true, value: (x) => money(x.overdue) }, { label: 'Of portfolio', num: true, value: (x) => pctText(x.percent) }],
+  Object.entries(p.var).map(([k, x]) => ({ k, ...x }))))}
+    </div><p class="hint">PAR ${p.parPercent}% of ${money(p.totalOutstanding)} outstanding. Interest in suspense ${money(p.interestInSuspense)}.</p>`;
     return;
   }
 
   if (R.which === 'par-loans') {
     qs.set('offset', R.offset); qs.set('limit', R.limit);
     const r = await api('GET', `/api/reports/portfolio-at-risk/loans?${qs}`);
+    if (!r.ok) return fail(r);
     const p = r.body;
     out.innerHTML = table([
       { label: 'Loan', key: 'account_no' },
       { label: 'Member', value: (x) => `${x.first_name} ${x.last_name}` },
+      { label: 'Branch', key: 'branch_code' },
+      { label: 'Officer', key: 'credit_officer' },
       { label: 'Bucket', key: 'bucket' },
       { label: 'Days late', num: true, key: 'days_late' },
       { label: 'Outstanding', num: true, value: (x) => money(x.outstanding) },
+      { label: 'Overdue', num: true, value: (x) => money(x.principal_overdue) },
     ], p.items || []) + pager(R, p.total || 0);
     wirePager(R, runReport);
+    return;
+  }
+
+  if (R.which === 'risk') {
+    const r = await api('GET', `/api/reports/risk?${qs}`);
+    if (!r.ok) return fail(r);
+    const k = r.body;
+    out.innerHTML = sourceNote(k) + table([
+      { label: k.groupBy, key: 'label' }, { label: 'Loans', num: true, key: 'loans' },
+      { label: 'Outstanding', num: true, value: (x) => money(x.principalOutstanding) },
+      { label: 'Overdue', num: true, value: (x) => money(x.principalOverdue) },
+      { label: 'Of portfolio', num: true, value: (x) => pctText(x.percentOfPortfolio) },
+      { label: 'Provision', num: true, value: (x) => (x.provisionRequired === null ? 'rate not set' : money(x.provisionRequired)) },
+    ], k.groups, { empty: 'No loans in arrears' }) + card('By risk level', table([
+      { label: 'Level', key: 'label' }, { label: 'Days', value: (x) => `${x.daysFrom}–${x.daysTo ?? ''}` },
+      { label: 'Rate', num: true, value: (x) => (x.ratePercent === null ? 'not set' : pctText(x.ratePercent)) },
+      { label: 'Loans', num: true, key: 'loans' },
+      { label: 'Outstanding', num: true, value: (x) => money(x.principalOutstanding) },
+      { label: 'Provision', num: true, value: (x) => (x.provisionRequired === null ? '' : money(x.provisionRequired)) },
+    ], k.bands)) + (k.ratesUnset.length ? `<p class="notice">Provision rates not set: ${esc(k.ratesUnset.join(', '))}. Enter them under Period and provisions.</p>` : '');
+    return;
+  }
+
+  if (R.which === 'indicators') {
+    const r = await api('GET', `/api/reports/indicators?${qs}`);
+    if (!r.ok) return fail(r);
+    out.innerHTML = indicatorCards(r.body.indicators);
+    return;
+  }
+
+  if (R.which === 'portfolio') {
+    const r = await api('GET', `/api/reports/portfolio?${qs}`);
+    if (!r.ok) return fail(r);
+    const p = r.body;
+    out.innerHTML = card('Overview', `<dl class="kv">
+        <dt>Gross loan portfolio</dt><dd>${money(p.overview.grossLoanPortfolio)}</dd>
+        <dt>Loans outstanding</dt><dd>${p.overview.loansOutstanding ?? ''}</dd>
+        <dt>PAR over 30</dt><dd>${pctText(p.overview.parOver30)}</dd>
+        <dt>Disbursed in the period</dt><dd>${money(p.overview.disbursedInPeriod)} (${p.overview.loansDisbursedInPeriod} loans)</dd>
+        <dt>Deposits now</dt><dd>${money(p.overview.depositBalanceNow)}</dd></dl>`)
+      + table([
+        { label: 'From', key: 'from' }, { label: 'To', key: 'to' }, { label: 'Created', num: true, key: 'created' },
+        { label: 'Disbursed', num: true, value: (x) => money(x.disbursed.amount) },
+        { label: 'Written off', num: true, value: (x) => money(x.writtenOff.amount) },
+        { label: 'Repaid', num: true, key: 'repaid' },
+        { label: 'Portfolio', num: true, value: (x, i) => money(x.h.grossLoanPortfolio) },
+        { label: 'PAR>30', num: true, value: (x) => (x.h.portfolioRisk ? pctText(x.h.portfolioRisk.parOver30) : 'no positions') },
+        { label: 'Assets', num: true, value: (x) => money(x.h.capitalStructure.assets) },
+      ], p.accounts.map((a, i) => ({ ...a, h: p.historical[i] })));
+    return;
+  }
+
+  if (R.which === 'organization') {
+    const r = await api('GET', '/api/reports/organization');
+    if (!r.ok) return fail(r);
+    const o = r.body;
+    const cols = [{ label: 'Members', num: true, key: 'members' }, { label: 'Borrowers', num: true, key: 'borrowers' },
+      { label: 'Loans', num: true, key: 'loans' }, { label: 'Portfolio', num: true, value: (x) => money(x.grossLoanPortfolio) },
+      { label: 'PAR>30', num: true, value: (x) => pctText(x.parOver30) }];
+    out.innerHTML = card('Branches', table([{ label: 'Branch', value: (x) => `${x.code} ${x.name}` }, ...cols,
+      { label: 'Centres', num: true, key: 'centres' }, { label: 'Deposits', num: true, value: (x) => money(x.deposits) }], o.branches))
+      + card('Credit officers', table([{ label: 'Officer', value: (x) => x.name || x.email }, ...cols], o.creditOfficers, { empty: 'No credit officers assigned' }));
+    return;
+  }
+
+  if (R.which === 'earnings') {
+    const r = await api('GET', `/api/reports/earnings?${qs}`);
+    if (!r.ok) return fail(r);
+    const e = r.body;
+    out.innerHTML = table([
+      { label: e.groupBy, key: 'label' }, { label: 'Revenue', num: true, value: (x) => money(x.totalRevenue) },
+      { label: 'Expenses', num: true, value: (x) => money(x.totalExpenses) }, { label: 'Net', num: true, value: (x) => money(x.net) },
+    ], e.groups, { empty: 'No income or expense in the period' }) + `<p class="hint">Total ${money(e.net)}, the income statement's surplus for the period.</p>`;
+    return;
+  }
+
+  if (R.which === 'cashflow') {
+    const r = await api('GET', `/api/reports/cashflow?${qs}`);
+    if (!r.ok) return fail(r);
+    const f = r.body;
+    const b = f.balanceChanges;
+    out.innerHTML = `<div class="grid">
+      ${card('Income', table([{ label: 'Line', key: 'label' }, { label: 'Amount', num: true, value: (x) => money(x.amount) }], f.income) + `<p class="num"><strong>${money(f.totalIncome)}</strong></p>`)}
+      ${card('Expenses', table([{ label: 'Line', key: 'label' }, { label: 'Amount', num: true, value: (x) => money(x.amount) }], f.expenses) + `<p class="num"><strong>${money(f.totalExpenses)}</strong></p>`)}
+      ${card('Balance changes', `<dl class="kv">
+        <dt>Principal disbursed</dt><dd>${money(b.principalDisbursed)}</dd><dt>Principal collected</dt><dd>${money(b.principalCollected)}</dd>
+        <dt>Principal written off</dt><dd>${money(b.principalWrittenOff)}</dd><dt>Change in portfolio</dt><dd><strong>${money(b.changeInPortfolio)}</strong></dd>
+        <dt>Deposits</dt><dd>${money(b.deposits)}</dd><dt>Withdrawals</dt><dd>${money(b.withdrawals)}</dd>
+        <dt>Change in deposits</dt><dd><strong>${money(b.changeInDeposits)}</strong></dd></dl>`)}
+    </div><p class="hint">In ${esc(f.currency)}, the base currency.</p>`;
+    return;
+  }
+
+  if (R.which === 'outreach') {
+    const r = await api('GET', `/api/reports/outreach?${qs}`);
+    if (!r.ok) return fail(r);
+    const o = r.body;
+    out.innerHTML = card('Outreach', `<dl class="kv">
+        <dt>Clients</dt><dd>${o.clients} (${o.activeClients} active)</dd><dt>Female clients</dt><dd>${pctText(o.femaleClientsPercent)}</dd>
+        <dt>Borrowers</dt><dd>${o.borrowers}</dd><dt>Female borrowers</dt><dd>${pctText(o.femaleBorrowersPercent)}</dd>
+        <dt>Savers</dt><dd>${o.savers}</dd><dt>Joined / exited in the period</dt><dd>${o.joinedInPeriod} / ${o.exitedInPeriod}</dd></dl>`)
+      + table([{ label: 'Branch', value: (x) => `${x.branch} ${x.branchName}` }, { label: 'Clients', num: true, key: 'clients' },
+        { label: 'Borrowers', num: true, key: 'borrowers' }, { label: 'Female borrowers', num: true, value: (x) => pctText(x.femaleBorrowersPercent) },
+        { label: 'Savers', num: true, key: 'savers' }], o.byBranch);
     return;
   }
 
   if (R.which === 'write-offs') {
     qs.set('offset', R.offset); qs.set('limit', R.limit);
     const r = await api('GET', `/api/loans/write-offs?${qs}`);
-    if (!r.ok) return void (out.innerHTML = `<p class="error">${esc(r.error)}</p>`);
+    if (!r.ok) return fail(r);
     const w = r.body;
     const t = w.totals;
     out.innerHTML = table([
@@ -1647,6 +1834,7 @@ async function runReport() {
   }
 
   const r = await api('GET', `/api/reports/prudential?${qs}`);
+  if (!r.ok) return fail(r);
   const p = r.body;
   out.innerHTML = `<p class="notice">${esc(p.disclaimer)}</p>` + table([
     { label: 'Measure', key: 'label' },
@@ -1659,6 +1847,182 @@ async function runReport() {
         : m.compliant ? '<span class="badge">met</span>' : '<span class="badge bad">below</span>'),
     },
   ], p.measures);
+}
+
+/** Indicators as cards by group. */
+function indicatorCards(list) {
+  const show = (x) => (x.value === null ? '<span class="hint">n/a</span>'
+    : x.kind === 'PERCENT' ? pctText(x.value) : x.kind === 'AMOUNT' ? money(x.value) : esc(x.value));
+  const groups = [...new Set(list.map((x) => x.group))];
+  return `<div class="grid">${groups.map((g) => card(g.charAt(0) + g.slice(1).toLowerCase(), `<dl class="kv">${list.filter((x) => x.group === g)
+    .map((x) => `<dt>${esc(x.label)}</dt><dd data-indicator="${esc(x.code)}">${show(x)}</dd>`).join('')}</dl>`)).join('')}</div>`;
+}
+
+// --------------------------------------------------------------------------
+// Dashboard (the reference platform's dashboard widgets)
+// --------------------------------------------------------------------------
+
+const DASHBOARD_INDICATORS = ['ACTIVE_CLIENTS', 'ACTIVE_BORROWERS', 'GROSS_LOAN_PORTFOLIO', 'DEPOSIT_BALANCE', 'PAR_OVER_30',
+  'LOANS_IN_ARREARS', 'LOANS_PENDING_APPROVAL', 'DISBURSED_THIS_MONTH'];
+
+async function dashboardView() {
+  const role = S.user.role;
+  const reader = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR'].includes(role);
+  const activityReader = ['TENANT_ADMIN', 'MANAGER', 'AUDITOR'].includes(role);
+  const inWeek = new Date(Date.parse(`${today()}T00:00:00Z`) + 7 * 86400000).toISOString().slice(0, 10);
+  const [ind, act, favs, upcoming, mine] = await Promise.all([
+    reader ? api('GET', `/api/reports/indicators?indicators=${DASHBOARD_INDICATORS.join(',')}`) : Promise.resolve(null),
+    activityReader ? api('GET', '/api/reports/audit-log?limit=10') : Promise.resolve(null),
+    api('GET', '/api/views?favourites=true'),
+    api('POST', '/api/views/run?limit=10', {
+      entity: 'LOANS', columns: ['accountNo', 'memberName', 'nextDueDate', 'nextDueAmount'], sortBy: 'nextDueDate',
+      filters: [{ field: 'nextDueDate', operator: 'BETWEEN', value: today(), secondValue: inWeek }, { field: 'status', operator: 'IN', values: ['ACTIVE', 'IN_ARREARS'] }],
+    }),
+    api('POST', '/api/views/run?limit=10', {
+      entity: 'MEMBERS', columns: ['memberNo', 'fullName', 'runningLoans', 'loanBalance'],
+      filters: [{ field: 'creditOfficer', operator: 'EQUALS', value: S.user.email }],
+    }),
+  ]);
+  view().innerHTML = `<h1>Dashboard</h1>
+    ${ind && ind.ok ? card('Indicators', indicatorCards(ind.body.indicators)) : ''}
+    <div class="grid">
+      ${card('Upcoming repayments (next 7 days)', upcoming.ok ? table([
+    { label: 'Loan', key: 'accountNo' }, { label: 'Member', key: 'memberName' }, { label: 'Due', key: 'nextDueDate' },
+    { label: 'Amount', num: true, value: (x) => money(x.nextDueAmount) }], upcoming.body.items, { empty: 'Nothing due this week' }) : `<p class="error">${esc(upcoming.error)}</p>`)}
+      ${card('Your clients', mine.ok ? table([{ label: 'Member', key: 'memberNo' }, { label: 'Name', key: 'fullName' },
+    { label: 'Loans', num: true, key: 'runningLoans' }, { label: 'Owed', num: true, value: (x) => money(x.loanBalance) }], mine.body.items, { empty: 'No members assigned to you' }) : '')}
+      ${card('Your favourite views', favs.ok && favs.body.length ? `<ul id="fav-views">${favs.body.map((v) => `<li><button class="link" data-open-view="${esc(v.id)}">${esc(v.name)}</button> <span class="hint">${esc(v.entity.toLowerCase())}</span></li>`).join('')}</ul>`
+    : '<p class="hint">Mark a view as a favourite under Views and it appears here.</p>')}
+      ${act && act.ok ? card('Latest activity', table([{ label: 'When', value: (x) => String(x.created_at).replace('T', ' ').slice(0, 16) },
+    { label: 'Who', key: 'actor' }, { label: 'What', key: 'action' }], act.body || [])) : ''}
+    </div>`;
+  view().querySelectorAll('[data-open-view]').forEach((b) => b.addEventListener('click', () => {
+    viewState.open = b.dataset.openView; viewState.offset = 0; go('views');
+  }));
+}
+
+// --------------------------------------------------------------------------
+// Custom views
+// --------------------------------------------------------------------------
+
+const viewState = { open: null, offset: 0, limit: 50, editing: null };
+
+async function viewsView() {
+  if (viewState.editing) return viewEditor();
+  if (viewState.open) return viewRun();
+  const [list, ents] = await Promise.all([api('GET', '/api/views'), api('GET', '/api/views/entities')]);
+  if (!list.ok) throw new Error(list.error);
+  view().innerHTML = `<h1>Views</h1>
+    <div class="toolbar"><button id="v-new">New view</button></div>
+    ${ents.body.map((e) => {
+    const vs = list.body.filter((v) => v.entity === e.entity);
+    return card(e.label, table([
+      { label: 'Name', html: true, value: (v) => `<button class="link" data-v-open="${esc(v.id)}">${esc(v.name)}</button>` },
+      { label: 'Owner', key: 'owner' },
+      { label: 'Shared', value: (v) => (v.usageRights.allUsers ? 'all users' : v.usageRights.roles.join(', ')) },
+      { label: '', html: true, value: (v) => `<button class="link" data-v-fav="${esc(v.id)}" data-on="${v.favourite ? '' : '1'}">${v.favourite ? 'unfavourite' : 'favourite'}</button>
+        <button class="link" data-v-copy="${esc(v.id)}">copy</button>${v.canEdit ? ` <button class="link" data-v-edit="${esc(v.id)}">edit</button> <button class="link" data-v-del="${esc(v.id)}">delete</button>` : ''}` },
+    ], vs, { empty: 'No views' }));
+  }).join('')}`;
+  $('#v-new').addEventListener('click', () => { viewState.editing = { entity: ents.body[0].entity }; viewsView(); });
+  const on = (attr, fn) => view().querySelectorAll(`[${attr}]`).forEach((b) => b.addEventListener('click', () => fn(b.getAttribute(attr), b)));
+  on('data-v-open', (id) => { viewState.open = id; viewState.offset = 0; viewsView(); });
+  on('data-v-edit', (id) => { viewState.editing = list.body.find((v) => v.id === id); viewsView(); });
+  on('data-v-fav', async (id, b) => { const r = await api(b.dataset.on ? 'PUT' : 'DELETE', `/api/views/${id}/favourite`); toast(r.ok ? 'Saved' : r.error, !r.ok); viewsView(); });
+  on('data-v-copy', async (id) => { const r = await api('POST', `/api/views/${id}/copy`, {}); toast(r.ok ? `Copied as ${r.body.name}` : r.error, !r.ok); viewsView(); });
+  on('data-v-del', async (id) => {
+    if (!window.confirm('Delete this view?')) return;
+    const r = await api('DELETE', `/api/views/${id}`); toast(r.ok ? 'Deleted' : r.error, !r.ok); viewsView();
+  });
+}
+
+async function viewRun() {
+  const qs = new URLSearchParams({ offset: viewState.offset, limit: viewState.limit });
+  const r = await api('GET', `/api/views/${viewState.open}/run?${qs}`);
+  if (!r.ok) { viewState.open = null; toast(r.error, true); return viewsView(); }
+  const x = r.body;
+  const cols = x.columns.map((c) => ({ label: c.label, num: ['NUMBER', 'MONEY'].includes(c.type), value: (row) => (c.type === 'MONEY' ? money(row[c.key]) : row[c.key]) }));
+  const totals = x.totals ? `<table><tbody><tr class="total">${x.columns.map((c, i) => `<td class="${x.totals[c.key] !== undefined ? 'num' : ''}">${x.totals[c.key] !== undefined ? money(x.totals[c.key]) : i === 0 ? 'Total' : ''}</td>`).join('')}</tr></tbody></table>` : '';
+  const detail = x.view.display === 'DETAIL';
+  view().innerHTML = `<h1>${esc(x.view.name)}</h1>
+    <div class="toolbar"><button class="secondary" id="v-back">All views</button>
+      <button class="secondary" id="v-toggle">${detail ? 'List' : 'Detail'}</button>
+      <button class="secondary" id="v-csv">CSV</button><button class="secondary" id="v-xlsx">Excel</button></div>
+    <div id="v-out">${detail
+    ? x.items.map((row) => card(String(row[x.columns[0].key] ?? ''), `<dl class="kv">${x.columns.map((c) => `<dt>${esc(c.label)}</dt><dd>${esc(c.type === 'MONEY' ? money(row[c.key]) : row[c.key] ?? '')}</dd>`).join('')}</dl>`)).join('')
+    : table(cols, x.items, { empty: 'Nothing matches this view' }) + totals}</div>
+    ${pager(viewState, x.total)}`;
+  wirePager(viewState, viewsView);
+  $('#v-back').addEventListener('click', () => { viewState.open = null; viewsView(); });
+  $('#v-toggle').addEventListener('click', () => { x.view.display = detail ? 'LIST' : 'DETAIL'; api('PATCH', `/api/views/${x.view.id}`, { display: x.view.display }).then(() => viewsView()); });
+  $('#v-csv').addEventListener('click', () => openFile(`/api/views/${x.view.id}/export?format=csv`, `${x.view.name}.csv`, { save: true }));
+  $('#v-xlsx').addEventListener('click', () => openFile(`/api/views/${x.view.id}/export?format=xlsx`, `${x.view.name}.xlsx`, { save: true }));
+}
+
+async function viewEditor() {
+  const v = viewState.editing;
+  const admin = S.user.role === 'TENANT_ADMIN';
+  const ents = (await api('GET', '/api/views/entities')).body;
+  const meta = (await api('GET', `/api/views/fields/${v.entity}`)).body;
+  const cols = v.columns || meta.defaultColumns;
+  const filters = v.filters || [];
+  const fieldOpts = (sel) => meta.fields.map((f) => `<option value="${esc(f.key)}" ${f.key === sel ? 'selected' : ''}>${esc(f.label)}</option>`).join('');
+  const filterRow = (x, i) => {
+    const f = meta.fields.find((y) => y.key === x.field) || meta.fields[0];
+    return `<div class="toolbar" data-filter="${i}">
+      <select data-f="field">${fieldOpts(f.key)}</select>
+      <select data-f="operator">${f.operators.map((o) => `<option ${o === x.operator ? 'selected' : ''}>${o}</option>`).join('')}</select>
+      <input data-f="value" value="${esc(Array.isArray(x.values) ? x.values.join(',') : x.value ?? '')}" placeholder="value">
+      <input data-f="secondValue" value="${esc(x.secondValue ?? '')}" placeholder="to (BETWEEN)">
+      <button class="link" data-drop-filter="${i}">remove</button></div>`;
+  };
+  view().innerHTML = `<h1>${v.id ? 'Edit view' : 'New view'}</h1>
+    <section class="card"><form id="v-form">
+      <label>Records<select name="entity" ${v.id ? 'disabled' : ''}>${ents.map((e) => `<option value="${e.entity}" ${e.entity === v.entity ? 'selected' : ''}>${esc(e.label)}</option>`).join('')}</select></label>
+      <label>Name<input name="name" value="${esc(v.name || '')}" required maxlength="255"></label>
+      <label>Match<select name="match"><option value="ALL" ${v.match !== 'ANY' ? 'selected' : ''}>All filters</option><option value="ANY" ${v.match === 'ANY' ? 'selected' : ''}>Any filter</option></select></label>
+      <h2>Filters</h2><div id="v-filters">${filters.map(filterRow).join('')}</div>
+      <button type="button" class="secondary" id="v-add-filter">Add filter</button>
+      <h2>Columns</h2><select name="columns" multiple size="10">${meta.fields.map((f) => `<option value="${esc(f.key)}" ${cols.includes(f.key) ? 'selected' : ''}>${esc(f.label)}</option>`).join('')}</select>
+      <label>Sort by<select name="sortBy"><option value="">(none)</option>${fieldOpts(v.sortBy)}</select></label>
+      <label>Direction<select name="sortDir"><option ${v.sortDir !== 'DESC' ? 'selected' : ''}>ASC</option><option ${v.sortDir === 'DESC' ? 'selected' : ''}>DESC</option></select></label>
+      <label class="check"><input type="checkbox" name="includeTotals" ${v.includeTotals ? 'checked' : ''}> Include totals</label>
+      <label class="check"><input type="checkbox" name="includeTimestamp" ${v.includeTimestamp ? 'checked' : ''}> Include timestamp</label>
+      <label>Opens in<select name="display"><option ${v.display !== 'DETAIL' ? 'selected' : ''}>LIST</option><option ${v.display === 'DETAIL' ? 'selected' : ''}>DETAIL</option></select></label>
+      ${admin ? `<h2>Usage rights</h2><label class="check"><input type="checkbox" name="allUsers" ${v.usageRights?.allUsers ? 'checked' : ''}> All users</label>
+        <select name="roles" multiple size="5">${['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'].map((x) => `<option ${(v.usageRights?.roles || []).includes(x) ? 'selected' : ''}>${x}</option>`).join('')}</select>` : ''}
+      <div class="toolbar"><button type="submit">Save</button><button type="button" class="secondary" id="v-cancel">Cancel</button></div>
+    </form></section>`;
+  const form = $('#v-form');
+  const readFilters = () => [...view().querySelectorAll('[data-filter]')].map((row) => {
+    const g = (k) => row.querySelector(`[data-f=${k}]`).value;
+    const op = g('operator');
+    return { field: g('field'), operator: op, ...(op === 'IN' ? { values: g('value').split(',').map((s) => s.trim()).filter(Boolean) } : { value: g('value') }), ...(op === 'BETWEEN' ? { secondValue: g('secondValue') } : {}) };
+  });
+  const keep = () => {
+    v.filters = readFilters();
+    v.name = form.name.value;
+    v.columns = [...form.columns.selectedOptions].map((o) => o.value);
+  };
+  form.entity.addEventListener('change', (e) => { viewState.editing = { entity: e.target.value, name: form.name.value }; viewsView(); });
+  $('#v-add-filter').addEventListener('click', () => { keep(); v.filters.push({ field: meta.fields[0].key, operator: meta.fields[0].operators[0] }); viewsView(); });
+  view().querySelectorAll('[data-drop-filter]').forEach((b) => b.addEventListener('click', () => { keep(); v.filters.splice(Number(b.dataset.dropFilter), 1); viewsView(); }));
+  view().querySelectorAll('[data-f=field]').forEach((s) => s.addEventListener('change', () => { keep(); viewsView(); }));
+  $('#v-cancel').addEventListener('click', () => { viewState.editing = null; viewsView(); });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = {
+      entity: v.entity, name: form.name.value, match: form.match.value, filters: readFilters(),
+      columns: [...form.columns.selectedOptions].map((o) => o.value), sortBy: form.sortBy.value || null, sortDir: form.sortDir.value,
+      includeTotals: form.includeTotals.checked, includeTimestamp: form.includeTimestamp.checked, display: form.display.value,
+      ...(admin ? { usageRights: { allUsers: form.allUsers.checked, roles: [...form.roles.selectedOptions].map((o) => o.value) } } : {}),
+    };
+    const r = v.id ? await api('PATCH', `/api/views/${v.id}`, body) : await api('POST', '/api/views', body);
+    if (!r.ok) return toast(r.error, true);
+    toast('View saved');
+    viewState.editing = null; viewState.open = r.body.id; viewState.offset = 0;
+    return viewsView();
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -3257,6 +3621,8 @@ async function usersView() {
 }
 
 const VIEWS = {
+  dashboard: dashboardView,
+  views: viewsView,
   members: membersView,
   data: dataView,
   users: usersView,

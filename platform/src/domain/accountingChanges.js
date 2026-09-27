@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const PA = require('./productAccounting');
 const accruals = require('./accruals');
@@ -29,7 +30,7 @@ const { err, round2 } = acct;
  * made it and the amounts converted on every account.
  */
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = (c) => orgToday(c);
 const lastDayOfPreviousMonth = (iso) => {
   const d = new Date(`${iso.slice(0, 7)}-01T00:00:00Z`);
   return new Date(d.getTime() - 86400000).toISOString().slice(0, 10);
@@ -107,7 +108,7 @@ async function changeLoanProduct(c, productId, { method, interestAccruedAccounti
   if (p.funding_enabled) throw err('FUNDED_PRODUCT_METHOD_CHANGE_NOT_SUPPORTED: funded loans split interest with funders; create a new product', 409);
   const toAcc = normalise(method, interestAccruedAccounting);
   if (method === p.accounting_method && toAcc === p.interest_accrued_accounting) throw err('NOTHING_TO_CHANGE', 409);
-  const date = today();
+  const date = (await today(c));
   await assertAtBoundary(c, date);
 
   const next = { ...p, ...mappings, accounting_method: method, interest_accrued_accounting: toAcc };
@@ -191,7 +192,7 @@ async function changeDepositProduct(c, productId, { method, interestAccruedAccou
   if (!p) throw err('UNKNOWN_DEPOSIT_PRODUCT', 404);
   const toAcc = normalise(method, interestAccruedAccounting);
   if (method === p.accounting_method && toAcc === p.interest_accrued_accounting) throw err('NOTHING_TO_CHANGE', 409);
-  const date = today();
+  const date = (await today(c));
   await assertAtBoundary(c, date);
 
   const next = { ...p, ...mappings, accounting_method: method, interest_accrued_accounting: toAcc };

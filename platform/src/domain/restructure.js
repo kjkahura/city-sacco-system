@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const savings = require('./savings');
 const L = require('./ledger');
@@ -62,7 +63,7 @@ const ARREARS = ['CAPITALIZE', 'WRITE_OFF'];
 const ymd = (d) => (d instanceof Date
   ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   : String(d).slice(0, 10));
-const today = () => new Date().toISOString().slice(0, 10);
+const today = (c) => orgToday(c);
 
 async function assertRestructurable(c, old) {
   if (!RESTRUCTURABLE.includes(old.status)) throw err(`LOAN_NOT_RESTRUCTURABLE: ${old.status}`, 409);
@@ -290,7 +291,7 @@ async function restructure(c, loanId, {
   if (kind !== 'RESCHEDULE') throw err(`UNSUPPORTED_RESTRUCTURE: ${kind}`);
   if (!ARREARS.includes(arrears)) throw err('ARREARS_MUST_BE_CAPITALIZE_OR_WRITE_OFF', 400);
   if (round2(topUp || 0) > 0) throw err('RESCHEDULE_TAKES_NO_TOP_UP', 400);
-  const date = valueDate ? ymd(valueDate) : today();
+  const date = valueDate ? ymd(valueDate) : (await today(c));
 
   let old = await L.lock(c, loanId);
   await assertRestructurable(c, old);
@@ -395,7 +396,7 @@ async function disburseRefinance(c, applicationId, { channelId = 'bank', valueDa
   const a = await L.lock(c, applicationId);
   if (!a.refinance_of) throw err('NOT_A_TOP_UP_APPLICATION', 409);
   if (a.status !== 'APPROVED') throw err(`LOAN_NOT_APPROVED: ${a.status}`, 409);
-  const date = valueDate ? ymd(valueDate) : today();
+  const date = valueDate ? ymd(valueDate) : (await today(c));
 
   let old = await L.lock(c, a.refinance_of);
   await assertRestructurable(c, old);
@@ -447,7 +448,7 @@ async function undoRestructure(c, loanId, { note = null, createdBy } = {}) {
   const a = tx.allocation || {};
   const u = a.undo || {};
   const narration = note || `Undo ${tx.kind === 'LOAN_REFINANCE' ? 'refinance' : 'reschedule'}`;
-  const date = today();
+  const date = (await today(c));
 
   // ---- what the new loan booked since ---------------------------------------
   const { rows: own } = await c.query(

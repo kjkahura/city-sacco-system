@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const savings = require('./savings');
 const channels = require('./channels');
@@ -344,7 +345,7 @@ async function register(c, { asAt = null, offset = 0, limit = 50 } = {}) {
 
   const p = await pageQuery(c, sql, [asAt], { offset, limit });
   return {
-    asAt: asAt || new Date().toISOString().slice(0, 10),
+    asAt: asAt || (await orgToday(c)),
     holders: p.items,
     totalUnits: Number(t.units),
     totalHolders: t.holders,

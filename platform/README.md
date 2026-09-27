@@ -2013,6 +2013,9 @@ and each tenant set to retry loans left out has them tried again.
     products) or the month's end (monthly GL accrual)
 11. `autoClosure`: closes the whole book through yesterday every N days, when
     the tenant has switched automatic closures on
+12. `snapshotPortfolio`: writes the day's loan positions, which reports for
+    past dates read; then `pruneReports`, which removes accounting reports
+    past their 24 hours
 
 Each job is idempotent per business date through `platform.job_runs`, so a
 rerun is a no-op rather than a double posting. A loan that breaks a loan job
@@ -2106,17 +2109,172 @@ waived it and why, stay on the record.
 
 ## Reporting
 
+After the reference platform's Data and Reporting > Reporting pages.
+
 ```
-GET /api/reports/balance-sheet?asAt=[&offset=&limit=]
-GET /api/reports/income-statement?from=&to=[&offset=&limit=][&includeClosing=]
-GET /api/reports/prudential?asAt=
-GET /api/reports/portfolio-at-risk?asAt=
-GET /api/reports/portfolio-at-risk/loans?asAt=&bucket=&offset=&limit=
-GET /api/reports/audit-log?action=&entity=&offset=&limit=
-GET /api/reports/limits
-GET /api/accounting/trial-balance?from=&to=&offset=&limit=
-GET /api/accounting/journal?from=&to=&glCode=&offset=&limit=
+GET  /api/reports/balance-sheet?asAt= | month=yyyy-MM [&branchId=][&format=csv|xlsx]
+GET  /api/reports/income-statement?from=&to=[&branchId=][&includeClosing=][&format=]
+GET  /api/accounting/trial-balance?from=&to=[&branchId=][&zeroBalances=true][&glTypes=ASSET,LIABILITY][&format=]
+POST /api/accounting/reports              { startDate, endDate, balanceTypes, glTypes, branchId, currencyCode }
+GET  /api/accounting/reports/{reportKey}
+GET  /api/reports/prudential?asAt=
+GET  /api/reports/portfolio-at-risk?asAt=[&branchId=&centreId=&productId=&creditOfficer=][&format=]
+GET  /api/reports/portfolio-at-risk/loans?asAt=&bucket=&minDaysLate=&maxDaysLate=&offset=&limit=[&format=]
+GET  /api/reports/risk?asAt=&minDaysLate=1&maxDaysLate=&band=&groupBy=BRANCH|CENTRE|PRODUCT|CREDIT_OFFICER[&format=]
+GET  /api/reports/positions[?asAt=]           POST /api/reports/positions (today's, now)
+GET  /api/reports/indicators?entityType=&entityId=&indicators=[&format=]
+GET  /api/reports/indicators/catalog
+GET|POST /api/reports/indicator-reports       GET|PUT|PATCH|DELETE /api/reports/indicator-reports/{id}
+GET  /api/reports/portfolio?from=&to=&interval=DAILY|WEEKLY|MONTHLY[&branchId=][&format=]
+GET  /api/reports/organization[?format=]
+GET  /api/reports/earnings?from=&to=&groupBy=PRODUCT|BRANCH[&branchId=][&format=]
+GET  /api/reports/cashflow?from=&to=[&branchId=][&format=]
+GET  /api/reports/outreach?from=&to=[&format=]
+GET  /api/reports/audit-log?action=&entity=&offset=&limit=
+GET  /api/reports/limits
+GET  /api/accounting/journal?from=&to=&glCode=&offset=&limit=
 ```
+
+Every report downloads with `?format=csv` or `?format=xlsx`: the organization,
+the report, its period and branch and when it was generated head the file,
+then the rows. In Excel an amount is a number while it fits Excel's 15
+significant digits and text beyond, so nothing is rounded (as the reference platform does).
+Reports are for administrators, managers, accountants and auditors.
+
+### The organization's day
+
+A tenant transaction runs with the session time zone set to the tenant's
+(`db/tenantContext`), so `current_date`, a DATE column's default and every
+"today" in the code (`lib/orgDate.orgToday`) are the organization's calendar
+day. Before this, the code took the UTC day: in Nairobi between midnight and
+03:00 a report with no date was as at yesterday, a disbursement defaulted to
+yesterday, and a loan disbursed "today" and accrued "today" disagreed by a
+day. The platform-wide end of day (`eod:run` for every tenant) now runs each
+tenant on its own local date too. `test/reports.test.js` sets a zone whose day
+differs from UTC and checks all three.
+
+### Accounting reports
+
+The trial balance gives each account its opening balance (the day before
+`from`), the period's debits and credits, the net change and the closing
+balance, in the account's own sign: assets and expenses debit minus credit,
+liabilities, equity and income credit minus debit. Accounts with no debit or
+credit in the period are left out unless `zeroBalances=true`. The balance
+sheet has the reference platform's two modes: `asAt` (the book from its start to the date) and
+`month` (that month's postings, to today for the current month). All three
+statements take a branch (id, code, or `NONE` for lines posted without one);
+the branches add up to the whole.
+
+`POST /api/accounting/reports` is the reference platform's accounting reports API: it answers
+202 with a `reportKey` QUEUED, builds the report in the background, and `GET
+/api/accounting/reports/{reportKey}` returns `{ reportKey, status, items:
+[{ glAccount: { id, name, type }, amounts: { openingBalance, debits, credits,
+netChange, closingBalance } }] }` with the balance types asked for. It takes
+an `Idempotency-Key`, and a report can be read for 24 hours.
+
+### Portfolio at risk, past days and the risk report
+
+`domain/portfolio.js` holds the positions every portfolio report reads: each
+running loan's principal, interest, fees and penalties outstanding, what of it
+is overdue, and its days late (since the oldest unpaid installment fell due).
+Running means ACTIVE, IN_ARREARS and LOCKED. A locked loan is usually the
+latest in the book; it used to be left out of PAR and of the provisioning run.
+
+Today's positions come from the loan tables. The loan tables only hold the
+present, so a past day cannot be worked out of them: the old PAR report took
+days late as at the date asked for but which loans ran, which installments
+were unpaid and the principal outstanding from today, a figure the book never
+showed. The end of day now writes the day's positions (`snapshotPortfolio`,
+its last job, into `loan_daily_positions`), and a past date reads them. A past
+date without positions is refused with the earliest date that has them; a
+future date is refused. Positions can be taken for today or yesterday only.
+
+PAR over X is the outstanding principal of loans more than X days late over
+the gross loan portfolio (PAR is PAR over 0; a range 7-30 is more than 7 and
+at most 30); VAR is the same with the overdue principal. The report gives
+PAR, PAR over 7, 15, 30, 60, 90, 180 and 360, the ranges 7-30, 30-90, 90-180
+and 180-360, VAR, VAR over 7, 15, 30 and 90, interest in suspense (unpaid
+interest on late loans) and the old buckets, for the whole portfolio or one
+branch, centre, product or credit officer. The risk report filters by days
+late and provisioning band and groups by branch, centre, product or credit
+officer, each band with its rate and the provision it calls for; a band whose
+rate is not set shows the rate and the provision as not set.
+
+### Indicators
+
+Around fifty indicators in the reference platform's groups (outreach, deposits, loans, risk
+and aging, organization), for the organization or one branch, centre, loan
+product, deposit product or credit officer. They are the position now. An
+indicator that does not apply to the scope (deposit figures for a loan
+product) is null with the reason; the reference platform's indicators for groups and lines of
+credit have no counterpart, as the platform has neither. Saved indicator
+reports (name, description, entity, indicators) are the reference platform's Indicators tab.
+
+### Management reports
+
+- **Portfolio**: over a range of at most a year, by day, week or month: loans
+  created, disbursed, written off and repaid in each interval, and at each
+  interval end the loans by state, the portfolio, its risk and average balance
+  (from that day's positions; null where there are none) and the capital
+  structure from the ledger.
+- **Organization**: by branch and by credit officer, members, borrowers,
+  loans, portfolio and PAR over 30. A loan has its own credit officer now
+  (`loan_accounts.credit_officer`), the member's unless the application
+  names one, and it can be changed on the loan.
+- **Earnings**: revenue and expenses by product or branch, each income and
+  expense line attributed through the entry's source or its transaction. The
+  total equals the income statement's surplus.
+- **Cashflow**: income collected, expenses paid and the changes in the
+  portfolio and in deposits, from the transactions, in the base currency.
+  Reversed transactions and imported opening balances are left out.
+- **Outreach**: clients, borrowers and savers, by gender and branch, with
+  those who joined and left in the period.
+
+### Custom views
+
+```
+GET  /api/views/entities                 GET /api/views/fields/{entity}
+GET  /api/views[?entity=&favourites=true] POST /api/views
+POST /api/views/run[?format=csv|xlsx]    (a temporary view)
+GET|PUT|PATCH|DELETE /api/views/{id}
+GET  /api/views/{id}/run?offset=&limit=  GET /api/views/{id}/export?format=csv|xlsx
+POST /api/views/{id}/copy                PUT|DELETE /api/views/{id}/favourite
+GET  /api/members?viewfilter={id}[&resultType=BASIC|FULL_DETAILS|SUMMARY]
+     (also /loans, /loans/transactions, /savings, /savings/transactions,
+      /accounting/journal, /activities, /clients)
+GET  /api/users/{id|email|me}/views?for=LOANS
+```
+
+A view is a filter (match all or any), columns, a sort, totals and a display
+mode over members, loans, loan transactions, deposit accounts, deposit
+transactions, journal entries or system activities. Every field is declared
+with the SQL that produces it, so a view names fields and never carries SQL;
+values are parameters. Custom fields on standard sets are fields too, under
+their view rights. Operators follow the reference platform's search operators by field type.
+Totals are over every matching row, not the page. An export holds at most
+100,000 rows.
+
+Any user makes views for themselves. Usage rights (all users, or chosen
+roles) are an administrator's to give, as in the reference platform; the owner and an
+administrator change or delete a view, anyone who can see it copies it.
+Journal entries are for the ledger roles and activities for administrators,
+managers and auditors. `?viewfilter=` on a list endpoint returns what the
+view matches: its columns (BASIC), the whole records (FULL_DETAILS) or the
+count and totals (SUMMARY).
+
+### The dashboard
+
+The console opens a Dashboard page with the reference platform's widgets that have a
+counterpart here: indicators, upcoming repayments (the next seven days),
+your clients (members whose credit officer you are), your favourite views
+and the latest activity. Your Tasks, Tellers and Tellering are not built: the
+platform has no tasks and no teller tills.
+
+### Not planned here
+
+Jasper reports (the reference platform is retiring them; return templates, the extract API
+and the Singer tap cover the same ground), configurable menu items, and
+fine-grained report permissions (Users and Access Control).
 
 All built from posted journal lines, so they cannot drift from the ledger.
 
@@ -2162,14 +2320,18 @@ test asserts the sheet balances and that this figure equals the income
 statement's surplus.
 
 **Portfolio at risk** buckets outstanding principal by days late
-(1-30, 31-90, 91-180, 181-360, over 360) and reports PAR as a percentage.
+(1-30, 31-90, 91-180, 181-360, over 360) and reports PAR as a percentage,
+with the reference platform's thresholds and VAR (see "Portfolio at risk, past days and the
+risk report" above).
 
 ## Loan loss provisioning
 
 Loans are classified by how many days their oldest unpaid installment is
 overdue, using the same arrears measure as the PAR report so the two cannot
 disagree. Each band carries a rate; the required allowance is outstanding
-principal in each band times that rate.
+principal in each band times that rate. Locked loans are classified with the
+rest: a loan locked for arrears still owes its principal (they were left out
+before).
 
 ```
 GET   /api/provisioning/bands

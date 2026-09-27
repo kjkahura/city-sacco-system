@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const savings = require('./savings');
 const ledger = require('./ledger');
@@ -58,7 +59,7 @@ const { lock, balances, isAccrual, interestAccrues, writeOffCredit, post, booksE
 const WRITABLE = ['ACTIVE', 'IN_ARREARS', 'LOCKED'];
 const SOURCES = ['MEMBER', 'COLLATERAL', 'OTHER'];
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = (c) => orgToday(c);
 const ymd = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10));
 
 // --------------------------------------------------------------------------
@@ -71,9 +72,9 @@ const ymd = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d)
  * on the loan (the write-off would then precede money that moved after it).
  */
 async function writeOffDate(c, l, valueDate) {
-  const date = valueDate ? ymd(valueDate) : today();
+  const date = valueDate ? ymd(valueDate) : (await today(c));
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw err('INVALID_VALUE_DATE', 400);
-  if (date > today()) throw err('WRITE_OFF_CANNOT_BE_DATED_IN_THE_FUTURE', 400);
+  if (date > (await today(c))) throw err('WRITE_OFF_CANNOT_BE_DATED_IN_THE_FUTURE', 400);
   if (l.disbursed_on && date < ymd(l.disbursed_on)) throw err(`WRITE_OFF_BEFORE_DISBURSEMENT: ${ymd(l.disbursed_on)}`, 400);
   const { rows: [t] } = await c.query(
     `SELECT max(value_date) AS d FROM transactions
@@ -194,7 +195,7 @@ async function writeOffCharges(c, loanId, { interest = 0, fees: feeAmount = 0, p
   if (amt.penalty > Math.max(0, b.penalty)) throw err(`WRITE_OFF_EXCEEDS_PENALTIES_OWED: ${b.penalty}`, 409);
   const total = round2(amt.interest + amt.fees + amt.penalty + amt.principal);
   if (!(total > 0)) return null;
-  const date = valueDate ? ymd(valueDate) : today();
+  const date = valueDate ? ymd(valueDate) : (await today(c));
 
   const credits = [];
   const debits = [];
@@ -522,7 +523,7 @@ async function recover(c, loanId, { amount, channelId = 'cash', source = 'MEMBER
   }
   const ch = await channels.assertUsable(c, channelId, { side: 'LOAN', type: 'RECOVERY', amount: amt, productId: l.product_id, user });
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
-  const date = valueDate ? ymd(valueDate) : today();
+  const date = valueDate ? ymd(valueDate) : (await today(c));
 
   // The cash is real whether or not the product is linked to accounting.
   const { entryId } = await acct.post(c, {
@@ -582,7 +583,7 @@ async function recoverFromGuarantor(c, loanId, guarantorId, { amount = null, sav
   }
   if (a.status !== 'ACTIVE') throw err(`ACCOUNT_NOT_ACTIVE: ${a.status}`, 409);
   if (free(a) < amt) throw err(`GUARANTOR_HAS_INSUFFICIENT_DEPOSITS: ${Math.max(0, free(a))} free in ${a.account_no}`, 409);
-  const date = valueDate ? ymd(valueDate) : today();
+  const date = valueDate ? ymd(valueDate) : (await today(c));
 
   // Dr the guarantor's deposits (or suspense), Cr Recoveries (or suspense).
   const debit = a.accounting_method !== 'NONE'

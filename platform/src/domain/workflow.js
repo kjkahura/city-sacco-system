@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const { err, round2 } = acct;
 
@@ -184,7 +185,7 @@ async function changeLock(c, loanId, { suspend, note = null, valueDate = null, c
   const l = await ledger.lock(c, loanId);
   if (l.status !== 'LOCKED') throw err(`LOAN_NOT_LOCKED: ${l.status}`, 409);
   const s = suspension(suspend);
-  const date = valueDate ? ymd(valueDate) : new Date().toISOString().slice(0, 10);
+  const date = valueDate ? ymd(valueDate) : (await orgToday(c));
   const before = { interest: l.lock_interest, fees: l.lock_fees, penalties: l.lock_penalties };
   let penalties = null;
   if (l.lock_penalties && !s.penalties) penalties = await resumePenalties(c, l, date);
@@ -223,7 +224,7 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     if (l.refinance_of) await assertTopUpStands(c, l);
     await tranches.assertPlanned(c, l);
     await funding.assertFundedForApproval(c, l);
-    set('approved_on', new Date().toISOString().slice(0, 10));
+    set('approved_on', (await orgToday(c)));
     set('approved_by', createdBy || null);
   }
   if (name === 'UNDO_APPROVE') { set('approved_on', null); set('approved_by', null); }
@@ -268,7 +269,7 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     const b = ledger.balances(l);
     if (b.total > 0) throw err(`LOAN_HAS_A_BALANCE: ${b.total}`, 409);
     if (Number(l.credit_balance) > 0) throw err(`LOAN_HAS_A_CREDIT_BALANCE: ${l.credit_balance}; it must be drawn or refunded first`, 409);
-    set('closed_on', new Date().toISOString().slice(0, 10));
+    set('closed_on', (await orgToday(c)));
     await closeSecurities(c, l.id, { how: 'CLOSE' });
   }
   const s = suspension(suspend);
@@ -278,9 +279,9 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     set('lock_interest', s.interest); set('lock_fees', s.fees); set('lock_penalties', s.penalties);
   }
   // Penalties suspended by the lock resume from the unlock date (the reference platform).
-  const eventDate = valueDate ? ymd(valueDate) : new Date().toISOString().slice(0, 10);
+  const eventDate = valueDate ? ymd(valueDate) : (await orgToday(c));
   const resumed = name === 'UNLOCK' && l.lock_penalties ? await resumePenalties(c, l, eventDate) : null;
-  if (['REJECT', 'WITHDRAW'].includes(name)) set('closed_on', new Date().toISOString().slice(0, 10));
+  if (['REJECT', 'WITHDRAW'].includes(name)) set('closed_on', (await orgToday(c)));
 
   set('status', to);
   vals.push(l.id);
@@ -363,7 +364,7 @@ async function thawSettings(c, loanId) {
  * portfolio-at-risk figures stay on days past due, as SASRA classifies.
  */
 async function arrearsIndicators(c, l, asOf = null) {
-  const date = asOf || new Date().toISOString().slice(0, 10);
+  const date = asOf || (await orgToday(c));
   const { rows: [o] } = await c.query(
     `SELECT min(due_date) AS d FROM loan_installments WHERE loan_id = $1 AND status NOT IN ('PAID', 'GRACE') AND due_date < $2::date`,
     [l.id, date]);
@@ -387,11 +388,11 @@ async function arrearsIndicators(c, l, asOf = null) {
 // custom fields); to change the terms, undo the approval first.
 const CORE_FIELDS = { principal: 'principal', termMonths: 'term_months' };
 const TERM_FIELDS = [...Object.keys(CORE_FIELDS), ...Object.keys(ledger.OVERRIDES)];
-const NARRATIVE_FIELDS = ['purpose', 'notes', 'name'];
+const NARRATIVE_FIELDS = ['purpose', 'notes', 'name', 'creditOfficer'];
 const COLUMN = {
   ...CORE_FIELDS,
   ...Object.fromEntries(Object.entries(ledger.OVERRIDES).map(([k, o]) => [k, o.column])),
-  purpose: 'purpose', notes: 'notes', name: 'name',
+  purpose: 'purpose', notes: 'notes', name: 'name', creditOfficer: 'credit_officer',
 };
 
 // --------------------------------------------------------------------------
@@ -621,7 +622,7 @@ async function toleranceDeadline(c, due, days, excludeNonWorking, branchId = nul
  * shortfall is a partial payment rather than arrears.
  */
 async function markArrears(c, { asOf = null, loanId = null } = {}) {
-  const date = asOf || new Date().toISOString().slice(0, 10);
+  const date = asOf || (await orgToday(c));
   const { rows: cands } = await c.query(
     // The loan's principal paid is aliased: as plain principal_paid it would
     // overwrite the installment's in the row, and a loan that had repaid more
@@ -746,7 +747,7 @@ async function lockForCap(c, l) {
  * the product says to close after N days.
  */
 async function enforceControls(c, { asOf = null, loanId = null } = {}) {
-  const date = asOf || new Date().toISOString().slice(0, 10);
+  const date = asOf || (await orgToday(c));
   const out = { capped: 0, lockedForArrears: 0, closed: 0 };
   // Close dormant accounts (the reference platform): a running loan that owes nothing and
   // holds no credit balance closes itself the product's number of days

@@ -24,6 +24,7 @@ try {
   process.exit(0);
 }
 
+const { orgDay } = require('./_org');
 const app = require('../src/server');
 const { pool } = require('../src/db/pool');
 const { withTenant } = require('../src/db/tenantContext');
@@ -59,6 +60,9 @@ const T = (fn) => withTenant(SCHEMA, fn);
       slug: SLUG, name: 'Console Test SACCO', mfaRequiredRoles: [],
       adminEmail: 'admin@uitest.local', adminPassword: PASSWORD,
     });
+    // One session clicks through every page inside a couple of minutes; the
+    // per-minute limit is tested in the security suite, not here.
+    await pool.query('UPDATE platform.tenants SET rate_limit_per_min = 5000 WHERE slug = $1', [SLUG]);
     await migrateAllTenants({});
 
     await T(async (c) => {
@@ -204,7 +208,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('button[data-action=edit-schedule]');
     await page.waitForSelector('dialog#schedule-editor');
     check('the editor opens with a row per installment', (await page.locator('dialog#schedule-editor tbody tr').count()) === 3);
-    const soon = new Date(Date.now() + 12 * 86400000).toISOString().slice(0, 10);
+    const soon = orgDay(12);
     await page.fill('dialog#schedule-editor tbody tr:first-child input[name=dueDate]', soon);
     await page.click('dialog#schedule-editor button[value=ok]');
     await page.waitForSelector('#application-schedule h2:has-text("edited")');
@@ -285,7 +289,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
         await S.deposit(c, sav.id, { amount: 50000, channelId: 'cash', createdBy: 'test' });
         const l = await L.apply(c, { memberId: m.id, productId: 'NL01', principal: 12000, termMonths: 3, createdBy: 'test' });
         await L.changeState(c, l.id, 'APPROVE', { createdBy: 'test' });
-        await L.disburse(c, l.id, { amount: 12000, channelId: 'bank', valueDate: new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 10), createdBy: 'test' });
+        await L.disburse(c, l.id, { amount: 12000, channelId: 'bank', valueDate: orgDay(-40), createdBy: 'test' });
         out.push({ id: l.id, no: l.account_no, memberNo: m.member_no });
       }
       return out;
@@ -411,6 +415,42 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForSelector('.notice');
     check('the prudential report leads with its disclaimer',
       /must be confirmed/.test(await page.textContent('.notice')));
+
+    await page.selectOption('#r-which', 'risk');
+    await page.waitForSelector('#r-out h2');
+    check('the risk report groups loans in arrears and shows each risk level', /By risk level/.test(await page.textContent('#r-out')));
+    await page.selectOption('#r-which', 'indicators');
+    await page.waitForSelector('[data-indicator=GROSS_LOAN_PORTFOLIO]');
+    check('indicators render by group', /Outreach/.test(await page.textContent('#r-out')) && (await page.textContent('[data-indicator=ACTIVE_BORROWERS]')).trim() !== '');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#r-xlsx')]);
+    check('a report downloads as a workbook', /indicators\.xlsx$/.test(dl.suggestedFilename()), dl.suggestedFilename());
+
+    section('dashboard');
+    await page.click('nav button[data-view=dashboard]');
+    await page.waitForSelector('text=Upcoming repayments');
+    const dash = await page.textContent('main');
+    check('the dashboard shows indicators, upcoming repayments, favourite views and the latest activity',
+      /Indicators/.test(dash) && /Upcoming repayments/.test(dash) && /favourite views/.test(dash) && /Latest activity/.test(dash));
+
+    section('views');
+    await page.click('nav button[data-view=views]');
+    await page.click('#v-new');
+    await page.waitForSelector('#v-form');
+    await page.selectOption('#v-form select[name=entity]', 'LOANS');
+    await page.waitForSelector('#v-form select[name=columns] option[value=daysLate]');
+    await page.fill('#v-form input[name=name]', 'Console loans');
+    await page.check('#v-form input[name=includeTotals]');
+    await page.click('#v-form button[type=submit]');
+    await page.waitForSelector('#v-out table');
+    check('a view is made in the console and runs, with totals', (await page.textContent('main h1')) === 'Console loans' && /Total/.test(await page.textContent('#v-out')),
+      `${await page.textContent('main h1')} | ${(await page.textContent('#v-out')).slice(0, 200)}`);
+    await page.click('#v-back');
+    await page.waitForSelector('[data-v-fav]');
+    await page.click('[data-v-fav]');
+    await page.waitForSelector('[data-v-fav][data-on=""]');
+    await page.click('nav button[data-view=dashboard]');
+    await page.waitForSelector('#fav-views');
+    check('marked a favourite, it is on the dashboard', /Console loans/.test(await page.textContent('#fav-views')));
 
     section('period and provisions');
     await page.click('nav button[data-view=finance]');
@@ -539,7 +579,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('the data dictionary shows a table\'s columns with what they mean', /repayment schedules/i.test(await page.textContent('#dd-desc')), await page.textContent('#dd-desc'));
     const XLSX = require('../src/lib/xlsx');
     const book = XLSX.write([
-      { name: 'Settings', rows: [['Setting', 'Value'], ['Migration date', new Date().toISOString().slice(0, 10)]] },
+      { name: 'Settings', rows: [['Setting', 'Value'], ['Migration date', orgDay(0)]] },
       { name: 'Members', rows: [['Member number*', 'First name*', 'Last name*'], ['UIIMP1', 'Imported', 'Member']] },
     ]);
     await page.setInputFiles('#imp-file', { name: 'ui-import.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: book });

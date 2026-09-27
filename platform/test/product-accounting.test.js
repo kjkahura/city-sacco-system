@@ -10,6 +10,7 @@
  * product that has accounts.
  */
 
+const { orgDay } = require('./_org');
 const app = require('../src/server');
 const { pool } = require('../src/db/pool');
 const { withTenant, withTenantRead } = require('../src/db/tenantContext');
@@ -409,7 +410,7 @@ async function disbursed(c, memberId, productId, principal, term, on) {
     const tbHq = await call('GET', `/api/accounting/trial-balance?branchId=${hq.body.id}`);
     check('each branch\'s trial balance balances on its own', tbTwn.body.balanced && tbHq.body.balanced && tbTwn.body.totals.debit > 0);
     await loanProduct('LBR', { monthlyRate: 1, maxTerm: 12 });
-    const lbr = await T((c) => disbursed(c, mB.id, 'LBR', 30000, 6, new Date().toISOString().slice(0, 10)));
+    const lbr = await T((c) => disbursed(c, mB.id, 'LBR', 30000, 6, orgDay(0)));
     check('a loan opens in its member\'s branch', lbr.branch_id === twn.body.id);
     const lmove = await call('POST', `/api/loans/${lbr.id}/branch`, { branchId: 'HQ' });
     const tbTwnL = await call('GET', `/api/accounting/trial-balance?branchId=${twn.body.id}`);
@@ -451,7 +452,7 @@ async function disbursed(c, memberId, productId, principal, term, on) {
     check('a closure can be removed, and stays on record as deleted', reopened.status === 200 && reopened.body.deleted_at);
     const settings = await call('PUT', '/api/accounting/settings', { autoClosureEnabled: true, autoClosureIntervalDays: 7 });
     check('automatic closures are switched on with an interval', settings.status === 200 && settings.body.auto_closure_interval_days === 7);
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = orgDay(0);
     const ac = await T((c) => require('../src/domain/branches').autoClose(c, { date: todayIso }));
     check('the end of day closes the book through yesterday', ac.closed === true, JSON.stringify(ac));
     const ac2 = await T((c) => require('../src/domain/branches').autoClose(c, { date: todayIso }));

@@ -9,6 +9,7 @@
  * and disbursement limits, the two-man rule, and exposure controls.
  */
 
+const { orgDay, addDays } = require('./_org');
 const app = require('../src/server');
 const { pool } = require('../src/db/pool');
 const { withTenant, withTenantRead } = require('../src/db/tenantContext');
@@ -43,7 +44,8 @@ const Rd = (fn) => withTenantRead(SCHEMA, fn);
 const round = (n) => Math.round(n * 100) / 100;
 const sum = (xs, f) => round(xs.reduce((s, x) => s + Number(f(x)), 0));
 const bal = (code) => Rd((c) => acct.balance(c, code));
-const plus = (n, from = new Date()) => new Date(from.getTime() + n * 86400000).toISOString().slice(0, 10);
+// n days from today (the organization's), or from a given date.
+const plus = (n, from = null) => (from ? addDays(from instanceof Date ? from.toISOString().slice(0, 10) : String(from).slice(0, 10), n) : orgDay(n));
 
 let server;
 let tokens = {};

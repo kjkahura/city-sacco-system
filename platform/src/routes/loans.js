@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
@@ -631,7 +632,7 @@ router.post('/penalties/run', ...tx((c, req) => P.accrueAll(c, req.body), APPROV
 
 router.post('/arrears/run', ...tx((c, req) => L.markArrears(c, req.body), APPROVER));
 router.post('/fees/run', ...tx(async (c, req) => {
-  const asOf = req.body?.asOf || new Date().toISOString().slice(0, 10);
+  const asOf = req.body?.asOf || await orgToday(c);
   const { rows } = await c.query("SELECT id FROM loan_accounts WHERE status IN ('ACTIVE','IN_ARREARS')");
   let due = 0, late = 0;
   for (const r of rows) {

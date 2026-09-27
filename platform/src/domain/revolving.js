@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const savings = require('./savings');
 const S = require('./schedule');
@@ -127,7 +128,7 @@ async function bill(c, loanId, { date, createdBy = 'EOD' } = {}) {
 
 /** Every revolving loan whose billing date has come, each on its own (./eodGuard). */
 async function billAll(c, { asOf = null } = {}) {
-  const date = asOf || isoDate(new Date());
+  const date = asOf || (await orgToday(c));
   const { rows } = await c.query(
     `SELECT l.id FROM loan_accounts l WHERE l.product_type = 'REVOLVING' AND l.status IN ('ACTIVE','IN_ARREARS') AND ${G.EXCLUDED_SQL('l')}
        AND (l.next_billing_on <= $1::date
@@ -221,7 +222,7 @@ async function depositToCreditBalance(c, loanId, { amount, channelId = 'cash', v
   }
   const ch = (await c.query('SELECT * FROM transaction_channels WHERE id = $1 AND is_active', [channelId])).rows[0];
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
-  const date = valueDate ? ymd(valueDate) : isoDate(new Date());
+  const date = valueDate ? ymd(valueDate) : (await orgToday(c));
   const entryId = await ledger.post(c, l, {
     debits: [{ glCode: ch.gl_account_code, amount: amt, memberId: l.member_id }],
     credits: [{ glCode: l.gl_credit_balance, amount: amt, memberId: l.member_id }],

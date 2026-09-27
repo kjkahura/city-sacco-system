@@ -117,6 +117,19 @@ tenantApi.use(tenantConcurrency());
 
 tenantApi.use('/auth', require('./routes/auth'));
 
+// ?viewfilter= on the list endpoints (the reference platform's custom views with API v1),
+// ahead of the routers; without the parameter the request goes on to them.
+const views = require('./routes/views');
+tenantApi.get('/members', ...views.viewfilter('MEMBERS'));
+tenantApi.get('/clients', ...views.viewfilter('MEMBERS', { required: true }));
+tenantApi.get('/loans', ...views.viewfilter('LOANS'));
+tenantApi.get('/loans/transactions', ...views.viewfilter('LOAN_TRANSACTIONS', { required: true }));
+tenantApi.get('/savings', ...views.viewfilter('DEPOSITS'));
+tenantApi.get('/savings/transactions', ...views.viewfilter('DEPOSIT_TRANSACTIONS', { required: true }));
+tenantApi.get('/accounting/journal', ...views.viewfilter('JOURNAL_ENTRIES'));
+tenantApi.get('/activities', ...views.viewfilter('ACTIVITIES', { required: true }));
+tenantApi.use('/views', views);
+
 const members = require('./routes/members');
 tenantApi.post('/members:search', ...members.searchMembers);
 tenantApi.use('/members', members);
@@ -126,6 +139,7 @@ tenantApi.use('/savings', savings);
 tenantApi.use('/loans', require('./routes/loans'));
 tenantApi.use('/loan-products', require('./routes/loanProducts'));
 tenantApi.use('/index-rates', require('./routes/indexRates'));
+tenantApi.use('/accounting/reports', require('./routes/reports').accountingReports);
 tenantApi.use('/accounting', savings.accounting);
 const branchRoutes = require('./routes/branches');
 tenantApi.use('/branches', branchRoutes.branches);

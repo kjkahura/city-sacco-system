@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const savings = require('./savings');
 const tax = require('./tax');
@@ -143,7 +144,7 @@ async function applyDeferred(c, l, date, { effRate, glIncome, createdBy }) {
  * Returns the charges created; an empty array is a normal outcome.
  */
 async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {}) {
-  const date = asOf || new Date().toISOString().slice(0, 10);
+  const date = asOf || (await orgToday(c));
 
   const l = await L.lock(c, loanId);
   if (!['ACTIVE', 'IN_ARREARS', 'LOCKED'].includes(l.status)) return [];
@@ -267,7 +268,7 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
 }
 
 async function accrueAll(c, { asOf = null, createdBy = 'EOD' } = {}) {
-  const date = asOf || new Date().toISOString().slice(0, 10);
+  const date = asOf || (await orgToday(c));
   const { rows } = await c.query(
     `SELECT DISTINCT l.id FROM loan_accounts l
      JOIN loan_products p ON p.id = l.product_id
@@ -334,7 +335,7 @@ async function changeRate(c, loanId, { rate, note = null, asOf = null, createdBy
   if (!(Number.isFinite(v) && v >= 0)) throw err('INVALID_PENALTY_RATE', 400);
   L.within('PENALTY_RATE', v, l.penalty_rate_min, l.penalty_rate_max);
   const before = L.effective(l).penaltyRate;
-  const date = asOf ? String(asOf).slice(0, 10) : new Date().toISOString().slice(0, 10);
+  const date = asOf ? String(asOf).slice(0, 10) : (await orgToday(c));
   await c.query('UPDATE loan_accounts SET penalty_rate = $1, updated_at = now() WHERE id = $2', [v, l.id]);
   const { rows: [r] } = await c.query(
     `INSERT INTO loan_penalty_rate_changes (loan_id, from_rate, to_rate, changed_on, note, created_by)

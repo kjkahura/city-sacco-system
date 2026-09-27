@@ -8,6 +8,7 @@
  * other suites can keep posting.
  */
 
+const { orgDay } = require('./_org');
 const { pool } = require('../src/db/pool');
 const { withTenant, withTenantRead } = require('../src/db/tenantContext');
 const { migratePlatform, migrateAllTenants } = require('../src/db/migrate');
@@ -136,7 +137,7 @@ async function assertBalanced(label) {
       })),
       (e) => /is closed/.test(e.message));
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = orgDay(0);
     const stillOpen = await T((c) => acct.post(c, {
       debits: [{ glCode: '100-200', amount: 100 }],
       credits: [{ glCode: '400-100', amount: 100 }],

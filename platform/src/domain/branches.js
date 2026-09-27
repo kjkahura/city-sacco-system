@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const ledger = require('./ledger');
 const savings = require('./savings');
@@ -20,7 +21,7 @@ const { err, round2, isoDay } = acct;
  * before it. Closures can be set by hand or by the end of day every N days.
  */
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = (c) => orgToday(c);
 
 // --------------------------------------------------------------------------
 // Branches
@@ -298,7 +299,7 @@ async function closures(c, { includeDeleted = false } = {}) {
 async function close(c, { closedThrough, branchId = null, notes = null, automatic = false, createdBy }) {
   const date = closedThrough ? isoDay(closedThrough) : null;
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw err('CLOSURE_DATE_REQUIRED', 400);
-  if (date >= today()) throw err('CLOSURE_DATE_MUST_BE_IN_THE_PAST', 400);
+  if (date >= (await today(c))) throw err('CLOSURE_DATE_MUST_BE_IN_THE_PAST', 400);
   const branch = branchId ? await resolve(c, branchId) : null;
   const existing = await acct.closedThrough(c, branch ? branch.id : null);
   if (existing && date <= existing) throw err(`CLOSURE_MUST_FOLLOW_THE_LAST_ONE: already closed through ${existing}`, 409);

@@ -1,5 +1,6 @@
 'use strict';
 
+const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const { err, round2 } = acct;
 
@@ -79,7 +80,7 @@ async function setBand(c, code, { ratePercent, minDays, maxDays, label, sourceNo
  * which loans are in trouble.
  */
 async function compute(c, { asAt = null } = {}) {
-  const date = asAt || new Date().toISOString().slice(0, 10);
+  const date = asAt || (await orgToday(c));
   const configured = await assertConfigured(c);
 
   const { rows } = await c.query(
@@ -90,7 +91,8 @@ async function compute(c, { asAt = null } = {}) {
        FROM loan_accounts l
        LEFT JOIN loan_installments i
          ON i.loan_id = l.id AND i.status <> 'PAID' AND i.due_date < $1::date
-       WHERE l.status IN ('ACTIVE','IN_ARREARS')
+       -- A locked loan still owes its principal; it is usually the latest.
+       WHERE l.status IN ('ACTIVE','IN_ARREARS','LOCKED')
        GROUP BY l.id
      )
      SELECT b.code, b.label, b.min_days, b.max_days, b.rate_percent,
@@ -141,7 +143,7 @@ async function compute(c, { asAt = null } = {}) {
  * twice. Nothing is attributed while the bands have no rates.
  */
 async function attributable(c, l, { asAt = null } = {}) {
-  const date = asAt || new Date().toISOString().slice(0, 10);
+  const date = asAt || (await orgToday(c));
   const rows = await bands(c);
   if (!rows.length || rows.some((b) => b.rate_percent === null)) return { amount: 0, reason: 'PROVISION_RATES_NOT_CONFIGURED' };
   const { rows: [a] } = await c.query(

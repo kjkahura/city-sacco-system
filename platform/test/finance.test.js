@@ -6,6 +6,7 @@
  * ratios, backup key rotation and offsite pull.
  */
 
+const { orgDay } = require('./_org');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -57,7 +58,7 @@ async function assertBalanced(label) {
     `dr ${tb.totals.debit} cr ${tb.totals.credit}`);
 }
 
-const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+const daysAgo = (n) => orgDay(-n);
 
 (async () => {
   try {
