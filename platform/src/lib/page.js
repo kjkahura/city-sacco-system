@@ -18,7 +18,7 @@
  */
 
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 500;
+const MAX_LIMIT = 1000;
 
 /**
  * Read offset and limit from a query string or a body.

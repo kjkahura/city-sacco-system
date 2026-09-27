@@ -124,6 +124,20 @@ async function migrateTenant(schemaName, { lockTimeoutMs = 5_000 } = {}) {
         throw new Error(`tenant migration ${m.version} failed on ${schemaName}: ${e.message}`);
       }
     }
+    // The data dictionary's words, written into the catalog as comments
+    // whenever the schema has moved. A failure here is not a failed
+    // migration: the schema is right, only its comments are behind.
+    if (done.length) {
+      await client.query('BEGIN');
+      try {
+        await client.query("SELECT set_config('search_path', format('%I, public', $1::text), true)", [schemaName]);
+        await require('../domain/dataDictionary').applyComments(client);
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {});
+        console.warn(`[migrate] ${schemaName}: data dictionary comments not applied: ${e.message}`);
+      }
+    }
   } finally {
     client.release();
   }

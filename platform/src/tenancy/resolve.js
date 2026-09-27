@@ -95,9 +95,30 @@ function resolveTenant({ required = true } = {}) {
   };
 }
 
+// Whether a staff user may still act. An access token lives 15 minutes, and a
+// user suspended by their administrator (or their tenant's) should not keep
+// working for the rest of it, so every staff request checks the user's
+// status. Cached for a few seconds per user so a busy teller costs one query
+// per window, not one per request; ../tenancy/users forgets a user the
+// moment it changes them.
+const userCache = new Map();
+const USER_TTL_MS = 10_000;
+async function userState(id) {
+  const hit = userCache.get(id);
+  if (hit && hit.expires > Date.now()) return hit.state;
+  let state = null;
+  if (/^[0-9a-f-]{36}$/i.test(String(id))) {
+    const { rows } = await pool.query('SELECT status FROM platform.users WHERE id = $1', [id]);
+    state = rows[0] ? rows[0].status : null;
+  }
+  userCache.set(id, { state, expires: Date.now() + USER_TTL_MS });
+  return state;
+}
+const forgetUser = (id) => userCache.delete(id);
+
 /** Require a signed-in user, optionally with one of the given roles. */
 function requireAuth(...roles) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     if (!req.auth) return next(new TenantError('authentication required', 401));
     // A scoped token (currently only mfa_enrolment) is not a session. It
     // exists so a user who must enrol can reach the enrolment endpoints and
@@ -117,6 +138,13 @@ function requireAuth(...roles) {
     }
     if (roles.length && !roles.includes(req.auth.role)) {
       return next(new TenantError(`role ${req.auth.role} is not permitted here`, 403));
+    }
+    if (req.auth.role !== 'MEMBER') {
+      try {
+        const state = await userState(req.auth.sub);
+        if (state === null) return next(new TenantError('USER_NOT_FOUND', 401));
+        if (state !== 'ACTIVE') return next(new TenantError(`USER_${state}`, 401));
+      } catch (e) { return next(e); }
     }
     next();
   };
@@ -141,4 +169,4 @@ function requireMember() {
 const signToken = (payload, expiresIn = '12h') =>
   jwt.sign(payload, signingKey, { algorithm: 'HS256', expiresIn });
 
-module.exports = { resolveTenant, requireAuth, requireMember, signToken, tenantFromRequest, lookupTenant, invalidate, signingKey };
+module.exports = { resolveTenant, requireAuth, requireMember, signToken, tenantFromRequest, lookupTenant, invalidate, forgetUser, signingKey };

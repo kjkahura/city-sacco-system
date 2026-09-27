@@ -23,6 +23,7 @@ const S = {
   view: 'members',
   enrolToken: null,
   mfaTicket: null,
+  pwToken: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -151,6 +152,22 @@ el('login-form').addEventListener('submit', async (e) => {
     // Fall through to a normal sign-in with the same credentials.
   }
 
+  // A temporary password: change it with the scoped token, then sign in
+  // with the new one.
+  let password = String(f.get('password') || '');
+  if (S.pwToken) {
+    const next = String(f.get('newPassword') || '');
+    S.access = S.pwToken;
+    const changed = await api('POST', '/api/auth/password', { currentPassword: password, newPassword: next }, { retry: false });
+    S.access = null;
+    if (!changed.ok) { err.textContent = changed.error; return; }
+    S.pwToken = null;
+    el('pwchange').hidden = true;
+    password = next;
+    e.target.querySelector('input[name=password]').value = next;
+    toast('Password changed');
+  }
+
   if (S.mfaTicket) {
     const code = String(f.get('code') || '').trim();
     const verify = await api('POST', '/api/auth/mfa/verify',
@@ -161,8 +178,15 @@ el('login-form').addEventListener('submit', async (e) => {
 
   const login = await api('POST', '/api/auth/login', {
     email: String(f.get('email') || '').trim(),
-    password: String(f.get('password') || ''),
+    password,
   });
+
+  if (login.status === 403 && login.body?.passwordChangeRequired) {
+    S.pwToken = login.body.passwordChangeToken;
+    el('pwchange').hidden = false;
+    err.textContent = 'Choose a new password to continue.';
+    return;
+  }
 
   if (login.status === 403 && login.body?.enrolmentRequired) {
     S.enrolToken = login.body.enrolmentToken;
@@ -2977,8 +3001,218 @@ async function orgView() {
   });
 }
 
+// --------------------------------------------------------------------------
+// Data: import, backups, dictionary, extract (the reference platform's Data Management)
+// --------------------------------------------------------------------------
+
+const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const dataState = { table: 'members' };
+
+async function dataView() {
+  const role = S.user.role;
+  const owner = role === 'TENANT_ADMIN';
+  const importer = ['TENANT_ADMIN', 'MANAGER'].includes(role);
+  const [imps, backups, dict, streams] = await Promise.all([
+    ['TENANT_ADMIN', 'MANAGER', 'AUDITOR'].includes(role) ? api('GET', '/api/data-imports') : Promise.resolve({ ok: false, body: [] }),
+    owner ? api('GET', '/api/database/backup') : Promise.resolve({ ok: false, body: [] }),
+    api('GET', '/api/data-dictionary'),
+    ['TENANT_ADMIN', 'ACCOUNTANT', 'AUDITOR'].includes(role) ? api('GET', '/api/extract') : Promise.resolve({ ok: false, body: [] }),
+  ]);
+  const tables = dict.ok ? dict.body.tables : [];
+  const t = tables.find((x) => x.name === dataState.table) || tables[0];
+  const importRows = imps.ok ? imps.body : [];
+  view().innerHTML = `
+    <div class="toolbar"><h1>Data</h1></div>
+    <p class="hint">Data import, database backups, the data dictionary and the incremental extract, after the reference platform's Data Management pages.</p>
+    ${importer ? card('Import from Excel', `
+      <p class="hint">Download the template, fill in the sheets you need, and upload it. The upload is checked row by row and run
+      without saving anything; nothing is created until it is approved.</p>
+      <button class="secondary" id="imp-template">Download template</button>
+      <label>Workbook (.xlsx, up to 5 MB)<input type="file" id="imp-file" accept=".xlsx,${XLSX_TYPE}"></label>
+      <button id="imp-upload">Upload and check</button>
+      <div id="imp-list">${table([
+    { label: 'Uploaded', value: (x) => String(x.created_at).slice(0, 16).replace('T', ' ') },
+    { label: 'File', key: 'file_name' },
+    { label: 'Migration date', value: (x) => day(x.as_of) },
+    { label: 'Status', key: 'status' },
+    { label: 'Errors', num: true, value: (x) => (x.errors || []).length },
+    { label: 'Warnings', num: true, value: (x) => (x.warnings || []).length },
+    { label: 'By', key: 'created_by' },
+    { label: '', html: true, value: (x) => `<button class="link" data-imp="${esc(x.id)}">review</button>` },
+  ], importRows, { empty: 'No imports yet' })}</div>`) : ''}
+    ${owner ? card('Database backup', `
+      <p class="hint">A ZIP of one CSV per table from one snapshot, with the schema and the data dictionary. One runs at a time; each is kept for 30 days.
+      Member PINs and portal sessions are never included.</p>
+      <button id="bk-run">Back up now</button> <button class="secondary" id="bk-some">Back up some tables…</button>
+      <div id="bk-list">${table([
+    { label: 'Requested', value: (x) => String(x.created_at).slice(0, 16).replace('T', ' ') },
+    { label: 'Status', key: 'status' },
+    { label: 'Tables', value: (x) => (x.tables ? x.tables.join(', ') : 'all') },
+    { label: 'From', value: (x) => (x.from_date ? String(x.from_date).slice(0, 16).replace('T', ' ') : '') },
+    { label: 'Size', num: true, value: (x) => (x.file_size ? `${Math.ceil(x.file_size / 1024)} KB` : '') },
+    { label: 'Expires', value: (x) => day(x.expires_at) },
+    { label: '', html: true, value: (x) => (x.status === 'COMPLETE' ? `<button class="link" data-bk="${esc(x.id)}" data-name="${esc(x.file_name)}">download</button>` : esc(x.error || '')) },
+  ], backups.ok ? backups.body : [], { empty: 'No backups yet' })}</div>`) : ''}
+    ${card('Data dictionary', `
+      <p class="hint">${esc(dict.body?.conventions?.dates || '')}</p>
+      <label>Table<select id="dd-table">${tables.map((x) => `<option ${x.name === t?.name ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
+      <p id="dd-desc">${esc(t?.description || '')}</p>
+      <div id="dd-cols">${t ? table([
+    { label: 'Column', key: 'name' }, { label: 'Type', key: 'type' },
+    { label: 'Null', value: (c) => (c.nullable ? 'yes' : '') },
+    { label: 'Key', value: (c) => (c.primaryKey ? 'PK' : c.references ? `→ ${c.references.table}.${c.references.column}` : '') },
+    { label: 'Description', key: 'description' },
+  ], t.columns) : ''}</div>
+      <button class="secondary" id="dd-csv">Download as CSV</button>`)}
+    ${streams.ok ? card('Incremental extract', `
+      <p class="hint">For a data warehouse or Stitch: GET /api/extract/&lt;stream&gt;?cursor=… returns rows changed since the cursor, in order,
+      with the next cursor. bin/tap-sacco.js is a Singer tap over it; run it with a user in the AUDITOR role.</p>
+      ${table([{ label: 'Stream', key: 'stream' }, { label: 'Key', value: (x) => x.keyProperties.join(', ') },
+    { label: 'Read on', key: 'replicationKey' }, { label: 'Holds', key: 'description' }], streams.body)}`) : ''}`;
+
+  el('dd-table')?.addEventListener('change', (ev) => { dataState.table = ev.target.value; render(); });
+  el('dd-csv')?.addEventListener('click', () => openFile('/api/data-dictionary?format=csv', 'data-dictionary.csv', { save: true }));
+  el('imp-template')?.addEventListener('click', () => openFile('/api/data-imports/template', 'data-import-template.xlsx', { save: true }));
+  el('imp-upload')?.addEventListener('click', async () => {
+    const file = el('imp-file').files[0];
+    if (!file) return toast('Choose a workbook first', true);
+    const r = await apiRaw('POST', `/api/data-imports?fileName=${encodeURIComponent(file.name)}`, file, XLSX_TYPE);
+    if (!r.ok) return toast(r.error, true);
+    toast(r.body.status === 'PENDING_APPROVAL' ? 'Checked: ready for review' : `${r.body.errors.length} errors: download the workbook with the errors marked`, r.body.status !== 'PENDING_APPROVAL');
+    await render();
+    return showImport(r.body.id);
+  });
+  view().querySelectorAll('[data-imp]').forEach((b) => b.addEventListener('click', () => showImport(b.dataset.imp)));
+  el('bk-run')?.addEventListener('click', async () => {
+    const r = await api('POST', '/api/database/backup', {});
+    toast(r.ok ? 'Backup started; it appears here when it is ready' : r.error, !r.ok);
+    setTimeout(() => { if (S.view === 'data') render(); }, 1500);
+  });
+  el('bk-some')?.addEventListener('click', async () => {
+    const d = await ask([
+      { name: 'tables', label: 'Tables, comma separated', value: 'members, loan_accounts, savings_accounts' },
+      { name: 'from', label: 'Only rows created or changed from (optional)', type: 'datetime-local', required: false },
+    ], 'Back up some tables');
+    if (!d) return;
+    const r = await api('POST', '/api/database/backup', {
+      tables: d.tables.split(',').map((x) => x.trim()).filter(Boolean),
+      ...(d.from ? { createBackupFromDate: new Date(d.from).toISOString() } : {}),
+    });
+    toast(r.ok ? 'Backup started' : r.error, !r.ok);
+    setTimeout(() => { if (S.view === 'data') render(); }, 1500);
+  });
+  view().querySelectorAll('[data-bk]').forEach((b) => b.addEventListener('click', () => openFile(`/api/database/backup/${b.dataset.bk}/file`, b.dataset.name, { save: true })));
+}
+
+async function showImport(id) {
+  const r = await api('GET', `/api/data-imports/${id}`);
+  if (!r.ok) return toast(r.error, true);
+  const x = r.body;
+  const owner = S.user.role === 'TENANT_ADMIN';
+  const creates = x.summary?.created || x.summary?.creates || {};
+  const dlg = document.createElement('dialog');
+  dlg.id = 'import-review';
+  dlg.innerHTML = `<div class="card wide"><h2>${esc(x.file_name)}: ${esc(x.status)}</h2>
+    <dl class="kv"><dt>Migration date</dt><dd>${esc(day(x.as_of))}</dd><dt>Uploaded by</dt><dd>${esc(x.created_by)}</dd>
+    ${x.decided_by ? `<dt>Decided by</dt><dd>${esc(x.decided_by)} ${esc(x.decision_note || '')}</dd>` : ''}</dl>
+    ${Object.keys(creates).length ? `<h3>${x.status === 'APPROVED' ? 'Created' : 'Will create'}</h3>${table([{ label: 'What', key: 'k' }, { label: 'Count', num: true, key: 'n' }],
+    Object.entries(creates).map(([k, n]) => ({ k, n })))}` : ''}
+    ${(x.warnings || []).length ? `<h3>Warnings</h3>${table([{ label: 'Sheet', key: 'sheet' }, { label: 'Row', key: 'row' }, { label: 'Warning', key: 'message' }], x.warnings)}` : ''}
+    ${(x.errors || []).length ? `<h3>Errors</h3>${table([{ label: 'Sheet', key: 'sheet' }, { label: 'Row', key: 'row' }, { label: 'Column', key: 'column' }, { label: 'Error', key: 'message' }], x.errors.slice(0, 200))}` : ''}
+    <menu class="dialog-actions">
+      ${x.has_error_file ? '<button class="secondary" data-act="errors">Download with errors marked</button>' : ''}
+      ${owner && ['PENDING_APPROVAL', 'INVALID'].includes(x.status) ? '<button class="secondary" data-act="reject">Reject</button>' : ''}
+      ${owner && x.status === 'PENDING_APPROVAL' ? '<button data-act="approve">Approve</button>' : ''}
+      <button class="secondary" data-act="close">Close</button>
+    </menu></div>`;
+  document.body.appendChild(dlg);
+  dlg.addEventListener('click', async (ev) => {
+    const act = ev.target.dataset?.act;
+    if (!act) return;
+    if (act === 'close') { dlg.close(); dlg.remove(); return; }
+    if (act === 'errors') { openFile(`/api/data-imports/${x.id}/errors`, `${x.file_name.replace(/\.xlsx$/i, '')}-errors.xlsx`, { save: true }); return; }
+    const d = await ask([{ name: 'note', label: act === 'approve' ? 'Note for the approval' : 'Why is it rejected?', required: act !== 'approve' }],
+      act === 'approve' ? 'Approve the import' : 'Reject the import');
+    if (!d) return;
+    const res = await api('POST', `/api/data-imports/${x.id}/${act}`, { note: d.note || null });
+    toast(res.ok ? (act === 'approve' ? 'Imported' : 'Rejected') : (res.body?.importErrors ? `Approval failed: ${res.body.importErrors.length} errors` : res.error), !res.ok);
+    dlg.close(); dlg.remove();
+    render();
+  });
+  dlg.showModal();
+  return null;
+}
+
+// --------------------------------------------------------------------------
+// Users (the reference platform's Users and Access Control)
+// --------------------------------------------------------------------------
+
+async function usersView() {
+  const owner = S.user.role === 'TENANT_ADMIN';
+  const [users, roles, branches] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/users/roles'), api('GET', '/api/branches')]);
+  if (!users.ok) throw new Error(users.error);
+  const branchCode = new Map((branches.body || []).map((b) => [b.id, b.code]));
+  view().innerHTML = `
+    <div class="toolbar"><h1>Users</h1>${owner ? '<button id="user-add">New user</button>' : ''}</div>
+    <p class="hint">Staff who sign in to the back office. A new user, and one whose password is reset, gets a temporary password shown once
+    that must be changed at the first sign-in. Suspending a user ends their sessions at once.</p>
+    <div id="users-list">${table([
+    { label: 'Email', key: 'email' }, { label: 'Name', key: 'full_name' }, { label: 'Role', key: 'role' }, { label: 'Status', key: 'status' },
+    { label: 'Branch', value: (u) => branchCode.get(u.branch_id) || '' },
+    { label: 'Second factor', value: (u) => (u.mfa_enabled ? 'on' : '') },
+    { label: 'Last sign-in', value: (u) => (u.last_login_at ? String(u.last_login_at).slice(0, 16).replace('T', ' ') : '') },
+    { label: '', html: true, value: (u) => (owner ? `<button class="link" data-user="${esc(u.id)}">edit</button> <button class="link" data-reset="${esc(u.id)}">reset password</button>${u.mfa_enabled ? ` <button class="link" data-mfa="${esc(u.id)}">reset second factor</button>` : ''}` : '') },
+  ], users.body)}</div>`;
+  const roleList = roles.body || [];
+  const branchList = ['', ...(branches.body || []).filter((b) => b.status === 'ACTIVE').map((b) => b.code)];
+  const shown = (title, secret) => ask([{ name: 'p', label: 'Temporary password (shown once; give it to the user)', value: secret }], title);
+  el('user-add')?.addEventListener('click', async () => {
+    const d = await ask([
+      { name: 'email', label: 'Email', type: 'email' }, { name: 'fullName', label: 'Name', required: false },
+      { name: 'role', label: 'Role', options: roleList, value: 'TELLER' }, { name: 'branchId', label: 'Branch', options: branchList, value: '' },
+    ], 'New user');
+    if (!d) return;
+    const r = await api('POST', '/api/users', { ...d, branchId: d.branchId || null });
+    if (!r.ok) return toast(r.error, true);
+    await shown(`${r.body.email} created`, r.body.temporaryPassword);
+    render();
+  });
+  view().querySelectorAll('[data-user]').forEach((b) => b.addEventListener('click', async () => {
+    const u = users.body.find((x) => x.id === b.dataset.user);
+    const d = await ask([
+      { name: 'fullName', label: 'Name', value: u.full_name || '', required: false },
+      { name: 'role', label: 'Role', options: roleList, value: u.role },
+      { name: 'status', label: 'Status', options: ['ACTIVE', 'SUSPENDED'], value: u.status },
+      { name: 'branchId', label: 'Branch', options: branchList, value: branchCode.get(u.branch_id) || '' },
+      { name: 'approvalLimit', label: 'Approval limit (blank: none)', type: 'number', step: '0.01', value: u.approval_limit ?? '', required: false },
+      { name: 'disbursementLimit', label: 'Disbursement limit (blank: none)', type: 'number', step: '0.01', value: u.disbursement_limit ?? '', required: false },
+    ], `Edit ${u.email}`);
+    if (!d) return;
+    const r = await api('PATCH', `/api/users/${u.id}`, {
+      ...d, branchId: d.branchId || null,
+      approvalLimit: d.approvalLimit === '' ? null : Number(d.approvalLimit),
+      disbursementLimit: d.disbursementLimit === '' ? null : Number(d.disbursementLimit),
+    });
+    toast(r.ok ? 'Saved' : r.error, !r.ok);
+    if (r.ok) render();
+  }));
+  view().querySelectorAll('[data-reset]').forEach((b) => b.addEventListener('click', async () => {
+    const r = await api('POST', `/api/users/${b.dataset.reset}/reset-password`);
+    if (!r.ok) return toast(r.error, true);
+    await shown(`Password reset for ${r.body.email}`, r.body.temporaryPassword);
+    return render();
+  }));
+  view().querySelectorAll('[data-mfa]').forEach((b) => b.addEventListener('click', async () => {
+    const r = await api('POST', `/api/users/${b.dataset.mfa}/reset-mfa`);
+    toast(r.ok ? 'Second factor reset; the user enrols again at the next sign-in' : r.error, !r.ok);
+    if (r.ok) render();
+  }));
+}
+
 const VIEWS = {
   members: membersView,
+  data: dataView,
+  users: usersView,
   organization: orgView,
   controls: controlsView,
   products: productsView,

@@ -156,7 +156,12 @@ async function decryptFile(inPath, outPath) {
       try { fs.unlinkSync(outPath); } catch {}
     }
   }
-  if (lastErr && (/auth/i.test(lastErr.message) || /unable to authenticate/i.test(lastErr.message))) {
+  // With the wrong key the plaintext is noise. The authentication tag is
+  // checked only at the end of the stream, so on a file of more than one
+  // chunk gunzip usually meets the noise first and fails with a zlib data
+  // error ("incorrect header check"). Either way it is the same finding.
+  const garbled = (e) => /auth/i.test(e.message) || ['Z_DATA_ERROR', 'Z_BUF_ERROR'].includes(e.code);
+  if (lastErr && garbled(lastErr)) {
     throw new Error(
       `backup failed authentication with all ${candidates.length} configured key(s): `
       + 'wrong key, or the file has been altered'

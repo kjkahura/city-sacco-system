@@ -12,6 +12,7 @@ const PV = require('../src/domain/provisioning');
 const CL = require('../src/domain/close');
 const RT = require('../src/domain/returns');
 const acct = require('../src/domain/accounting');
+const DD = require('../src/domain/dataDictionary');
 
 const [, , cmd, ...args] = process.argv;
 
@@ -30,6 +31,19 @@ async function inTenant(fn, { read = false } = {}) {
 }
 
 const COMMANDS = {
+  // The data dictionary's words as catalog comments (migrations do this too).
+  async 'dictionary:apply'() {
+    const out = await inTenant((c) => DD.applyComments(c));
+    console.log(`${out.comments} comments on ${out.tables} tables` + (out.missing.length ? `; undescribed: ${out.missing.join(', ')}` : ''));
+    if (out.missing.length) process.exitCode = 1;
+  },
+
+  // The data dictionary as CSV on stdout (--format json for JSON).
+  async 'dictionary:export'() {
+    const dict = await inTenant((c) => DD.build(c), { read: true });
+    process.stdout.write(arg('format', 'csv') === 'json' ? `${JSON.stringify(dict, null, 2)}\n` : DD.toCsv(dict));
+  },
+
   async 'migrate:platform'() {
     const done = await migratePlatform();
     console.log(done.length ? `applied: ${done.join(', ')}` : 'platform already up to date');

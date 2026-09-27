@@ -10,6 +10,7 @@ const provision = require('./tenancy/provision');
 const { drift } = require('./db/migrate');
 const eod = require('./ops/eod');
 const backup = require('./ops/backup');
+const { nullHandling } = require('./lib/apiStandards');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -108,6 +109,8 @@ app.use('/admin', admin);
 // Tenant plane. Everything below is bound to exactly one SACCO.
 // ---------------------------------------------------------------------------
 const tenantApi = express.Router();
+// The reference platform's null handling, on request (./lib/apiStandards).
+tenantApi.use(nullHandling());
 tenantApi.use(resolveTenant({ required: true }));
 tenantApi.use(rateLimit());
 tenantApi.use(tenantConcurrency());
@@ -137,6 +140,13 @@ tenantApi.use('/id-templates', org.idTemplates);
 tenantApi.use('/currencies', org.currencies);
 tenantApi.use('/custom-fields', org.customFields);
 tenantApi.use('/documents', org.documents);
+tenantApi.use('/users', require('./routes/users'));
+
+const data = require('./routes/dataManagement');
+tenantApi.use('/data-dictionary', data.dictionary);
+tenantApi.use('/extract', data.extract);
+tenantApi.use('/database', data.database);
+tenantApi.use('/data-imports', data.imports);
 
 const shares = require('./routes/shares');
 tenantApi.use('/shares', shares);

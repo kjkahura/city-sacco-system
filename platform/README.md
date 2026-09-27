@@ -1654,6 +1654,176 @@ Organization page covers all of it.
   numbers as text, so '0006' sorted after '000007' and a number could repeat.
   They are compared as numbers now.
 
+## Data management
+
+After the reference platform's Data and Reporting > Data Management pages. The console's
+Data page covers the import, backups, the data dictionary and the extract.
+
+### API standards
+
+- **Dates.** A calendar day (a DATE column: due dates, value dates, dates
+  of birth) is read and written as `yyyy-MM-dd`, with no time and no
+  offset, and it is the organization's day. A moment (a timestamptz column)
+  is returned in UTC as `yyyy-MM-ddTHH:mm:ss.sssZ`. The pg driver used to
+  turn a DATE into a JavaScript Date at local midnight, so on a server
+  running in Africa/Nairobi every date read back through `toISOString()`
+  came out a day early; `src/db/pool.js` now keeps the database's string.
+  The suite checks it under four time zones.
+- **Paging.** `offset` and `limit` (default 50, at most 1,000, the reference platform's
+  maximum), with `items-offset`, `items-limit` and `items-total` headers.
+- **Nulls.** Every column is returned, null or not, unless the request asks
+  for the reference platform's behaviour: `Accept: application/vnd.sacco.v2+json` or
+  `?nulls=omit` leaves out every null field at any depth (nulls inside an
+  array keep their place). The response then carries `x-nulls: omitted`.
+- **Identifiers.** Members, loans, deposit and share accounts, branches,
+  centres and product fees are found by id or by their own number or code.
+- **Errors.** One envelope everywhere: `{ "errors": [{ "errorCode",
+  "errorReason", "errorSource"? }] }`.
+
+### Data dictionary
+
+`GET /api/data-dictionary` (any staff user; `?format=csv` for a
+spreadsheet; `/api/data-dictionary/:table` for one table) lists every
+table and column of the tenant's schema with its type, nullability,
+primary key, the table and column a foreign key refers to, whether a date
+is an organization date or a UTC timestamp, and what it means. Structure
+comes from the database catalog, so the dictionary is always the schema as
+it stands; the words are in `src/db/dictionary.js`, by column or by
+convention (every `member_id` is the member, every `gl_*` a GL account).
+Every migration writes the words into the catalog as `COMMENT ON`, so
+`\d+` in psql and any BI tool reading the catalog show them too
+(`cli dictionary:apply --slug x` does it by hand, `cli dictionary:export`
+prints the CSV). The data management suite fails when a table or column
+has no description, so a migration that adds a column has to add its words.
+
+### Database backup
+
+After the reference platform's Database Backup API, for the SACCO rather than the platform
+(the platform's own encrypted pg_dump backups are under Operations).
+
+- `POST /api/database/backup` (tenant admin) returns 202 with the backup
+  in `IN_PROGRESS`; it is taken in the background. Optional: `tables` (a
+  list), `createBackupFromDate` (only rows created or changed from that
+  moment, for tables that record either) and `callback` (a URL called with
+  the result).
+- `GET /api/database/backup/LATEST` downloads the most recent one; 409 if
+  it is still running, 410 once it has expired. `GET /api/database/backup`
+  lists them; `/:id` and `/:id/file` for one.
+- The ZIP holds one CSV per table (header row, values in PostgreSQL's text
+  form, timestamps in UTC, ordered by primary key), `schema.sql` (CREATE
+  TABLE statements with the comments, so the CSVs load into an empty
+  database), `dictionary.json` and `manifest.json` (snapshot time, row
+  counts, what was left out).
+- Every table is read in one REPEATABLE READ transaction, so the files
+  agree with each other. Member PIN hashes, portal sessions and login
+  attempts are never exported; binary columns (attachments, logos, stored
+  import files) are left out and listed in the manifest.
+- One backup runs at a time per tenant (a unique index, not a check in
+  code). Files are removed 30 days after they finish
+  (`TENANT_BACKUP_RETENTION_DAYS`); the record stays as `EXPIRED`.
+- The callback is https only, with no credentials in the URL, and every
+  address its name resolves to must be public. The check runs inside the
+  connection's own DNS lookup, so a name that resolves elsewhere when
+  connected (DNS rebinding) is caught, and redirects are not followed.
+  `CALLBACK_ALLOW_PRIVATE=true` lifts this for development only.
+
+### Incremental extract
+
+`GET /api/extract` lists the streams (members, branches, centres, GL
+accounts, loan and deposit products, loan accounts, installments and fees,
+deposit and share accounts, transactions, journal entries and lines, the
+audit log) with their key, what they are read on and a JSON Schema from the
+dictionary. `GET /api/extract/:stream?cursor=…&limit=…` (tenant admin,
+accountant or auditor; up to 1,000 rows) returns the rows after the cursor,
+in order, with `nextCursor` and `hasMore`; `?since=` starts a first call
+from a moment.
+
+- Mutable tables are read on `updated_at`, which a trigger now sets on
+  every change (migration 028, `clock_timestamp()` so a long end of day
+  stamps each row when it changed), so no code path can change a row
+  without the extract seeing it. Append-only tables are read on
+  `created_at`, journal lines on their entry's.
+- The cursor is the pair (timestamp, key) of the last row returned, so
+  nothing is skipped or returned twice when many rows share a timestamp.
+- A transaction that stamps a row and commits later could let a reader move
+  its cursor past the row before it is visible. The extract never returns
+  rows at or after its horizon: the start of the oldest transaction still
+  writing in the database, less `EXTRACT_LAG_SECONDS` (default 5). The
+  suite holds a transaction open and checks that later rows wait for it.
+
+### Stitch, through a Singer tap
+
+`bin/tap-sacco.js` is a Singer tap over the extract, which is how Stitch
+(and any Singer target: Postgres, BigQuery, Snowflake, CSV) loads a source:
+
+```
+node bin/tap-sacco.js --config config.json --discover > catalog.json
+node bin/tap-sacco.js --config config.json --catalog catalog.json --state state.json \
+  | target-stitch --config stitch.json > state-out.json
+```
+
+`config.json` holds `api_url`, `tenant`, `email`, `password` and optionally
+`page_size` and `start_date`. Use a dedicated user in the AUDITOR role: it
+reads the extract and nothing else, and it is not a role that must use a
+second factor by default (a tap cannot type a code). The tap writes SCHEMA,
+RECORD and STATE messages; the state holds the extract cursor per stream,
+so each run carries on where the last one stopped. `target-stitch` is
+Stitch's own Python package and is not part of this repository.
+
+### Excel data import
+
+After the reference platform's Data Importing: a SACCO moving onto the platform fills in one
+workbook, uploads it, and someone reviews and approves it.
+
+- `GET /api/data-imports/template` downloads the workbook: Instructions,
+  Settings (the migration date), GL Accounts, Branches, Centres, Members,
+  Deposit Accounts, Share Accounts, Loan Accounts, Loan Schedule, GL
+  Balances, and a Reference sheet listing the products, branches, centres
+  and GL accounts already in the system. Required columns are marked `*`.
+  Members, Branches, Centres, Deposit Accounts and Loan Accounts take
+  custom field columns headed `Custom: _setId.fieldId`.
+- `POST /api/data-imports` (tenant admin or manager) takes the workbook as
+  the request body, up to 5 MB. Every cell is checked (required values,
+  dates, amounts, lists, numbers used twice, dates after the migration
+  date, a schedule that does not add up to its loan, a trial balance that
+  does not balance). Then the whole import is run inside a savepoint and
+  rolled back, so whatever only the database can refuse (a product band,
+  an account number in use, a closed accounting period, a header account in
+  the trial balance) is found now, row by row; a row that depends on one
+  that failed says which. An import with errors is `INVALID`, and
+  `GET /api/data-imports/:id/errors` returns the workbook with an Errors
+  sheet and an Errors column on each sheet. One without is
+  `PENDING_APPROVAL`, with what it will create and any warnings.
+- Nothing reaches the live tables before approval, so nothing waits to be
+  left out of the end of day, and a rejected import leaves no trace but its
+  record. `POST /:id/approve` (tenant admin) runs the import again and
+  commits it all or none of it; under the four-eyes rule
+  (`two_man_rule`) the uploader may not approve it. If something changed
+  since the upload, nothing is created, the import is `FAILED`, and the
+  response lists why. `POST /:id/reject` rejects it with a note.
+- Balances are as at the end of the migration date. A deposit account
+  opens with its balance (recorded as `MIGRATION_OPENING_BALANCE`, no
+  journal entry), a share account with its units, and a loan active with
+  what it still owes. Its schedule is the Loan Schedule sheet's, or the
+  product's from the disbursement date with the principal repaid applied
+  to the oldest installments first. Arrears are marked on the product's
+  rules as at the migration date; interest accrues from it.
+- An installment already late at the migration date is exempt from the
+  late repayment fee, and a forfeited penalty marker covers its days before
+  the migration date, so its penalty counts from then: the old system
+  charged, or did not charge, for those days.
+- Accounts post nothing to the general ledger. The GL Balances sheet is the
+  opening trial balance, posted as one entry on the migration date
+  (`source_type` `DATA_IMPORT`). The reviewer is warned where the loans,
+  deposits or share capital imported do not add up to their GL account in
+  that sheet.
+- Not imported: revolving and tranched loans, index-rate and adjustable-
+  rate loans, and funded loans. They are opened in the system.
+- Members also gained middle name, second phone, address lines, city,
+  postcode, region, country, credit officer, notes and prior loan cycles
+  (cycles repaid in the old system, counted in the member's completed loan
+  cycles), on the members API as well as the import.
+
 ## Shares and dividends
 
 Shares are equity, not a deposit. Buying them credits share capital; a
@@ -1715,6 +1885,34 @@ code without a session. Login in that state returns 403 with an
 **enrolment-scoped token**, valid for ten minutes and accepted by the
 enrolment endpoints and nowhere else. The test suite confirms it is rejected
 on an ordinary route.
+
+## Staff users
+
+After the reference platform's Users and Access Control, for the roles this platform has
+(`TENANT_ADMIN`, `MANAGER`, `ACCOUNTANT`, `TELLER`, `AUDITOR`). The
+console's Users page covers it.
+
+- `/api/users`: tenant admins create users and change their name, role,
+  branch, status and approval and disbursement limits; managers and
+  auditors may look. `POST /:id/reset-password` and `POST /:id/reset-mfa`.
+  Custom field values on users are set through
+  `/api/custom-fields/values/USER/:id`.
+- A new user, and a user whose password is reset, is given a temporary
+  password, shown once. Signing in with it returns 403
+  `PASSWORD_CHANGE_REQUIRED` with a token scoped to `POST /auth/password`
+  and nothing else; the user chooses their own password (at least 12
+  characters) and then signs in.
+- Nobody changes their own role or status, and the tenant's last active
+  administrator can be neither demoted nor suspended (changes to one
+  tenant's users are serialised, so two administrators cannot demote each
+  other at once).
+- Suspending a user, changing their role, and resetting their password or
+  second factor revoke their refresh tokens. Every staff request also
+  checks the user is still active (cached per user for ten seconds, cleared
+  at once when this process changes the user), so a suspended user's
+  15 minute access token stops working immediately.
+- Every change is written to `platform.audit_log`; `GET /api/users/audit`
+  shows the tenant's.
 
 ## Rate limiting
 
@@ -2050,8 +2248,10 @@ form does not define is refused at load time rather than at render time.
 
 ## The back office console
 
-Served at `/console` from `public/`: sign-in with MFA, member and loan
-lookup, teller postings, the reports, provisioning, the close, and returns.
+Served at `/console` from `public/`: sign-in with MFA (and the change of a
+temporary password), member and loan lookup, teller postings, the reports,
+provisioning, the close, returns, products, controls, accounting, the
+organization, data (import, backups, dictionary, extract) and users.
 
 Plain JavaScript, no build step, no framework, no CDN. What is on disk is
 what runs, which matters for software somebody may have to audit. The

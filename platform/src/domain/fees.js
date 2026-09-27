@@ -317,6 +317,8 @@ async function applyLateFees(c, l, asOf) {
   const { rows } = await c.query(
     `SELECT i.* FROM loan_installments i
      WHERE i.loan_id = $1 AND i.status = 'OVERDUE' AND i.due_date <= $2::date
+       -- Late before the loan was imported: the old system charged it, or not.
+       AND NOT i.late_fee_exempt
        AND NOT EXISTS (SELECT 1 FROM loan_fees f WHERE f.installment_id = i.id AND f.fee_type = 'LATE_REPAYMENT')
      ORDER BY i.number`,
     [l.id, asOf]

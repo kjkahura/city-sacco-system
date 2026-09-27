@@ -29,7 +29,7 @@ router.post('/login', loginRateLimit(), async (req, res, next) => {
 
     const { rows } = await pool.query(
       `SELECT u.id, u.email, u.password_hash, u.role, u.status, u.full_name,
-              u.mfa_enabled, t.slug AS tenant_slug
+              u.mfa_enabled, u.must_change_password, t.slug AS tenant_slug
        FROM platform.users u
        JOIN platform.tenants t ON t.id = u.tenant_id
        WHERE u.tenant_id = $1 AND lower(u.email) = lower($2)`,
@@ -50,6 +50,20 @@ router.post('/login', loginRateLimit(), async (req, res, next) => {
 
     await clearLoginAttempts(req);
     await recordAttempt(req, email, true);
+
+    // A temporary password (a new user, or one an administrator reset)
+    // signs in only far enough to choose a new one: a token scoped to
+    // POST /auth/password and nothing else.
+    if (user.must_change_password) {
+      return res.status(403).json({
+        errors: [{ errorCode: 403, errorReason: 'PASSWORD_CHANGE_REQUIRED' }],
+        passwordChangeRequired: true,
+        passwordChangeToken: signToken({
+          sub: user.id, email: user.email, role: user.role,
+          tid: user.tenant_slug, scope: 'password_change',
+        }, '10m'),
+      });
+    }
 
     // A correct password is the first factor. When the tenant's policy or
     // the user's own enrolment demands a second, hand back a short-lived
@@ -132,18 +146,28 @@ router.get('/sessions', requireAuth(), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/password', requireAuth(), async (req, res, next) => {
+// A session, or the scoped token a temporary password signs in with.
+const sessionOrPasswordChange = (req, res, next) => {
+  if (req.auth?.scope === 'password_change') {
+    if (req.tenant && req.auth.tid !== req.tenant.slug) return apiError(res, 403, 403, 'TOKEN_TENANT_MISMATCH');
+    return next();
+  }
+  return requireAuth()(req, res, next);
+};
+
+router.post('/password', sessionOrPasswordChange, async (req, res, next) => {
   try {
     const { currentPassword, newPassword } = req.body || {};
     if (!currentPassword || !newPassword) return apiError(res, 400, 400, 'BOTH_PASSWORDS_REQUIRED');
     if (String(newPassword).length < 12) return apiError(res, 400, 400, 'PASSWORD_TOO_SHORT');
+    if (newPassword === currentPassword) return apiError(res, 400, 400, 'NEW_PASSWORD_MUST_DIFFER');
 
     const { rows } = await pool.query(
       'SELECT password_hash FROM platform.users WHERE id = $1', [req.auth.sub]);
     if (!rows.length || !(await verifyPassword(currentPassword, rows[0].password_hash))) {
       return apiError(res, 401, 401, 'INVALID_CREDENTIALS');
     }
-    await pool.query('UPDATE platform.users SET password_hash = $1 WHERE id = $2',
+    await pool.query('UPDATE platform.users SET password_hash = $1, must_change_password = false, updated_at = now() WHERE id = $2',
       [await hashPassword(newPassword), req.auth.sub]);
 
     // Changing a password ends every other session. That is the point of

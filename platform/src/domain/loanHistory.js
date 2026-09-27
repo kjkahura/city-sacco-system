@@ -78,7 +78,7 @@ async function onTimeRate(c, loanId, asOf) {
 }
 
 async function forMember(c, memberId) {
-  const { rows: [m] } = await c.query('SELECT id, member_no, first_name, last_name FROM members WHERE id::text = $1 OR member_no = $1', [String(memberId)]);
+  const { rows: [m] } = await c.query('SELECT id, member_no, first_name, last_name, prior_loan_cycles FROM members WHERE id::text = $1 OR member_no = $1', [String(memberId)]);
   if (!m) throw err('MEMBER_NOT_FOUND', 404);
   const { rows } = await c.query(
     `SELECT l.id, l.account_no, l.product_id, p.name AS product_name, l.status, l.principal, l.principal_disbursed,
@@ -108,7 +108,9 @@ async function forMember(c, memberId) {
   }
   return {
     memberId: m.id, memberNo: m.member_no, name: `${m.first_name} ${m.last_name}`,
-    completedLoanCycles: rows.filter((x) => x.status === 'CLOSED_REPAID').length,
+    // Cycles completed in the system the member was imported from count too.
+    completedLoanCycles: rows.filter((x) => x.status === 'CLOSED_REPAID').length + Number(m.prior_loan_cycles || 0),
+    priorLoanCycles: Number(m.prior_loan_cycles || 0),
     maxLoanSize: max,
     overallOnTimeRate: rated.length ? round2(rated.reduce((a, x) => a + x.onTimeRate, 0) / rated.length) : null,
     closedLoans: closed,
@@ -118,7 +120,9 @@ async function forMember(c, memberId) {
 
 /** The member's completed loan cycles, for a loan's overview. */
 async function loanCycles(c, memberId) {
-  const { rows: [r] } = await c.query("SELECT count(*)::int AS n FROM loan_accounts WHERE member_id = $1 AND status = 'CLOSED_REPAID'", [memberId]);
+  const { rows: [r] } = await c.query(
+    `SELECT (SELECT count(*)::int FROM loan_accounts WHERE member_id = $1 AND status = 'CLOSED_REPAID')
+          + COALESCE((SELECT prior_loan_cycles FROM members WHERE id = $1), 0) AS n`, [memberId]);
   return r.n;
 }
 

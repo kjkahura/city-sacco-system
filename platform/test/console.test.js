@@ -531,6 +531,67 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForFunction(() => /Branch NKR added/.test(document.getElementById('toast').textContent));
     check('a branch is added from the console', true);
 
+    section('data: dictionary, import, backup');
+    await page.click('nav button[data-view=data]');
+    await page.waitForSelector('#dd-table');
+    await page.selectOption('#dd-table', 'loan_installments');
+    await page.waitForFunction(() => /late_fee_exempt/.test(document.getElementById('dd-cols')?.textContent || ''));
+    check('the data dictionary shows a table\'s columns with what they mean', /repayment schedules/i.test(await page.textContent('#dd-desc')), await page.textContent('#dd-desc'));
+    const XLSX = require('../src/lib/xlsx');
+    const book = XLSX.write([
+      { name: 'Settings', rows: [['Setting', 'Value'], ['Migration date', new Date().toISOString().slice(0, 10)]] },
+      { name: 'Members', rows: [['Member number*', 'First name*', 'Last name*'], ['UIIMP1', 'Imported', 'Member']] },
+    ]);
+    await page.setInputFiles('#imp-file', { name: 'ui-import.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: book });
+    await page.click('#imp-upload');
+    await page.waitForSelector('#import-review');
+    check('an uploaded workbook is checked and opens for review', /PENDING_APPROVAL/.test(await page.textContent('#import-review')), await page.textContent('#import-review'));
+    await page.click('#import-review button[data-act=approve]');
+    await page.waitForSelector('dialog[open] input[name=note]');
+    await page.fill('dialog[open] input[name=note]', 'console check');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /Imported|failed/.test(document.getElementById('toast').textContent));
+    const imported = await T((c) => c.query("SELECT count(*)::int AS n FROM members WHERE member_no = 'UIIMP1'"));
+    check('approving it from the console creates the member', imported.rows[0].n === 1, await page.textContent('#toast'));
+    await page.waitForSelector('#bk-run');
+    await page.click('#bk-run');
+    await page.waitForFunction(() => /Backup started/.test(document.getElementById('toast').textContent));
+    for (let i = 0; i < 40; i += 1) {
+      const b = await T((c) => c.query("SELECT status FROM database_backups ORDER BY created_at DESC LIMIT 1"));
+      if (b.rows[0]?.status !== 'IN_PROGRESS') break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    await page.click('nav button[data-view=members]');
+    await page.click('nav button[data-view=data]');
+    await page.waitForSelector('#bk-list');
+    check('a backup is taken from the console and listed with a download', /COMPLETE/.test(await page.textContent('#bk-list')) && !!(await page.$('#bk-list button[data-bk]')));
+
+    section('users');
+    await page.click('nav button[data-view=users]');
+    await page.waitForSelector('#user-add');
+    check('the users page lists the tenant\'s staff', /admin@uitest.local/.test(await page.textContent('#users-list')));
+    await page.click('#user-add');
+    await page.waitForSelector('dialog[open] input[name=email]');
+    await page.fill('dialog[open] input[name=email]', 'new.teller@uitest.local');
+    await page.selectOption('dialog[open] select[name=role]', 'TELLER');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForSelector('dialog[open] input[name=p]');
+    const tempPw = await page.inputValue('dialog[open] input[name=p]');
+    check('a new user is created and the temporary password is shown once', /^[A-Za-z0-9]{4}(-[A-Za-z0-9]{4}){3}$/.test(tempPw), tempPw);
+    await page.click('dialog[open] button[value=cancel]');
+    await page.waitForFunction(() => /new.teller@uitest.local/.test(document.getElementById('users-list')?.textContent || ''));
+    await page.click('#logout');
+    await page.waitForSelector('#login:not([hidden])');
+    await page.fill('input[name=email]', 'new.teller@uitest.local');
+    await page.fill('input[name=password]', tempPw);
+    await page.click('button[type=submit]');
+    await page.waitForSelector('#pwchange:not([hidden])');
+    check('signing in with it asks for a new password', /Choose a new password/.test(await page.textContent('#login-error')));
+    await page.fill('input[name=newPassword]', 'the teller chose this one');
+    await page.click('button[type=submit]');
+    await page.waitForSelector('#app:not([hidden])', { timeout: 10000 });
+    check('and then signs in', /TELLER/.test(await page.textContent('#whoami')), await page.textContent('#whoami'));
+
     section('no JavaScript errors anywhere in that');
     check('the browser reported no page errors', jsErrors.length === 0, jsErrors.join(' | '));
   } catch (e) {

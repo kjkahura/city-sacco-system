@@ -9,6 +9,11 @@ const { Pool, types } = require('pg');
 // changes a balance is still done in SQL, on the numeric type, never in JS.
 types.setTypeParser(types.builtins.NUMERIC, (v) => (v === null ? null : Number(v)));
 types.setTypeParser(types.builtins.INT8, (v) => (v === null ? null : Number(v)));
+// A DATE is a calendar day, not a moment: kept as 'YYYY-MM-DD' (the reference platform's API
+// standard for date-only values). pg's default turns it into a JavaScript
+// Date at local midnight, so on a server running in Africa/Nairobi every
+// date read back through toISOString() came out a day early.
+types.setTypeParser(types.builtins.DATE, (v) => v);
 
 /**
  * One pool for the whole process, not one per tenant.

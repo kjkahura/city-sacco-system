@@ -199,7 +199,7 @@ const PRODUCT_SQL = `
       && sum(ds.slice(1), (x) => x.principal_due) === 80000,
       ds.slice(1).map((x) => x.principal_due).join(','));
     check('the next line\'s interest is 1% of 80,000, the new balance', Number(ds[1].interest_due) === 800, String(ds[1].interest_due));
-    check('the due dates did not move', ds[1].due_date.toISOString().slice(0, 10) === D2);
+    check('the due dates did not move', ds[1].due_date.slice(0, 10) === D2);
     await accrue(dyn.id, D2);
     check('and a month later 800 has accrued, against the fixed loan\'s 1,100',
       (await balancesOf(dyn.id)).interest === 800, String((await balancesOf(dyn.id)).interest));

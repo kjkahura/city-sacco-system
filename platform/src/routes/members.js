@@ -20,9 +20,18 @@ const router = express.Router();
  * such thing as forgetting the tenant filter here.
  */
 
-const COLUMNS = `id, member_no, first_name, last_name, national_id, kra_pin, phone,
+const COLUMNS = `id, member_no, first_name, middle_name, last_name, national_id, kra_pin, phone, phone2,
                  email, date_of_birth, gender, branch_id, centre_id, employer, status,
-                 joined_on, exited_on, created_at`;
+                 joined_on, exited_on, address_line1, address_line2, city, postcode, region, country,
+                 credit_officer, prior_loan_cycles, notes, import_id, created_at, updated_at`;
+
+// The optional member fields (the reference platform's client fields the import also carries):
+// body key -> column.
+const EXTRA = {
+  middleName: 'middle_name', phone2: 'phone2', addressLine1: 'address_line1', addressLine2: 'address_line2',
+  city: 'city', postcode: 'postcode', region: 'region', country: 'country', creditOfficer: 'credit_officer',
+  priorLoanCycles: 'prior_loan_cycles', notes: 'notes',
+};
 
 router.get('/', requireAuth(), async (req, res, next) => {
   try {
@@ -113,14 +122,20 @@ router.post('/', requireAuth('TENANT_ADMIN', 'MANAGER', 'TELLER'), async (req, r
       const branchId = branch ? branch.id : centre ? centre.branch_id : null;
       const docs = await IDT.forNewMember(c, b.identificationDocuments || []);
       const values = await CF.prepare(c, 'MEMBER', { patch: b.customFields || {}, user: req.auth, creating: true });
+      const extra = Object.entries(EXTRA).filter(([k]) => b[k] !== undefined && b[k] !== null && b[k] !== '');
+      if (b.priorLoanCycles !== undefined && !(Number.isInteger(Number(b.priorLoanCycles)) && Number(b.priorLoanCycles) >= 0)) {
+        throw Object.assign(new Error('PRIOR_LOAN_CYCLES_MUST_BE_A_WHOLE_NUMBER'), { status: 400 });
+      }
       const { rows } = await c.query(
         `INSERT INTO members (member_no, first_name, last_name, national_id, kra_pin,
-                              phone, email, date_of_birth, gender, employer, status, branch_id, centre_id, custom_fields)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,'ACTIVE'),$12,$13,$14)
+                              phone, email, date_of_birth, gender, employer, status, branch_id, centre_id, custom_fields
+                              ${extra.map(([, col]) => `, ${col}`).join('')})
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,'ACTIVE'),$12,$13,$14${extra.map((_, i) => `,$${15 + i}`).join('')})
          RETURNING ${COLUMNS}`,
         [memberNo, b.firstName, b.lastName, b.nationalId || null, b.kraPin || null,
          b.phone || null, b.email || null, b.dateOfBirth || null, b.gender || null,
-         b.employer || null, b.status || null, branchId, centre ? centre.id : null, JSON.stringify(values)]
+         b.employer || null, b.status || null, branchId, centre ? centre.id : null, JSON.stringify(values),
+         ...extra.map(([k]) => b[k])]
       );
       await IDT.storeForMember(c, rows[0].id, docs, { createdBy: req.auth.email });
 
@@ -140,8 +155,8 @@ router.post('/', requireAuth('TENANT_ADMIN', 'MANAGER', 'TELLER'), async (req, r
 
 router.patch('/:id', requireAuth('TENANT_ADMIN', 'MANAGER'), async (req, res, next) => {
   try {
-    const allowed = ['first_name', 'last_name', 'phone', 'email', 'employer', 'status', 'kra_pin'];
-    const map = { firstName: 'first_name', lastName: 'last_name', kraPin: 'kra_pin' };
+    const allowed = ['first_name', 'last_name', 'phone', 'email', 'employer', 'status', 'kra_pin', ...Object.values(EXTRA)];
+    const map = { firstName: 'first_name', lastName: 'last_name', kraPin: 'kra_pin', ...EXTRA };
     const sets = [];
     const params = [];
     for (const [k, v] of Object.entries(req.body || {})) {

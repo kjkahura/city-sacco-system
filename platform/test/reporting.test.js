@@ -111,8 +111,8 @@ const LAST_YEAR = new Date().getFullYear() - 1;
     check('the total respects the filter', filtered.total === 13, String(filtered.total));
 
     const capped = await call('GET', '/api/members?limit=99999');
-    check('an absurd limit is clamped, not honoured', capped.limit === 500, String(capped.limit));
-    check('and returns at most that many', capped.body.length <= 500, String(capped.body.length));
+    check('an absurd limit is clamped to 1,000 (the reference platform\'s maximum), not honoured', capped.limit === 1000, String(capped.limit));
+    check('and returns at most that many', capped.body.length <= 1000, String(capped.body.length));
 
     const pages = [];
     for (let off = 0; off < 137; off += 20) {
