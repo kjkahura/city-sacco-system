@@ -111,10 +111,11 @@ async function guarantorCoverage(c, loanId, { exclude = null } = {}) {
 }
 
 async function releaseGuarantors(c, loanId) {
-  await c.query(
-    "UPDATE loan_guarantors SET status = 'RELEASED' WHERE loan_id = $1 AND status = 'PLEDGED'",
+  const { rows } = await c.query(
+    "UPDATE loan_guarantors SET status = 'RELEASED' WHERE loan_id = $1 AND status = 'PLEDGED' RETURNING id",
     [loanId]
   );
+  return rows.map((r) => r.id);
 }
 
 // --------------------------------------------------------------------------

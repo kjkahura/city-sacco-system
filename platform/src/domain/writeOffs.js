@@ -6,6 +6,7 @@ const ledger = require('./ledger');
 const fees = require('./fees');
 const funding = require('./funding');
 const workflow = require('./workflow');
+const controls = require('./controls');
 const provisioning = require('./provisioning');
 const PA = require('./productAccounting');
 const types = require('./productTypes');
@@ -294,9 +295,10 @@ async function undoChargeWriteOff(c, tx, { narration = 'Write-off undone', creat
  * balance becomes `newBalance` (or comes down by `amount`), and the
  * difference is written off.
  */
-async function reduceBalance(c, loanId, { component, newBalance = null, amount = null, reason = null, valueDate = null, createdBy } = {}) {
+async function reduceBalance(c, loanId, { component, newBalance = null, amount = null, reason = null, valueDate = null, createdBy, user = null } = {}) {
   const what = String(component || '').toUpperCase();
   if (!['FEE', 'PENALTY'].includes(what)) throw err('COMPONENT_IS_FEE_OR_PENALTY', 400);
+  await controls.assertMayAdjust(c, { user });
   const l = await lock(c, loanId);
   if (!WRITABLE.includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   const b = balances(l);
@@ -345,7 +347,7 @@ async function audit(c, actor, action, id, after) {
  * the tenant does not require approval the write-off happens here and the
  * request is recorded as approved by the same user.
  */
-async function requestWriteOff(c, loanId, { reason, narration, valueDate, createdBy, user = null } = {}) {
+async function requestWriteOff(c, loanId, { reason, narration, valueDate, createdBy, user = null, collectSecurities = false, beforeWriteOff = null } = {}) {
   const why = String(reason ?? narration ?? '').trim();
   if (!why) throw err('A_WRITE_OFF_NEEDS_A_REASON', 400);
   const l = await lock(c, loanId);
@@ -360,18 +362,19 @@ async function requestWriteOff(c, loanId, { reason, narration, valueDate, create
   const ctl = await workflow.controls(c);
   const needsApproval = ctl.write_off_requires_approval !== false;
   const { rows: [req] } = await c.query(
-    `INSERT INTO loan_write_off_requests (loan_id, reason, value_date, amount_at_request, requested_by)
-     VALUES ($1,$2,$3::date,$4,$5) RETURNING *`, [l.id, why, date, b.total, createdBy || 'SYSTEM']);
-  await audit(c, createdBy, 'LOAN_WRITE_OFF_REQUESTED', req.id, { loan: l.account_no, amount: b.total, valueDate: date, reason: why });
+    `INSERT INTO loan_write_off_requests (loan_id, reason, value_date, amount_at_request, requested_by, collect_securities)
+     VALUES ($1,$2,$3::date,$4,$5,$6) RETURNING *`, [l.id, why, date, b.total, createdBy || 'SYSTEM', collectSecurities === true]);
+  await audit(c, createdBy, 'LOAN_WRITE_OFF_REQUESTED', req.id,
+    { loan: l.account_no, amount: b.total, valueDate: date, reason: why, collectSecurities: collectSecurities === true });
   if (needsApproval) return { request: req, transaction: null };
-  return decide(c, l.id, { approve: true, createdBy, user, selfApproved: true });
+  return decide(c, l.id, { approve: true, createdBy, user, selfApproved: true, beforeWriteOff });
 }
 
 /**
  * Approve or reject the pending request. The approver may not be the one
  * who asked, and the amount written off must be within their approval limit.
  */
-async function decide(c, loanId, { approve, note = null, createdBy, user = null, selfApproved = false } = {}) {
+async function decide(c, loanId, { approve, note = null, createdBy, user = null, selfApproved = false, beforeWriteOff = null } = {}) {
   const l = await lock(c, loanId);
   const req = await pending(c, l.id);
   if (!req) throw err('NO_PENDING_WRITE_OFF', 404);
@@ -385,8 +388,24 @@ async function decide(c, loanId, { approve, note = null, createdBy, user = null,
   if (!selfApproved && req.requested_by === (createdBy || 'SYSTEM')) {
     throw err('WRITE_OFF_REQUESTER_CANNOT_APPROVE: a second person approves a write-off', 403);
   }
+  // Securities collected first (the reference platform's Collect Securities): the step lives
+  // above ./loans (./loanClosures) and is handed in.
+  let collected = null;
+  if (req.collect_securities) {
+    if (typeof beforeWriteOff !== 'function') throw err('COLLECT_SECURITIES_NEEDS_THE_LOAN_CLOSURES_ROUTE', 500);
+    collected = await beforeWriteOff(c, l.id, { valueDate: req.value_date, createdBy, user });
+  }
+  const now = await lock(c, l.id);
+  if (!WRITABLE.includes(now.status) || balances(now).total <= 0) {
+    // The securities paid it all: nothing is left to write off.
+    const { rows: [out] } = await c.query(
+      `UPDATE loan_write_off_requests SET status = 'APPROVED', decided_by = $2, decided_at = now(), decision_note = $3
+       WHERE id = $1 RETURNING *`, [req.id, createdBy || 'SYSTEM', note || 'repaid in full by the securities collected']);
+    await audit(c, createdBy, 'LOAN_WRITE_OFF_APPROVED', req.id, { loan: l.account_no, amount: 0, collected });
+    return { request: out, transaction: null, collected };
+  }
   const lim = await workflow.userLimits(c, user);
-  const amount = balances(l).total;
+  const amount = balances(now).total;
   if (lim.approval !== null && amount > Number(lim.approval)) {
     throw err(`ABOVE_YOUR_APPROVAL_LIMIT: limit ${Number(lim.approval)}, write-off ${amount}`, 403);
   }
@@ -394,8 +413,8 @@ async function decide(c, loanId, { approve, note = null, createdBy, user = null,
   const { rows: [out] } = await c.query(
     `UPDATE loan_write_off_requests SET status = 'APPROVED', decided_by = $2, decided_at = now(), decision_note = $3, transaction_id = $4
      WHERE id = $1 RETURNING *`, [req.id, createdBy || 'SYSTEM', note || (selfApproved ? 'approval not required by the tenant' : null), tx.id]);
-  await audit(c, createdBy, 'LOAN_WRITE_OFF_APPROVED', req.id, { loan: l.account_no, amount: Number(tx.amount), transaction: tx.reference });
-  return { request: out, transaction: tx };
+  await audit(c, createdBy, 'LOAN_WRITE_OFF_APPROVED', req.id, { loan: l.account_no, amount: Number(tx.amount), transaction: tx.reference, collected });
+  return { request: out, transaction: tx, collected };
 }
 
 async function requestsFor(c, loanId) {

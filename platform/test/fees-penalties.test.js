@@ -158,7 +158,7 @@ const repay = (id, amount, on, extra = {}) => call('POST', `/api/loans/${id}/rep
     check('on outstanding principal the rate is per the interest rate period: 36.5% a year on 3,000 over 365 days is 3 a day',
       ch.length === 1 && Number(ch[0].amount) === round(3 * ch[0].days_charged), JSON.stringify(ch.map((x) => [x.amount, x.days_charged])));
 
-    section('a locked loan keeps accruing and is charged when unlocked');
+    section('a locked loan is not charged for its locked days (the reference platform\'s Locking page)');
     const lk = await disbursed('PEN', 3000, 3, '2026-01-01');
     await accrue(lk.id, '2026-02-01');
     await arrears('2026-02-07');
@@ -166,9 +166,13 @@ const repay = (id, amount, on, extra = {}) => call('POST', `/api/loans/${id}/rep
     await T((c) => W.transition(c, lk.id, 'LOCK', { createdBy: 'manager' }));
     check('locked: nothing applied', (await penalise(lk.id, '2026-02-12')).length === 0);
     check('but accrued', Number((await loanRow(lk.id)).penalty_unapplied) === 5, String((await loanRow(lk.id)).penalty_unapplied));
-    await T((c) => W.transition(c, lk.id, 'UNLOCK', { createdBy: 'manager' }));
+    await T((c) => W.transition(c, lk.id, 'UNLOCK', { createdBy: 'manager', valueDate: '2026-02-13' }));
+    const forfeit = await Rd(async (c) => (await c.query('SELECT * FROM penalty_charges WHERE loan_id = $1 AND forfeited', [lk.id])).rows);
+    check('unlocked: the days in arrears while locked are forfeited, not charged',
+      forfeit.length === 1 && forfeit[0].days_charged === 5 && Number(forfeit[0].amount) === 0 && Number((await loanRow(lk.id)).penalty_unapplied) === 0,
+      JSON.stringify(forfeit.map((x) => [x.amount, x.days_charged])));
     ch = await penalise(lk.id, '2026-02-13');
-    check('unlocked: the next run charges every day since the last charge', ch.length === 1 && ch[0].days_charged === 6 && Number(ch[0].amount) === 6,
+    check('and penalties run again from the unlock', ch.length === 1 && ch[0].days_charged === 1 && Number(ch[0].amount) === 1,
       JSON.stringify(ch.map((x) => [x.amount, x.days_charged])));
 
     section('the penalty rate of a running loan');

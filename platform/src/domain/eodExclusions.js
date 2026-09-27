@@ -65,7 +65,7 @@ async function catchUp(c, loanId, date, createdBy) {
   done.markArrears = (await workflow.markArrears(c, { asOf: date, loanId: l.id })).length;
   done.accruePenalties = (await penalties.accrueForLoan(c, l.id, { asOf: date, createdBy })).length;
   l = await ledger.lock(c, l.id);
-  if (['ACTIVE', 'IN_ARREARS'].includes(l.status)) {
+  if (['ACTIVE', 'IN_ARREARS'].includes(l.status) || (l.status === 'LOCKED' && l.lock_fees === false)) {
     done.paymentDueFees = types.forLoan(l).paymentDueFeesByCalendar ? await fees.applyPaymentDueFees(c, l, date) : 0;
     done.lateFees = await fees.applyLateFees(c, l, date);
   }

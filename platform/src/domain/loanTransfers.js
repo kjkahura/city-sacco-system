@@ -92,4 +92,4 @@ async function repayFromDeposit(c, loanId, { savingsAccountId, amount, valueDate
   return link(c, loanTx, savingsTx);
 }
 
-module.exports = { disburseToDeposit, repayFromDeposit, CHANNEL };
+module.exports = { disburseToDeposit, repayFromDeposit, link, CHANNEL };

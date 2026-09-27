@@ -281,14 +281,23 @@ const STATE_ROUTES = {
   'request-approval': 'REQUEST_APPROVAL', submit: 'REQUEST_APPROVAL', 'set-incomplete': 'SET_INCOMPLETE',
   approve: 'APPROVE', 'undo-approve': 'UNDO_APPROVE',
   reject: 'REJECT', 'undo-reject': 'UNDO_REJECT', withdraw: 'WITHDRAW', 'undo-withdraw': 'UNDO_WITHDRAW',
-  lock: 'LOCK', unlock: 'UNLOCK', close: 'CLOSE',
+  lock: 'LOCK', unlock: 'UNLOCK', close: 'CLOSE', 'undo-close': 'UNDO_CLOSE',
 };
 const TELLER_ACTIONS = ['REQUEST_APPROVAL', 'SET_INCOMPLETE', 'WITHDRAW'];
 for (const [path, action] of Object.entries(STATE_ROUTES)) {
   const roles = TELLER_ACTIONS.includes(action) ? TELLER : APPROVER;
   router.post(`/:id/${path}`, ...tx((c, req, _res, { actor, user }) =>
-    W.transition(c, req.params.id, action, { createdBy: actor, user, note: req.body?.note, reason: req.body?.reason }), roles));
+    W.transition(c, req.params.id, action, {
+      createdBy: actor, user, note: req.body?.note, reason: req.body?.reason, suspend: req.body?.suspend, valueDate: req.body?.valueDate,
+    }), roles));
 }
+// What a lock suspends, changed while the loan stays locked.
+router.post('/:id/lock-settings', ...tx((c, req, _res, { actor }) =>
+  W.changeLock(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+// Delete a loan created by mistake: an application, or one rejected or
+// withdrawn, that nothing has been posted to (the reference platform's Delete).
+router.delete('/:id', ...tx((c, req, _res, { actor }) =>
+  W.deleteLoan(c, req.params.id, { note: req.body?.note || req.query?.note, createdBy: actor }), ['TENANT_ADMIN']));
 
 router.get('/:id/history', ...read((c, req) => W.historyOf(c, req.params.id)));
 
@@ -407,9 +416,9 @@ router.post('/fees/:feeId/waive', ...tx((c, req, _res, { actor }) =>
 router.post('/fees/:feeId/adjust', ...tx((c, req, _res, { actor }) =>
   F.adjust(c, req.params.feeId, { ...req.body, createdBy: actor }), APPROVER));
 // Reduce Balance: the fee or penalty balance lowered, the difference written off.
-router.post('/:id/reduce-balance', ...tx(async (c, req, res, { actor }) => {
+router.post('/:id/reduce-balance', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
-  return WO.reduceBalance(c, req.params.id, { ...req.body, createdBy: actor });
+  return WO.reduceBalance(c, req.params.id, { ...req.body, createdBy: actor, user });
 }, APPROVER));
 router.get('/:id/charge-write-offs', ...read((c, req) => WO.chargeWriteOffs(c, req.params.id)));
 
@@ -459,7 +468,7 @@ router.get('/:id/refinance-quote', ...read((c, req) => R.quote(c, req.params.id)
 // the tenant turns the approval off, in which case it happens at once).
 router.post('/:id/write-off', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
-  return await WO.requestWriteOff(c, req.params.id, { ...req.body, createdBy: actor, user });
+  return await LC.requestWriteOff(c, req.params.id, { ...req.body, createdBy: actor, user });
 }, TELLER));
 router.get('/:id/write-off', ...read((c, req) => WO.requestsFor(c, req.params.id)));
 router.get('/:id/rates', ...read((c, req) => RATES.historyOf(c, req.params.id)));
@@ -517,7 +526,7 @@ router.post('/:id/rates/review', ...tx((c, req, _res, { actor }) =>
   RATES.reviewLoan(c, req.params.id, { date: req.body?.asOf, createdBy: actor }).then((x) => x || { changed: false }), APPROVER));
 router.post('/:id/write-off/approve', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
-  return await WO.decide(c, req.params.id, { approve: true, note: req.body?.note, createdBy: actor, user });
+  return await LC.approveWriteOff(c, req.params.id, { note: req.body?.note, createdBy: actor, user });
 }, APPROVER));
 router.post('/:id/write-off/reject', ...tx((c, req, _res, { actor, user }) =>
   WO.decide(c, req.params.id, { approve: false, note: req.body?.note, createdBy: actor, user }), APPROVER));
@@ -548,6 +557,9 @@ router.post('/settlement/run', ...tx((c, req) => SETTLE.run(c, { ...req.body }),
 // Corrections are reversals. There is no PUT or DELETE on a transaction.
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
+  // A termination is undone as a whole (./loanClosures), not as one posting.
+  const { rows: [t] } = await c.query('SELECT kind, loan_account_id FROM transactions WHERE reference = $1', [req.params.reference]);
+  if (t?.kind === 'LOAN_TERMINATED' && t.loan_account_id) return LC.undoTerminate(c, t.loan_account_id, { ...req.body, createdBy: actor });
   return await L.reverseTransaction(c, req.params.reference, { ...req.body, createdBy: actor });
 }, APPROVER));
 

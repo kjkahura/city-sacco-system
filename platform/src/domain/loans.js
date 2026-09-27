@@ -134,7 +134,7 @@ async function nextAccountNo(c, p) {
  * is left out of the exposure check.
  */
 async function apply(c, params, { refinance = null, settles = refinance?.of || null } = {}) {
-  const { memberId, productId = 'NL01', principal, termMonths, purpose, notes, accountNo, createdBy,
+  const { memberId, productId = 'NL01', principal, termMonths, purpose, notes, name, accountNo, createdBy,
     tranches: plannedTranches = null, fundingSources = null, collateral = null, branchId = undefined } = params;
   const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1 AND is_active', [productId]);
   if (!p) throw err('UNKNOWN_LOAN_PRODUCT', 404);
@@ -160,7 +160,7 @@ async function apply(c, params, { refinance = null, settles = refinance?.of || n
   const cols = {
     branch_id: branchId === undefined ? mem?.branch_id || null : branchId,
     account_no: no, member_id: memberId, product_id: productId, principal: amount, term_months: term,
-    product_type: p.product_type || 'FIXED_TERM', status, purpose: purpose || null, notes: notes || null,
+    product_type: p.product_type || 'FIXED_TERM', status, purpose: purpose || null, notes: notes || null, name: name ? String(name).slice(0, 200) : null,
     ...own,
     ...(refinance ? { refinance_of: refinance.of, refinance_arrears: refinance.arrears, top_up_requested: refinance.topUp } : {}),
   };
@@ -508,7 +508,10 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   const type = types.forLoan(l);
   // A locked loan takes repayments only from a user whose role may post on
   // locked accounts (the reference platform's permission); the loan stays locked.
-  if (l.status === 'LOCKED') await controls.assertMayPostOnLocked(c, { user });
+  // A repayment the system makes under another permission (`internal`: a
+  // pay-off checks it itself, securities collected before a write-off have
+  // their own) is not held to it.
+  if (l.status === 'LOCKED') { if (!internal) await controls.assertMayPostOnLocked(c, { user }); }
   else if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) throw err(`LOAN_NOT_ACTIVE: ${l.status}`, 409);
   let left = round2(amount);
   if (!(left > 0)) throw err('INVALID_REPAYMENT_AMOUNT');
@@ -699,8 +702,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
     await FA.recogniseRemaining(c, l.id, { date: asOf, createdBy });
     await c.query("UPDATE loan_accounts SET status = 'CLOSED_REPAID', closed_on = $2::date, updated_at = now() WHERE id = $1", [l.id, asOf]);
     await workflow.history(c, l.id, { from: fresh.status, to: 'CLOSED_REPAID', action: 'PAID_OFF', actor: createdBy });
-    await eligibility.releaseGuarantors(c, l.id);
-    await securities.onClose(c, l.id);
+    await workflow.closeSecurities(c, l.id, { how: 'PAID' });
   } else if (fresh.status === 'IN_ARREARS') {
     await workflow.refreshArrears(c, fresh, asOf);
   }

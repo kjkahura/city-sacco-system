@@ -66,9 +66,10 @@ async function forLoan(c, loanId) {
 
 /** Collateral on a loan that closes is released; on a write-off, seized. */
 async function onClose(c, loanId, { seized = false } = {}) {
-  await c.query(
-    `UPDATE loan_collateral SET status = $2, released_at = now() WHERE loan_id = $1 AND status = 'PLEDGED'`,
+  const { rows } = await c.query(
+    `UPDATE loan_collateral SET status = $2, released_at = now() WHERE loan_id = $1 AND status = 'PLEDGED' RETURNING id`,
     [loanId, seized ? 'SEIZED' : 'RELEASED']);
+  return rows.map((r) => r.id);
 }
 
 module.exports = { addCollateral, releaseCollateral, collateralCoverage, forLoan, onClose };

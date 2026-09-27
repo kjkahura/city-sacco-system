@@ -65,7 +65,7 @@ const JOBS = {
   async accrueInterest(tenant, businessDate) {
     return withTenant(tenant.schema_name, async (c) => {
       const { rows } = await c.query(
-        `SELECT l.id FROM loan_accounts l WHERE l.status IN ('ACTIVE','IN_ARREARS') AND ${G.EXCLUDED_SQL('l')}`);
+        `SELECT l.id FROM loan_accounts l WHERE (l.status IN ('ACTIVE','IN_ARREARS') OR (l.status = 'LOCKED' AND NOT l.lock_interest)) AND ${G.EXCLUDED_SQL('l')}`);
       let accrued = 0;
       let total = 0;
       const run = await G.eachLoan(c, { job: 'accrueInterest', date: businessDate }, rows, async (id) => {
@@ -104,7 +104,7 @@ const JOBS = {
   async applyFees(tenant, businessDate) {
     return withTenant(tenant.schema_name, async (c) => {
       const { rows } = await c.query(
-        `SELECT l.id FROM loan_accounts l WHERE l.status IN ('ACTIVE','IN_ARREARS') AND ${G.EXCLUDED_SQL('l')}`);
+        `SELECT l.id FROM loan_accounts l WHERE (l.status IN ('ACTIVE','IN_ARREARS') OR (l.status = 'LOCKED' AND NOT l.lock_fees)) AND ${G.EXCLUDED_SQL('l')}`);
       let due = 0; let late = 0;
       const run = await G.eachLoan(c, { job: 'applyFees', date: businessDate }, rows, async (id) => {
         const l = await L.lock(c, id);

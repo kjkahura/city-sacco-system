@@ -34,10 +34,13 @@ const { err, round2 } = acct;
  *
  * What has accrued and is not applied (inside the tolerance, or on a locked
  * loan) is shown on the loan as penalty_unapplied and not posted. A locked
- * loan (by hand, for days in arrears or by the charge cap) keeps accruing
- * and is charged the whole of it at the first run after it is unlocked, as
- * The reference platform's internal controls describe; unlocking a cap lock restarts the
- * count the cap is measured on.
+ * loan (by hand, for days in arrears or by the charge cap), unless its lock
+ * leaves penalties running, is not charged for its locked days. At the
+ * unlock (the reference platform's Locking page) the days in arrears while locked are
+ * forfeited on the overdue bases, and on OUTSTANDING_PRINCIPAL what accrued
+ * while locked is applied on the first installment due date after the
+ * unlock (applyDeferred). Unlocking a cap lock restarts the count the cap
+ * is measured on.
  *
  * The unique index on (installment_id, charged_on) still means a rerun on
  * the same day charges nothing more. A backdated repayment or a reversal
@@ -82,6 +85,60 @@ async function chargedThrough(c, loanId) {
 }
 
 /**
+ * The penalty on the outstanding principal a loan accrued while locked,
+ * applied on the first installment due date after the unlock (the reference platform's
+ * Locking page; ./workflow resumePenalties sets it aside). It is charged
+ * against that installment on its due date, with no late days of its own,
+ * so the installment's own penalties still count from its due date.
+ */
+async function applyDeferred(c, l, date, { effRate, glIncome, createdBy }) {
+  const owed = round2(Number(l.penalty_deferred || 0));
+  if (!(owed > 0) || !l.penalty_deferred_until || ymd(l.penalty_deferred_until) > date) return [];
+  const { rows: [inst] } = await c.query(
+    `SELECT * FROM loan_installments WHERE loan_id = $1 AND status NOT IN ('PAID', 'GRACE') AND due_date >= $2::date
+     ORDER BY due_date, number LIMIT 1`, [l.id, ymd(l.penalty_deferred_until)]);
+  if (!inst) return [];
+  const due = ymd(inst.due_date);
+  if (due > date) {
+    // The installment it was waiting for is paid: the next one takes it.
+    if (due !== ymd(l.penalty_deferred_until)) await c.query('UPDATE loan_accounts SET penalty_deferred_until = $2 WHERE id = $1', [l.id, due]);
+    return [];
+  }
+  let amount = await W.capAllows(c, l, owed);
+  if (!(amount > 0)) {
+    await c.query('UPDATE loan_accounts SET penalty_deferred = 0, penalty_deferred_until = NULL WHERE id = $1', [l.id]);
+    return [];
+  }
+  const tx = tax.split(l, 'PENALTY', amount);
+  amount = tx.gross;
+  const { rows: [inserted] } = await c.query(
+    `INSERT INTO penalty_charges
+       (loan_id, installment_id, charged_on, days_late, basis_amount, rate, amount, period_from, days_charged, tax)
+     VALUES ($1,$2,$3::date,0,$4,$5,$6,$3::date,0,$7)
+     ON CONFLICT (installment_id, charged_on) WHERE waived_at IS NULL AND reversed_at IS NULL DO NOTHING
+     RETURNING *`,
+    [l.id, inst.id, due, L.principalOutstanding(l), effRate, amount, tx.tax]);
+  if (!inserted) return [];
+  let entryId = null;
+  if (L.isAccrual(l)) {
+    entryId = await L.post(c, l, {
+      debits: [{ glCode: l.gl_penalty_rec, amount, memberId: l.member_id }],
+      credits: tax.incomeCredits(l, tx, glIncome, l.member_id),
+      narration: `Penalty ${l.account_no} accrued while locked, applied on installment ${inst.number}`,
+      sourceType: 'LOAN_PENALTY', sourceId: l.id, bookingDate: date, createdBy,
+    });
+    if (entryId) await c.query('UPDATE penalty_charges SET entry_id = $1 WHERE id = $2', [entryId, inserted.id]);
+  }
+  await c.query(
+    `UPDATE loan_accounts SET penalty_accrued = penalty_accrued + $1, tax_charged = tax_charged + $3,
+       charges_since_arrears = charges_since_arrears + CASE WHEN status IN ('IN_ARREARS', 'LOCKED') THEN $1 ELSE 0 END,
+       penalty_deferred = 0, penalty_deferred_until = NULL, updated_at = now() WHERE id = $2`,
+    [amount, l.id, tx.tax]);
+  l.charges_since_arrears = Number(l.charges_since_arrears || 0) + amount;
+  return [{ ...inserted, entryId, deferred: true }];
+}
+
+/**
  * Accrue penalties for one loan as at a date.
  * Returns the charges created; an empty array is a normal outcome.
  */
@@ -102,7 +159,11 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
   const threshold = Math.max(Number(l.penalty_tolerance_days || 0), Number(e.arrearsToleranceDays || 0));
   const amountTolerance = e.arrearsTolerancePercent !== null || (l.arrears_tolerance_floor !== null && l.arrears_tolerance_floor !== undefined);
   const exclude = l.arrears_non_working_days === 'EXCLUDE';
-  const locked = l.status === 'LOCKED';
+  // A lock that leaves penalties running (the reference platform's Lock Account options) does
+  // not hold them back.
+  const locked = l.status === 'LOCKED' && l.lock_penalties !== false;
+  const glIncome = l.gl_penalty_inc || l.gl_interest_inc;
+  const deferred = locked ? [] : await applyDeferred(c, l, date, { effRate, glIncome, createdBy });
 
   const { rows: overdue } = await c.query(
     `SELECT i.*, (SELECT max(pc.charged_on) FROM penalty_charges pc WHERE pc.installment_id = i.id AND pc.reversed_at IS NULL) AS through
@@ -112,8 +173,7 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
     [l.id, date]
   );
 
-  const glIncome = l.gl_penalty_inc || l.gl_interest_inc;
-  const charges = [];
+  const charges = [...deferred];
   // Like interest, a penalty is worked out unrounded and the fraction of a
   // minor unit it leaves is carried to the next charge on the loan, so a
   // month of daily penalties is the month's penalty (penalty_accrual_carry).
@@ -214,7 +274,7 @@ async function accrueAll(c, { asOf = null, createdBy = 'EOD' } = {}) {
      LEFT JOIN loan_installments i ON i.loan_id = l.id AND i.status NOT IN ('PAID', 'GRACE') AND i.due_date < $1::date
      WHERE l.status IN ('ACTIVE', 'IN_ARREARS', 'LOCKED') AND ${G.EXCLUDED_SQL('l')}
        AND ((${L.overrideSql('penaltyRate')} > 0 AND ${L.settingSql('penalty_basis')} <> 'NONE' AND i.id IS NOT NULL)
-            OR l.penalty_unapplied > 0)`,
+            OR l.penalty_unapplied > 0 OR l.penalty_deferred > 0)`,
     [date]
   );
   let charged = 0;

@@ -215,12 +215,13 @@ const repay = (id, amount, on, extra = {}) => call('POST', `/api/loans/${id}/rep
     const was = await sched(tm.id);
     r = await call('POST', `/api/loans/${tm.id}/terminate`, { valueDate: '2026-02-10', note: 'member left the area' });
     let ts = await sched(tm.id);
-    check('everything owed falls due on the termination date: the installments to come become one due that day', r.status === 200
-      && ts.length === 2 && S(ts[1].due_date) === '2026-02-10' && round(Number(ts[1].principal_due)) === round(Number(was[1].principal_due) + Number(was[2].principal_due)),
+    check('everything owed falls due on the termination date: the installments to come keep their principal and fall due that day', r.status === 200
+      && ts.length === 3 && S(ts[1].due_date) === '2026-02-10' && S(ts[2].due_date) === '2026-02-10'
+      && Number(ts[1].principal_due) === Number(was[1].principal_due) && Number(ts[2].principal_due) === Number(was[2].principal_due),
       `${r.status} ${r.reason} ${ts.map((i) => `${S(i.due_date)}:${i.principal_due}/${i.interest_due}`).join(' ')}`);
     const tl = await loanRow(tm.id);
-    check('with the interest earned to the day', round(Number(ts[0].interest_due) - Number(ts[0].interest_paid) + Number(ts[1].interest_due)) === round(bal(tl).interest),
-      `${ts[0].interest_due} ${ts[1].interest_due} ${bal(tl).interest}`);
+    check('with the interest earned to the day on the first of them', round(Number(ts[0].interest_due) - Number(ts[0].interest_paid) + Number(ts[1].interest_due) + Number(ts[2].interest_due)) === round(bal(tl).interest)
+      && Number(ts[2].interest_due) === 0, `${ts[0].interest_due} ${ts[1].interest_due} ${ts[2].interest_due} ${bal(tl).interest}`);
     const tv = (await call('GET', `/api/loans/${tm.id}`)).body;
     check('the loan keeps its state with the sub-state Terminated', tv.status === 'ACTIVE' && tv.sub_state === 'TERMINATED', `${tv.status} ${tv.sub_state}`);
     check('and a non-financial transaction', (await txs(tm.id)).some((t) => t.kind === 'LOAN_TERMINATED' && Number(t.amount) === 0));
@@ -228,7 +229,13 @@ const repay = (id, amount, on, extra = {}) => call('POST', `/api/loans/${id}/rep
     r = await call('POST', `/api/loans/${tm.id}/undo-terminate`, {});
     ts = await sched(tm.id);
     check('undo puts the schedule back as it was', r.status === 200 && ts.length === 3 && ts.map((i) => S(i.due_date)).join() === was.map((i) => S(i.due_date)).join()
+      && ts.map((i) => Number(i.interest_due)).join() === was.map((i) => Number(i.interest_due)).join()
       && !(await loanRow(tm.id)).terminated_on, `${r.status} ${r.reason} ${ts.map((i) => S(i.due_date))}`);
+    await call('POST', `/api/loans/${tm.id}/terminate`, { valueDate: '2026-02-10' });
+    const lt = (await txs(tm.id)).find((t) => t.kind === 'LOAN_TERMINATED' && !t.reversed_by);
+    r = await call('POST', `/api/loans/transactions/${lt.reference}/reversal`, { note: 'terminated in error' });
+    check('reversing the termination transaction undoes the termination', r.status === 201 && !(await loanRow(tm.id)).terminated_on
+      && (await sched(tm.id)).map((i) => S(i.due_date)).join() === was.map((i) => S(i.due_date)).join(), `${r.status} ${r.reason}`);
     await call('POST', `/api/loans/${tm.id}/terminate`, { valueDate: '2026-02-10' });
     await repay(tm.id, 100, '2026-02-12');
     r = await call('POST', `/api/loans/${tm.id}/undo-terminate`, {});

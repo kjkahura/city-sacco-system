@@ -603,20 +603,20 @@ async function collectionsView(result = null) {
 
 const RUNNING_EXTRAS = [['repay-deposit', 'Repay from deposit'], ['pay-off', 'Pay off'], ['terminate', 'Terminate'], ['undo-terminate', 'Undo terminate'],
   ['rate', 'Change interest rate'], ['reduce-balance', 'Reduce balance'], ['holiday-interest', 'Apply holiday interest'],
-  ['revolving-installment', 'Add installment'], ['guarantor', 'Add guarantor'], ['undo-restructure', 'Undo reschedule or top-up'], ['attach', 'Attach document']];
+  ['revolving-installment', 'Add installment'], ['guarantor', 'Add guarantor'], ['undo-restructure', 'Undo reschedule or top-up'], ['attach', 'Attach document'], ['name', 'Name']];
 const LOAN_ACTIONS = {
-  PARTIAL_APPLICATION: [['request-approval', 'Request approval'], ['amend', 'Amend terms'], ['disbursement-details', 'Disbursement details'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['guarantor', 'Add guarantor'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['revolving-installment', 'Add installment'], ['attach', 'Attach document'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
-  PENDING_APPROVAL: [['approve', 'Approve'], ['set-incomplete', 'Send back'], ['amend', 'Amend terms'], ['disbursement-details', 'Disbursement details'], ['planned-fee', 'Plan a fee'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['guarantor', 'Add guarantor'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['revolving-installment', 'Add installment'], ['attach', 'Attach document'], ['reject', 'Reject'], ['withdraw', 'Withdraw']],
-  APPROVED: [['disburse', 'Disburse'], ['disbursement-details', 'Disbursement details'], ['planned-fee', 'Plan a fee'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['guarantor', 'Add guarantor'], ['revolving-installment', 'Add installment'], ['attach', 'Attach document'], ['undo-approve', 'Undo approval'], ['withdraw', 'Withdraw'], ['notes', 'Notes']],
+  PARTIAL_APPLICATION: [['request-approval', 'Request approval'], ['amend', 'Amend terms'], ['disbursement-details', 'Disbursement details'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['guarantor', 'Add guarantor'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['revolving-installment', 'Add installment'], ['attach', 'Attach document'], ['reject', 'Reject'], ['withdraw', 'Withdraw'], ['delete', 'Delete']],
+  PENDING_APPROVAL: [['approve', 'Approve'], ['set-incomplete', 'Send back'], ['amend', 'Amend terms'], ['disbursement-details', 'Disbursement details'], ['planned-fee', 'Plan a fee'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['guarantor', 'Add guarantor'], ['collateral', 'Add collateral'], ['funding', 'Add funder'], ['tranches', 'Set tranches'], ['revolving-installment', 'Add installment'], ['attach', 'Attach document'], ['reject', 'Reject'], ['withdraw', 'Withdraw'], ['delete', 'Delete']],
+  APPROVED: [['disburse', 'Disburse'], ['disbursement-details', 'Disbursement details'], ['planned-fee', 'Plan a fee'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['product-schedule', 'Product schedule'], ['guarantor', 'Add guarantor'], ['revolving-installment', 'Add installment'], ['attach', 'Attach document'], ['undo-approve', 'Undo approval'], ['withdraw', 'Withdraw'], ['delete', 'Delete'], ['notes', 'Notes']],
   ACTIVE: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['postdate-all', 'Postdate installments'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['due-day', 'Change due day'], ['lock', 'Lock'], ['close', 'Close'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ...RUNNING_EXTRAS, ['notes', 'Notes']],
   IN_ARREARS: [['repay', 'Post repayment'], ['custom-repay', 'Custom repayment'], ['postdate', 'Postdated payment'], ['drawdown', 'Draw down'], ['collateral', 'Add collateral'], ['fee', 'Apply fee'], ['planned-fee', 'Plan a fee'], ['penalty-rate', 'Change penalty rate'], ['settlement', 'Settlement account'], ['edit-schedule', 'Edit schedule'], ['holiday', 'Payment holiday'], ['lock', 'Lock'], ['reschedule', 'Reschedule'], ['refinance', 'Top-up'], ['write-off', 'Write off'], ...RUNNING_EXTRAS, ['notes', 'Notes']],
-  LOCKED: [['unlock', 'Unlock'], ['fee', 'Apply fee'], ['pay-off', 'Pay off'], ['reduce-balance', 'Reduce balance'], ['penalty-rate', 'Change penalty rate'], ['reschedule', 'Reschedule'], ['write-off', 'Write off'], ['guarantor', 'Add guarantor'], ['undo-restructure', 'Undo reschedule or top-up'], ['attach', 'Attach document'], ['notes', 'Notes']],
-  CLOSED_WRITTEN_OFF: [['recovery', 'Post recovery'], ['guarantor-recovery', 'Recover from guarantor'], ['release-call', 'Release guarantor call'], ['attach', 'Attach document'], ['notes', 'Notes']],
-  CLOSED_REPAID: [['attach', 'Attach document']],
-  CLOSED_RESCHEDULED: [['attach', 'Attach document']],
-  CLOSED_REFINANCED: [['attach', 'Attach document']],
-  CLOSED_REJECTED: [['undo-reject', 'Undo rejection'], ['attach', 'Attach document']],
-  CLOSED_WITHDRAWN: [['undo-withdraw', 'Undo withdrawal'], ['attach', 'Attach document']],
+  LOCKED: [['unlock', 'Unlock'], ['lock-settings', 'Change lock'], ['repay', 'Post repayment'], ['fee', 'Apply fee'], ['pay-off', 'Pay off'], ['reduce-balance', 'Reduce balance'], ['penalty-rate', 'Change penalty rate'], ['reschedule', 'Reschedule'], ['write-off', 'Write off'], ['guarantor', 'Add guarantor'], ['undo-restructure', 'Undo reschedule or top-up'], ['attach', 'Attach document'], ['name', 'Name'], ['notes', 'Notes']],
+  CLOSED_WRITTEN_OFF: [['recovery', 'Post recovery'], ['guarantor-recovery', 'Recover from guarantor'], ['release-call', 'Release guarantor call'], ['attach', 'Attach document'], ['name', 'Name'], ['notes', 'Notes']],
+  CLOSED_REPAID: [['undo-close', 'Undo closure'], ['attach', 'Attach document'], ['name', 'Name'], ['notes', 'Notes']],
+  CLOSED_RESCHEDULED: [['attach', 'Attach document'], ['name', 'Name']],
+  CLOSED_REFINANCED: [['attach', 'Attach document'], ['name', 'Name']],
+  CLOSED_REJECTED: [['undo-reject', 'Undo rejection'], ['attach', 'Attach document'], ['delete', 'Delete']],
+  CLOSED_WITHDRAWN: [['undo-withdraw', 'Undo withdrawal'], ['attach', 'Attach document'], ['delete', 'Delete']],
 };
 const BAD_STATES = ['IN_ARREARS', 'LOCKED', 'CLOSED_WRITTEN_OFF'];
 
@@ -676,6 +676,7 @@ async function loanDetail(row) {
     if (a === 'holiday-interest') return Number(l.holiday_interest_pending) > 0;
     if (a === 'revolving-installment') return revolving;
     if (a === 'undo-restructure') return Boolean(l.parent_loan_id);
+    if (a === 'delete') return S.user?.role === 'TENANT_ADMIN';
     return true;
   });
   if (l.eod_excluded) actions.unshift(['eod-include', 'Include in the end of day']);
@@ -685,6 +686,10 @@ async function loanDetail(row) {
     <button class="secondary" id="back">← Loans</button>
     <h1>${esc(l.account_no)} <span class="badge ${BAD_STATES.includes(l.status) ? 'bad' : ''}">${esc(l.status)}</span>
       ${l.locked_reason ? `<span class="badge warn">locked: ${esc(l.locked_reason)}</span>` : ''}</h1>
+    ${l.name ? `<p id="loan-name"><strong>${esc(l.name)}</strong></p>` : ''}
+    ${l.status === 'LOCKED' ? `<p class="notice" id="lock-suspends">Locked: ${['interest', 'fees', 'penalties'].filter((x) => l[`lock_${x}`]).join(', ') || 'nothing'} suspended${
+    ['interest', 'fees', 'penalties'].some((x) => l[`lock_${x}`] === false) ? `; ${['interest', 'fees', 'penalties'].filter((x) => l[`lock_${x}`] === false).join(', ')} still running` : ''}.</p>` : ''}
+    ${Number(l.penalty_deferred) > 0 ? `<p class="notice" id="penalty-deferred">Penalty of ${money(l.penalty_deferred)} accrued while locked, applied on ${day(l.penalty_deferred_until)}.</p>` : ''}
     <p class="hint">${esc(l.first_name)} ${esc(l.last_name)} · ${esc(l.member_no)} · product ${esc(l.product_id)} · ${esc(l.product_type || '')}
       ${l.purpose ? ` · ${esc(l.purpose)}` : ''}${l.parent_account_no ? ` · replaces ${esc(l.parent_account_no)}` : ''}</p>
     ${l.eod_excluded ? `<p class="notice" id="eod-excluded">Left out of the end of day since ${day(l.eod_excluded.since)}: ${esc(l.eod_excluded.job)} failed on it (${esc(l.eod_excluded.error)}). Nothing is accrued or charged until it is included again.</p>` : ''}
@@ -945,9 +950,38 @@ async function loanDetail(row) {
   view().querySelectorAll('[data-action]').forEach((btn) => btn.addEventListener('click', async () => {
     const a = btn.dataset.action;
     let res;
-    const simple = ['approve', 'undo-approve', 'request-approval', 'unlock', 'undo-reject', 'undo-withdraw', 'close'];
+    const simple = ['approve', 'undo-approve', 'request-approval', 'undo-reject', 'undo-withdraw', 'close'];
     if (simple.includes(a)) res = await api('POST', `/api/loans/${id}/${a}`, {});
-    if (['reject', 'withdraw', 'set-incomplete', 'lock'].includes(a)) {
+    const SUSPEND = ['interest', 'fees', 'penalties'];
+    if (a === 'lock' || a === 'lock-settings') {
+      const d = await ask([
+        ...SUSPEND.map((x) => ({ label: `Suspend ${x}`, name: x, options: ['true', 'false'], value: a === 'lock' ? 'true' : String(l[`lock_${x}`] !== false) })),
+        opt({ label: 'Date (blank: today)', name: 'valueDate', type: 'date' }),
+        opt({ label: 'Note', name: 'note' }),
+      ], a === 'lock' ? `Lock ${l.account_no}` : `Change what the lock on ${l.account_no} suspends`);
+      if (!d) return;
+      const body = { suspend: Object.fromEntries(SUSPEND.map((x) => [x, d[x] === 'true'])), valueDate: d.valueDate || undefined, note: d.note || undefined };
+      res = await api('POST', `/api/loans/${id}/${a}`, body);
+    }
+    if (a === 'unlock' || a === 'undo-close') {
+      const d = await ask([opt({ label: 'Date (blank: today)', name: 'valueDate', type: 'date' }), opt({ label: 'Note', name: 'note' })],
+        a === 'unlock' ? `Unlock ${l.account_no}: penalties suspended while locked are not charged for those days` : `Undo the closure of ${l.account_no}`);
+      if (!d) return;
+      res = await api('POST', `/api/loans/${id}/${a}`, { valueDate: d.valueDate || undefined, note: d.note || undefined });
+    }
+    if (a === 'name') {
+      const d = await ask([opt({ label: 'Name', name: 'name', value: l.name || '' })], `Name of ${l.account_no}`);
+      if (!d) return;
+      res = await api('PATCH', `/api/loans/${id}`, { name: d.name || null });
+    }
+    if (a === 'delete') {
+      const d = await ask([opt({ label: 'Reason', name: 'note' }), { label: 'Type DELETE to confirm', name: 'confirm' }],
+        `Delete ${l.account_no}: only a loan nothing was posted to; it cannot be brought back`);
+      if (!d || d.confirm !== 'DELETE') return;
+      res = await api('DELETE', `/api/loans/${id}`, { note: d.note || undefined });
+      if (res.ok) { toast(`${l.account_no} deleted`); return loansView(); }
+    }
+    if (['reject', 'withdraw', 'set-incomplete'].includes(a)) {
       const d = await ask([{ label: 'Note', name: 'note', required: false }], `${btn.textContent} ${l.account_no}`);
       if (!d) return;
       res = await api('POST', `/api/loans/${id}/${a}`, { note: d.note });
@@ -957,12 +991,13 @@ async function loanDetail(row) {
         { label: 'Principal', name: 'principal', type: 'number', step: '0.01', value: l.principal },
         { label: 'Installments', name: 'termMonths', type: 'number', value: l.term_months },
         { label: 'Rate (product unit)', name: 'monthlyRate', type: 'number', step: '0.001', value: l.monthly_rate },
+        { label: 'Name', name: 'name', value: l.name || '', required: false },
         { label: 'Purpose', name: 'purpose', value: l.purpose || '', required: false },
         { label: 'Notes', name: 'notes', value: l.notes || '', required: false },
       ], 'Amend application');
       if (!d) return;
       res = await api('PATCH', `/api/loans/${id}`, {
-        principal: Number(d.principal), termMonths: Number(d.termMonths), monthlyRate: Number(d.monthlyRate), purpose: d.purpose, notes: d.notes });
+        principal: Number(d.principal), termMonths: Number(d.termMonths), monthlyRate: Number(d.monthlyRate), name: d.name || null, purpose: d.purpose, notes: d.notes });
     }
     if (a === 'notes') {
       const d = await ask([{ label: 'Notes', name: 'notes', value: l.notes || '' }], 'Notes');
@@ -1201,9 +1236,10 @@ async function loanDetail(row) {
       const d = await ask([
         { label: 'Reason', name: 'narration' },
         { label: 'Value date (blank: today)', name: 'valueDate', type: 'date', required: false },
+        { label: 'Collect securities first (take the guarantors\' pledges as a repayment)', name: 'collectSecurities', options: ['false', 'true'], value: 'false' },
       ], `Write off ${l.account_no}`);
       if (!d) return;
-      res = await api('POST', `/api/loans/${id}/write-off`, { reason: d.narration, valueDate: d.valueDate || undefined });
+      res = await api('POST', `/api/loans/${id}/write-off`, { reason: d.narration, valueDate: d.valueDate || undefined, collectSecurities: d.collectSecurities === 'true' });
       if (res.ok && !res.body.transaction) { toast('Write-off requested; another manager approves it'); return loanDetail(row); }
     }
     if (a === 'eod-include') res = await api('POST', `/api/loans/${id}/eod-include`, {});
@@ -1230,8 +1266,15 @@ async function loanDetail(row) {
       res = await api('POST', `/api/loans/${id}/repayments`, { amount: Number(d.amount), savingsAccountId: d.savingsAccountId.trim() });
     }
     if (a === 'pay-off') {
-      const q = await api('GET', `/api/loans/${id}/pay-off`);
+      const when = await ask([opt({ label: 'Pay-off date (blank: today; a date to come shows a preview only)', name: 'valueDate', type: 'date' })], `Pay off ${l.account_no}`);
+      if (!when) return;
+      const q = await api('GET', `/api/loans/${id}/pay-off${when.valueDate ? `?valueDate=${encodeURIComponent(when.valueDate)}` : ''}`);
       if (!q.ok) return toast(q.error, true);
+      if (when.valueDate && when.valueDate > new Date().toISOString().slice(0, 10)) {
+        await ask([{ label: 'Preview', name: 'preview', value: `On ${q.body.valueDate}: principal ${money(q.body.principal)}, interest ${money(q.body.interest)}, fees ${money(q.body.fees)}, penalties ${money(q.body.penalty)}, total ${money(q.body.total)}`, required: false }],
+          `Pay-off preview for ${l.account_no}`);
+        return;
+      }
       const d = await ask([
         { label: `Principal ${money(q.body.principal)} is paid in full. Interest owed ${money(q.body.interest)}: collect`, name: 'interest', type: 'number', step: '0.01', value: q.body.interest },
         { label: `Fees owed ${money(q.body.fees)}: collect`, name: 'fees', type: 'number', step: '0.01', value: q.body.fees },
@@ -1240,7 +1283,7 @@ async function loanDetail(row) {
         opt({ label: 'Note', name: 'note' }),
       ], `Pay off ${l.account_no} (what is not collected is written off)`);
       if (!d) return;
-      res = await api('POST', `/api/loans/${id}/pay-off`, { interest: Number(d.interest), fees: Number(d.fees), penalty: Number(d.penalty), channelId: d.channelId, note: d.note || undefined });
+      res = await api('POST', `/api/loans/${id}/pay-off`, { interest: Number(d.interest), fees: Number(d.fees), penalty: Number(d.penalty), channelId: d.channelId, note: d.note || undefined, valueDate: when.valueDate || undefined });
     }
     if (a === 'terminate') {
       const d = await ask([opt({ label: 'Termination date (blank: today)', name: 'valueDate', type: 'date' }), opt({ label: 'Note', name: 'note' })],
@@ -2342,12 +2385,15 @@ async function controlsView() {
         <dt>Maximum exposure per member</dt><dd>${esc(exposure)}</dd>
         <dt>One running loan per member</dt><dd>${yes(k.one_active_loan_per_member)}</dd>
         <dt>Days in arrears before a write-off</dt><dd>${Number(k.min_arrears_days_before_writeoff || 0)}</dd>
-        <dt>Days a closed application may be reopened</dt><dd>${k.max_days_undo_close === null ? 'no limit' : k.max_days_undo_close}</dd>
+        <dt>Days a closed loan or application may be reopened</dt><dd>${k.max_days_undo_close === null ? 'no limit' : k.max_days_undo_close}</dd>
         <dt>Two-man rule (the approver may not disburse)</dt><dd>${yes(k.two_man_rule)}</dd>
         <dt>A write-off needs a second person's approval</dt><dd>${yes(k.write_off_requires_approval)}</dd>
         <dt>Roles that may post repayments on a locked loan</dt><dd id="locked-roles">${(k.locked_posting_roles || []).length ? esc(k.locked_posting_roles.join(', ')) : 'none'}</dd>
         <dt>Roles that may post custom repayments</dt><dd id="custom-roles">${k.custom_allocation_roles ? esc(k.custom_allocation_roles.join(', ') || 'none') : 'any that posts repayments'}</dd>
         <dt>Roles that may set disbursement details</dt><dd id="disbursement-roles">${k.disbursement_conditions_roles ? esc(k.disbursement_conditions_roles.join(', ') || 'none') : 'any that edits applications'}</dd>
+        <dt>Roles that may pay off a loan</dt><dd id="pay-off-roles">${k.pay_off_roles ? esc(k.pay_off_roles.join(', ') || 'none') : 'any that posts repayments'}</dd>
+        <dt>Roles that may apply loan adjustments</dt><dd id="adjustment-roles">${k.loan_adjustment_roles ? esc(k.loan_adjustment_roles.join(', ') || 'none') : 'any that may reduce a balance'}</dd>
+        <dt>Roles that may collect securities</dt><dd id="collect-roles">${k.collect_securities_roles ? esc(k.collect_securities_roles.join(', ') || 'none') : 'any that may write off'}</dd>
       </dl>${admin ? '<button id="ctl-edit" class="secondary">Change controls</button>' : ''}`)}
       ${card('Run the controls now', `<p class="hint">The end of day runs these every night: it locks loans at their product's charge cap
         or after its days in arrears, and closes running loans that have owed nothing for the product's number of days.</p>
@@ -2385,13 +2431,17 @@ async function controlsView() {
         opt({ label: 'Exposure cap (amount)', name: 'maxExposureAmount', type: 'number', step: '0.01', value: k.max_exposure_amount ?? '' }),
         { label: 'One running loan per member', name: 'oneActiveLoanPerMember', options: ['false', 'true'], value: String(!!k.one_active_loan_per_member) },
         { label: 'Days in arrears before a write-off', name: 'minArrearsDaysBeforeWriteoff', type: 'number', value: k.min_arrears_days_before_writeoff ?? 0 },
-        opt({ label: 'Days a closed application may be reopened (blank: no limit)', name: 'maxDaysUndoClose', type: 'number', value: k.max_days_undo_close ?? '' }),
+        opt({ label: 'Days a closed loan or application may be reopened (blank: no limit)', name: 'maxDaysUndoClose', type: 'number', value: k.max_days_undo_close ?? '' }),
         { label: 'Two-man rule', name: 'twoManRule', options: ['false', 'true'], value: String(!!k.two_man_rule) },
         { label: 'A write-off needs a second person\'s approval', name: 'writeOffRequiresApproval', options: ['true', 'false'], value: String(!!k.write_off_requires_approval) },
         ...CONTROL_ROLES.map((r) => ({ label: `${r} may post on locked loans`, name: `lock_${r}`, options: ['false', 'true'], value: String((k.locked_posting_roles || []).includes(r)) })),
         opt({ label: 'Roles that may post custom repayments (comma separated; blank: any)', name: 'customRoles', value: (k.custom_allocation_roles || []).join(', ') }),
         opt({ label: 'Roles that may set disbursement details (comma separated; blank: any)', name: 'disbursementRoles', value: (k.disbursement_conditions_roles || []).join(', ') }),
+        opt({ label: 'Roles that may pay off a loan (comma separated; blank: any)', name: 'payOffRoles', value: (k.pay_off_roles || []).join(', ') }),
+        opt({ label: 'Roles that may apply loan adjustments (comma separated; blank: any)', name: 'adjustmentRoles', value: (k.loan_adjustment_roles || []).join(', ') }),
+        opt({ label: 'Roles that may collect securities (comma separated; blank: any)', name: 'collectRoles', value: (k.collect_securities_roles || []).join(', ') }),
       ], 'Lending controls');
+      const roles = (v) => (v ? v.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean) : null);
       if (!d) return;
       const num = (v) => (v === '' || v === undefined ? null : Number(v));
       const res = await api('PATCH', '/api/loans/controls', {
@@ -2402,6 +2452,7 @@ async function controlsView() {
         lockedPostingRoles: CONTROL_ROLES.filter((r) => d[`lock_${r}`] === 'true'),
         customAllocationRoles: d.customRoles ? d.customRoles.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean) : null,
         disbursementConditionsRoles: d.disbursementRoles ? d.disbursementRoles.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean) : null,
+        payOffRoles: roles(d.payOffRoles), loanAdjustmentRoles: roles(d.adjustmentRoles), collectSecuritiesRoles: roles(d.collectRoles),
       });
       toast(res.ok ? 'Controls saved' : res.error, !res.ok);
       if (res.ok) controlsView();

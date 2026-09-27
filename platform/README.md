@@ -740,8 +740,10 @@ limits:
   they did.
 
 A LOCKED loan applies no interest, fees or penalties while it is locked,
-but keeps accruing them. They are applied at the first run after it is
-unlocked, whatever the lock was for (the reference platform). It takes repayments only from
+unless the lock leaves some of them running (see "Closing and exiting a
+loan account"). Interest the lock held back is brought to date at the first
+run after the unlock; penalties for the locked days are not charged, as
+The reference platform's Locking page describes. It takes repayments only from
 users whose role the tenant lists in `lockedPostingRoles`
 (`PATCH /api/loans/controls`; none by default), and stays locked after
 them. A lock for the charge cap lifts only once the charges are paid or the
@@ -1377,12 +1379,13 @@ After the reference platform's "Working with loan accounts" pages.
   payment is one repayment through the channel, and the loan closes as
   CLOSED_REPAID. A revolving loan is closed by it too.
 - **Terminate.** `POST /api/loans/:id/terminate` makes everything owed fall
-  due on the date: the installments not yet due become one installment due
-  that day, carrying all the principal still to come, the interest earned
-  to the day and the fees already applied to them. The loan keeps its
-  state and every running-loan rule; `sub_state` shows TERMINATED.
-  `POST /api/loans/:id/undo-terminate` puts the schedule back while no
-  repayment has been posted since. The reference platform offers this for dynamic loans; here
+  due on the date: every installment not yet due stays, with its
+  principal, and falls due that day. The interest earned to the day goes on
+  the first of them, and of their fees only those already applied stay
+  owed. The loan keeps its state and every running-loan rule; `sub_state`
+  shows TERMINATED. `POST /api/loans/:id/undo-terminate`, or reversing the
+  LOAN_TERMINATED transaction, puts the schedule back while no repayment
+  has been posted since. The reference platform offers this for dynamic loans; here
   it is open to fixed-term, dynamic and interest-free loans, not revolving,
   tranched or funded ones.
 - **Disbursement details.** An application may carry an anticipated
@@ -1497,6 +1500,65 @@ After the reference platform's "Working with loan accounts" pages.
 - **Not built from these pages:** solidarity group loans (there are no
   groups), lines of credit (the reference platform's credit arrangements), and the
   secondary marketplace for funded loans, which the reference platform no longer offers.
+
+### Closing and exiting a loan account
+
+After the reference platform's "Closing and exiting a loan account" pages.
+
+- **A lock that suspends only some activities.** `POST /api/loans/:id/lock`
+  takes `suspend: { interest, fees, penalties }` (each true unless given
+  false) and a `valueDate`. Interest keeps accruing on a lock that leaves
+  it running, and the end of day's fee job applies late and payment-due
+  fees on one that leaves fees running. `POST /api/loans/:id/lock-settings`
+  changes what the lock suspends while the loan stays locked. Lock, change
+  and unlock are each a non-financial transaction on the loan
+  (LOAN_LOCKED, LOAN_LOCK_CHANGED, LOAN_UNLOCKED).
+- **Penalties after an unlock.** On an overdue basis the days in arrears
+  while locked are forfeited. On the outstanding principal, what accrued
+  while locked is applied on the first installment due date after the
+  unlock, against that installment. Penalties run again from the unlock
+  date. The same happens when a lock change resumes penalties.
+- **Delete.** `DELETE /api/loans/:id` (tenant admin) removes a loan created
+  by mistake: an application, or one rejected or withdrawn, that was never
+  disbursed and has no transaction (reversed ones included), no attachment,
+  no loan referring to it and no funding moved. Its guarantors, collateral
+  and other rows go with it; the audit log keeps a copy (LOAN_DELETED).
+- **Name.** A loan takes a `name` on application and `PATCH /api/loans/:id`
+  changes it in any state.
+- **Undo closure.** `POST /api/loans/:id/undo-close` reopens a loan closed
+  as CLOSED_REPAID, by a final repayment or a pay-off, within the tenant's
+  `maxDaysUndoClose`. It returns to ACTIVE, or IN_ARREARS if it was in
+  arrears; a lock it was closed from does not come back. The guarantors and
+  collateral the closure released are pledged again (kept in
+  `loan_accounts.closure`) and fee income recognised at closing is deferred
+  again. The reopened loan owes nothing until the repayment that closed it
+  is reversed. The undo is a non-financial transaction
+  (LOAN_CLOSURE_UNDONE).
+- **Collect securities.** A write-off request with `collectSecurities:
+  true` takes each guarantor's pledge from their deposit accounts, oldest
+  first, as a repayment of the loan before the rest is written off. It runs
+  when the write-off is executed, at approval or at once where approval is
+  off. Each amount is a withdrawal from the deposit account and a
+  repayment through the `transfer` channel, linked to each other. The
+  deposits need not be withdrawable; the guarantor's other pledges and
+  each account's minimum balance are left alone. A pledge taken in full is
+  RECOVERED; one taken in part is called by the write-off for the rest.
+  If the securities pay the loan off, nothing is written off.
+- **Permissions.** Three role lists on the lending controls, each NULL by
+  default (any role the route allows): `payOffRoles` for a pay-off,
+  `loanAdjustmentRoles` for writing charges off in a pay-off and for Reduce
+  Balance, and `collectSecuritiesRoles` for asking or approving a write-off
+  that collects securities.
+- **Pay-off preview for a date to come.** `GET /api/loans/:id/pay-off?valueDate=`
+  with a future date runs the end of day's interest, arrears and penalty
+  steps to that date in a savepoint that is rolled back, so the figures
+  include what will have accrued by then. A pay-off itself cannot be dated
+  in the future.
+- **Terminate** keeps the installment count (above, under "Working with
+  loan accounts").
+- **Unchanged:** interest a lock suspended is brought to date after the
+  unlock, as before, because on a fixed schedule the installment interest
+  is contractual.
 
 ## Shares and dividends
 
@@ -1684,9 +1746,13 @@ a charge cap is charged no further than the cap allows.
 - **Non-working days.** Where the product excludes them
   (`arrearsNonWorkingDays` EXCLUDE), weekends and holidays count neither
   towards the tolerance nor towards the penalty.
-- **Locked loans.** A locked loan, whatever the lock was for, keeps
-  accruing and is charged the whole of it at the first run after it is
-  unlocked.
+- **Locked loans.** A locked loan, whatever the lock was for, accrues
+  penalties (shown as `penalty_unapplied`) and is not charged them. At the
+  unlock, on the overdue bases, the locked days are forfeited (a zero
+  charge marks them covered). On OUTSTANDING_PRINCIPAL, what accrued while
+  locked is applied on the first installment due date after the unlock
+  (`penalty_deferred`, `penalty_deferred_until`). A lock that leaves
+  penalties running charges them as usual.
 - **Changing the rate.** `POST /api/loans/:id/penalty-rate` (the reference platform's Edit
   Penalty Rate) changes a running loan's rate within the product band.
   Every change is kept (`GET /api/loans/:id/penalty-rate-changes`).

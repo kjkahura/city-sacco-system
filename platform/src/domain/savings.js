@@ -79,10 +79,11 @@ const accrues = (a) => PA.accrues(a);
  * approved loans not yet disbursed.
  */
 async function pledgedAmount(c, memberId) {
-  // A called pledge (the loan was written off) stays committed for what has
-  // not yet been recovered from it.
+  // A pledge stays committed for what has not yet been taken from it: a
+  // called one (the loan was written off) or one collected in part before
+  // the write-off.
   const { rows: [r] } = await c.query(
-    `SELECT COALESCE(SUM(CASE WHEN status = 'PLEDGED' THEN pledged_amount ELSE pledged_amount - recovered END), 0) AS total
+    `SELECT COALESCE(SUM(pledged_amount - recovered), 0) AS total
      FROM loan_guarantors WHERE member_id = $1 AND status IN ('PLEDGED', 'CALLED')`,
     [memberId]
   );
@@ -246,14 +247,18 @@ async function deposit(c, accountId, { amount, channelId = 'cash', valueDate, na
   });
 }
 
-async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null }) {
+async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null, offsetPledge = null }) {
   const a = await lock(c, accountId);
   if (a.status !== 'ACTIVE') throw err(`ACCOUNT_NOT_ACTIVE: ${a.status}`, 409);
-  if (!a.withdrawable) throw err('PRODUCT_NOT_WITHDRAWABLE', 409);
+  // `offsetPledge`: a guarantor's pledge being collected (./loanClosures
+  // collectSecurities). The deposits it was pledged from need not be
+  // withdrawable, and that pledge does not hold them back.
+  const offsetting = offsetPledge !== null && offsetPledge !== undefined;
+  if (!a.withdrawable && !offsetting) throw err('PRODUCT_NOT_WITHDRAWABLE', 409);
   const amt = round2(amount);
   if (!(amt > 0)) throw err('INVALID_AMOUNT');
 
-  const pledged = await pledgedAmount(c, a.member_id);
+  const pledged = round2(await pledgedAmount(c, a.member_id) - (offsetting ? Number(offsetPledge) : 0));
   const available = availableOf(a, pledged);
   if (amt > available) {
     throw err(`INSUFFICIENT_AVAILABLE_BALANCE: available ${available}, requested ${amt}` +

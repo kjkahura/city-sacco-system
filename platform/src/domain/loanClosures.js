@@ -7,13 +7,12 @@ const ledger = require('./ledger');
 const types = require('./productTypes');
 const workflow = require('./workflow');
 const controls = require('./controls');
-const eligibility = require('./eligibility');
-const securities = require('./securities');
 const fees = require('./fees');
 const penalties = require('./penalties');
 const funding = require('./funding');
 const writeOffs = require('./writeOffs');
 const loans = require('./loans');
+const transfers = require('./loanTransfers');
 const { err, round2 } = acct;
 const { ymd, isoDate } = S;
 
@@ -32,10 +31,10 @@ const { ymd, isoDate } = S;
  * close itself when paid, is closed by the pay-off.
  *
  * TERMINATE (Close > Terminate): everything owed falls due on the
- * termination date. The installments not yet due are replaced by one due
- * that day carrying all the principal still to come, the interest earned to
- * the day and the fees already applied to them; installments already due
- * stay as they are. The loan keeps its state and every running-loan rule
+ * termination date. Every installment not yet due stays, with its
+ * principal, and falls due that day (the reference platform); the interest earned to the day
+ * goes on the first of them, and of their fees only those already applied
+ * stay owed. Installments already due stay as they are. The loan keeps its state and every running-loan rule
  * (repayments, arrears from the next day, penalties, interest where it
  * accrues on the balance): Terminated is recorded as a sub-state
  * (terminated_on). Undo Terminate puts the schedule back as it was, while
@@ -87,6 +86,14 @@ async function payOffQuote(c, loanId, { valueDate = null } = {}) {
   try {
     let l = await ledger.lock(c, loanId);
     if (!RUNNING.includes(l.status)) throw err(`LOAN_NOT_RUNNING: ${l.status}`, 409);
+    // A date to come (the reference platform's pay-off preview for a future date): the
+    // arrears and penalties the end of day would add by then, as well.
+    if (date > today()) {
+      await loans.accrueInterest(c, l.id, { valueDate: date, createdBy: 'QUOTE' });
+      await workflow.markArrears(c, { asOf: date, loanId: l.id });
+      await penalties.accrueForLoan(c, l.id, { asOf: date, createdBy: 'QUOTE' });
+      l = await ledger.lock(c, l.id);
+    }
     l = await bringToDate(c, l, date, 'QUOTE');
     const o = owed(l);
     return {
@@ -109,6 +116,7 @@ async function payOff(c, loanId, { channelId = 'cash', valueDate = null, interes
   note = null, createdBy, user = null } = {}) {
   let l = await ledger.lock(c, loanId);
   if (!RUNNING.includes(l.status)) throw err(`LOAN_NOT_RUNNING: ${l.status}`, 409);
+  await controls.assertMayPayOff(c, { user });
   if (l.status === 'LOCKED') await controls.assertMayPostOnLocked(c, { user });
   const date = valueDate ? ymd(valueDate) : today();
   if (date > today()) throw err('PAY_OFF_CANNOT_BE_DATED_IN_THE_FUTURE', 400);
@@ -132,6 +140,8 @@ async function payOff(c, loanId, { channelId = 'cash', valueDate = null, interes
 
   let woTx = null;
   if (writtenOff.interest > 0 || writtenOff.fees > 0 || writtenOff.penalty > 0) {
+    // Writing charges off is a loan adjustment (the reference platform's permission).
+    await controls.assertMayAdjust(c, { user });
     woTx = await writeOffs.writeOffCharges(c, l.id, { ...writtenOff, kind: 'PAY_OFF', reason: note || 'pay-off', valueDate: date, createdBy });
     l = await ledger.lock(c, l.id);
   }
@@ -155,8 +165,7 @@ async function payOff(c, loanId, { channelId = 'cash', valueDate = null, interes
   if (RUNNING.includes(l.status) && ledger.balances(l).total <= 0) {
     await c.query("UPDATE loan_accounts SET status = 'CLOSED_REPAID', closed_on = $2::date, locked_at = NULL, locked_reason = NULL, updated_at = now() WHERE id = $1", [l.id, date]);
     await workflow.history(c, l.id, { from: l.status, to: 'CLOSED_REPAID', action: 'PAID_OFF', actor: createdBy, note });
-    await eligibility.releaseGuarantors(c, l.id);
-    await securities.onClose(c, l.id);
+    await workflow.closeSecurities(c, l.id, { how: 'PAY_OFF' });
   } else if (RUNNING.includes(l.status)) {
     throw err(`PAY_OFF_LEFT_A_BALANCE: ${ledger.balances(l).total}`, 500);
   }
@@ -197,47 +206,50 @@ async function terminate(c, loanId, { valueDate = null, note = null, createdBy }
   if (!future.length) throw err('NOTHING_LEFT_TO_FALL_DUE: every installment is already due or paid', 409);
   const kept = rows.filter((i) => !future.includes(i));
   const b = ledger.balances(l);
-  const sum = (xs, k) => round2(xs.reduce((a, x) => a + Number(x[k]), 0));
   const keptInterestUnpaid = round2(kept.reduce((a, x) => a + Math.max(0, Number(x.interest_due) - Number(x.interest_paid)), 0));
+  // Interest earned to the day and not yet on an installment already due
+  // goes on the first installment brought forward; the others keep only
+  // the interest already paid on them.
+  const earned = Math.max(0, round2(b.interest - keptInterestUnpaid));
   // Of the fees on the installments to come, only those already applied
-  // (a fee row on them); a dynamic loan's payment-due fee not yet applied
-  // is not owed and does not come forward.
+  // (a fee row on them) stay owed; a dynamic loan's payment-due fee not yet
+  // applied is not owed and falls away.
   const ids = future.map((i) => i.id);
   const { rows: links } = await c.query('SELECT id, installment_id, amount, paid FROM loan_fees WHERE installment_id = ANY($1::uuid[])', [ids]);
-  const appliedFees = round2(links.reduce((a, f) => a + Number(f.amount), 0));
-  const feesDue = round2(Math.min(sum(future, 'fee_due'), appliedFees));
-  const line = {
-    principal_due: sum(future, 'principal_due'),
-    principal_paid: sum(future, 'principal_paid'),
-    interest_paid: sum(future, 'interest_paid'),
-    interest_due: round2(sum(future, 'interest_paid') + Math.max(0, b.interest - keptInterestUnpaid)),
-    fee_paid: sum(future, 'fee_paid'),
-    fee_due: round2(Math.max(feesDue, sum(future, 'fee_paid'))),
-  };
-  const number = Math.min(...future.map((i) => i.number));
-  const settledNow = line.principal_paid >= line.principal_due && line.interest_paid >= line.interest_due && line.fee_paid >= line.fee_due;
+  const applied = (id) => round2(links.filter((f) => f.installment_id === id).reduce((a, f) => a + Number(f.amount), 0));
 
-  // Keep what is replaced, then replace it.
+  // Every installment to come stays, with its principal, and falls due on
+  // the termination date (the reference platform). Keep what they were, then change them.
   const snapshot = { date, installments: future, feeLinks: links.map((f) => ({ id: f.id, installmentId: f.installment_id })), termMonths: l.term_months };
-  await c.query('UPDATE loan_fees SET installment_id = NULL WHERE installment_id = ANY($1::uuid[])', [ids]);
-  await c.query('DELETE FROM loan_installments WHERE id = ANY($1::uuid[])', [ids]);
-  const { rows: [inst] } = await c.query(
-    `INSERT INTO loan_installments (loan_id, number, due_date, nominal_due, principal_due, interest_due, fee_due, principal_paid, interest_paid, fee_paid, status)
-     VALUES ($1,$2,$3::date,$3::date,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-    [l.id, number, date, line.principal_due, line.interest_due, line.fee_due, line.principal_paid, line.interest_paid, line.fee_paid,
-      settledNow ? 'PAID' : (line.principal_paid > 0 || line.interest_paid > 0 ? 'PARTIALLY_PAID' : 'PENDING')]);
-  await c.query('UPDATE loan_fees SET installment_id = $1 WHERE id = ANY($2::uuid[])', [inst.id, links.map((f) => f.id)]);
+  const first = Math.min(...future.map((i) => i.number));
+  const changed = [];
+  let totals = { principal: 0, interest: 0, fees: 0 };
+  for (const i of future) {
+    const interestDue = round2(Number(i.interest_paid) + (i.number === first ? earned : 0));
+    const feeDue = round2(Math.max(Number(i.fee_paid), Math.min(Number(i.fee_due), applied(i.id))));
+    const paidUp = Number(i.principal_paid) >= Number(i.principal_due) && Number(i.interest_paid) >= interestDue && Number(i.fee_paid) >= feeDue;
+    const started = Number(i.principal_paid) > 0 || Number(i.interest_paid) > 0 || Number(i.fee_paid) > 0;
+    const { rows: [u] } = await c.query(
+      `UPDATE loan_installments SET due_date = $2::date, nominal_due = $2::date, interest_due = $3, fee_due = $4, status = $5,
+         holiday_interest = NULL WHERE id = $1 RETURNING *`,
+      [i.id, date, interestDue, feeDue, paidUp ? 'PAID' : started ? 'PARTIALLY_PAID' : 'PENDING']);
+    changed.push(u);
+    totals = {
+      principal: round2(totals.principal + Number(u.principal_due) - Number(u.principal_paid)),
+      interest: round2(totals.interest + Number(u.interest_due) - Number(u.interest_paid)),
+      fees: round2(totals.fees + Number(u.fee_due) - Number(u.fee_paid)),
+    };
+  }
   await c.query(
     'UPDATE loan_accounts SET terminated_on = $2::date, terminated_by = $3, termination = $4, updated_at = now() WHERE id = $1',
     [l.id, date, createdBy || 'SYSTEM', JSON.stringify(snapshot)]);
   await workflow.history(c, l.id, { from: l.status, to: l.status, action: 'TERMINATE', actor: createdBy, note: note || `all owed due ${date}` });
   const tx = await savings.record(c, {
     reference: savings.ref('LT'), kind: 'LOAN_TERMINATED', memberId: l.member_id, loanAccountId: l.id, amount: 0, valueDate: date,
-    allocation: { principal: round2(line.principal_due - line.principal_paid), interest: round2(line.interest_due - line.interest_paid),
-      fees: round2(line.fee_due - line.fee_paid), installment: number, replaced: future.length },
+    allocation: { ...totals, installments: changed.map((u) => u.number) },
     narration: note, createdBy,
   });
-  return { loanId: l.id, accountNo: l.account_no, terminatedOn: date, installment: inst, transaction: tx };
+  return { loanId: l.id, accountNo: l.account_no, terminatedOn: date, installments: changed, transaction: tx };
 }
 
 /**
@@ -258,36 +270,18 @@ async function undoTerminate(c, loanId, { note = null, createdBy } = {}) {
   if (later) throw err(`REPAYMENT_SINCE_THE_TERMINATION: reverse ${later.reference} first`, 409);
   if (!['ACTIVE', 'IN_ARREARS', 'LOCKED'].includes(l.status)) throw err(`LOAN_NOT_RUNNING: ${l.status}`, 409);
 
-  const { rows: [inst] } = await c.query(
-    'SELECT * FROM loan_installments WHERE loan_id = $1 AND due_date = $2::date ORDER BY number DESC LIMIT 1', [l.id, date]);
-  // Penalties on the termination's installment are taken back (unpaid ones)
-  // and detached from it; they are worked out again below.
+  // Penalties charged since on the installments brought forward are taken
+  // back (unpaid ones); they are worked out again below.
   await penalties.reverseAfter(c, l.id, date, { createdBy, reason: 'termination undone' });
-  if (inst) {
-    await c.query('UPDATE penalty_charges SET installment_id = NULL WHERE installment_id = $1', [inst.id]);
-    const { rows: stray } = await c.query('SELECT id FROM loan_fees WHERE installment_id = $1', [inst.id]);
-    await c.query('UPDATE loan_fees SET installment_id = NULL WHERE installment_id = $1', [inst.id]);
-    await c.query('DELETE FROM loan_installments WHERE id = $1', [inst.id]);
-    snap.stray = stray.map((f) => f.id);
-  }
+  const before = new Set((snap.feeLinks || []).map((f) => f.id));
   for (const i of snap.installments || []) {
+    // A fee applied to it since the termination (a late fee) stays on it.
+    const { rows: since } = await c.query('SELECT id, amount FROM loan_fees WHERE installment_id = $1', [i.id]);
+    const added = round2(since.filter((f) => !before.has(f.id)).reduce((a, f) => a + Number(f.amount), 0));
     await c.query(
-      `INSERT INTO loan_installments (id, loan_id, number, due_date, nominal_due, principal_due, interest_due, fee_due,
-         principal_paid, interest_paid, fee_paid, status, payment_holiday, holiday_kind, holiday_interest)
-       VALUES ($1,$2,$3,$4::date,$5::date,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-      [i.id, l.id, i.number, ymd(i.due_date), ymd(i.nominal_due), i.principal_due, i.interest_due, i.fee_due,
-        i.principal_paid, i.interest_paid, i.fee_paid, i.status, Boolean(i.payment_holiday), i.holiday_kind || null, i.holiday_interest || null]);
-  }
-  for (const f of snap.feeLinks || []) await c.query('UPDATE loan_fees SET installment_id = $1 WHERE id = $2', [f.installmentId, f.id]);
-  // Fees applied to the termination's installment since (a late fee) go on
-  // the first installment put back.
-  if ((snap.stray || []).length && (snap.installments || []).length) {
-    const first = snap.installments.reduce((a, x) => (x.number < a.number ? x : a));
-    const { rows: moved } = await c.query(
-      `UPDATE loan_fees SET installment_id = $1 WHERE id = ANY($2::uuid[]) AND NOT (id = ANY($3::uuid[])) RETURNING amount`,
-      [first.id, snap.stray, (snap.feeLinks || []).map((f) => f.id)]);
-    const add = round2(moved.reduce((a, f) => a + Number(f.amount), 0));
-    if (add > 0) await c.query('UPDATE loan_installments SET fee_due = fee_due + $1 WHERE id = $2', [add, first.id]);
+      `UPDATE loan_installments SET due_date = $2::date, nominal_due = $3::date, interest_due = $4, fee_due = $5, status = $6,
+         holiday_interest = $7 WHERE id = $1`,
+      [i.id, ymd(i.due_date), ymd(i.nominal_due || i.due_date), i.interest_due, round2(Number(i.fee_due) + added), i.status, i.holiday_interest ?? null]);
   }
   await c.query('UPDATE loan_accounts SET terminated_on = NULL, terminated_by = NULL, termination = NULL, updated_at = now() WHERE id = $1', [l.id]);
   let fresh = await ledger.lock(c, l.id);
@@ -305,4 +299,87 @@ async function undoTerminate(c, loanId, { note = null, createdBy } = {}) {
   return { loanId: fresh.id, accountNo: fresh.account_no, status: fresh.status, restored: (snap.installments || []).length };
 }
 
-module.exports = { payOffQuote, payOff, terminate, undoTerminate };
+// --------------------------------------------------------------------------
+// Collect securities, on a write-off
+// --------------------------------------------------------------------------
+
+/**
+ * Take what each guarantor pledged from their deposits and repay the loan
+ * with it (the reference platform's Collect Securities), before the rest is written off.
+ * Each pledge is taken, up to what the loan still owes, from the
+ * guarantor's deposit accounts in the order they were opened, beyond their
+ * other pledges and each account's minimum balance; the deposits need not
+ * be withdrawable. Each amount is a withdrawal from the deposit account and
+ * a repayment of the loan through the transfer channel, linked to each
+ * other, and counts as recovered on the pledge: a pledge taken in full is
+ * RECOVERED, one taken in part stays pledged for the rest and is called by
+ * the write-off. What the deposits cannot cover is left to the write-off.
+ */
+async function collectSecurities(c, loanId, { valueDate = null, createdBy, user = null } = {}) {
+  const l = await ledger.lock(c, loanId);
+  if (!RUNNING.includes(l.status)) throw err(`LOAN_NOT_RUNNING: ${l.status}`, 409);
+  const date = valueDate ? ymd(valueDate) : today();
+  const { rows: pledges } = await c.query(
+    "SELECT * FROM loan_guarantors WHERE loan_id = $1 AND status = 'PLEDGED' AND pledged_amount > recovered ORDER BY created_at, id", [l.id]);
+  const out = [];
+  for (const g of pledges) {
+    let owedNow = ledger.balances(await ledger.lock(c, l.id)).total;
+    if (!(owedNow > 0)) break;
+    let pledgeLeft = round2(Number(g.pledged_amount) - Number(g.recovered));
+    let want = round2(Math.min(pledgeLeft, owedNow));
+    const { rows: accounts } = await c.query(
+      `SELECT a.id FROM savings_accounts a JOIN savings_products p ON p.id = a.product_id
+       WHERE a.member_id = $1 AND a.status = 'ACTIVE' AND NOT p.is_funding_account ORDER BY a.opened_on, a.id`, [g.member_id]);
+    let taken = 0;
+    const moves = [];
+    for (const r of accounts) {
+      if (!(want > 0)) break;
+      const a = await savings.lock(c, r.id);
+      const others = round2(await savings.pledgedAmount(c, g.member_id) - pledgeLeft);
+      const take = round2(Math.min(want, savings.availableOf(a, Math.max(0, others))));
+      if (!(take > 0)) continue;
+      const savingsTx = await savings.withdraw(c, a.id, {
+        amount: take, channelId: transfers.CHANNEL, valueDate: date, createdBy, offsetPledge: pledgeLeft,
+        narration: `Security collected for loan ${l.account_no}`,
+      });
+      const loanTx = await loans.repay(c, l.id, {
+        amount: take, channelId: transfers.CHANNEL, valueDate: date, createdBy, user, internal: true,
+        narration: `Security collected from guarantor account ${a.account_no}`,
+      });
+      await c.query(
+        `UPDATE loan_guarantors SET recovered = recovered + $1,
+           status = CASE WHEN recovered + $1 >= pledged_amount THEN 'RECOVERED' ELSE status END WHERE id = $2`, [take, g.id]);
+      await c.query('UPDATE transactions SET allocation = allocation || $2::jsonb WHERE id = $1',
+        [loanTx.id, JSON.stringify({ securityCollected: { guarantorId: g.id, guarantorMemberId: g.member_id } })]);
+      const linked = await transfers.link(c, loanTx, savingsTx);
+      moves.push({ savingsAccountId: a.id, accountNo: a.account_no, amount: take,
+        loanReference: linked.loanTransaction.reference, savingsReference: linked.savingsTransaction.reference });
+      taken = round2(taken + take);
+      want = round2(want - take);
+      pledgeLeft = round2(pledgeLeft - take);
+      const now = await ledger.lock(c, l.id);
+      if (!RUNNING.includes(now.status)) break;
+    }
+    out.push({ guarantorId: g.id, memberId: g.member_id, pledged: Number(g.pledged_amount), collected: taken, moves });
+    if (!RUNNING.includes((await ledger.lock(c, l.id)).status)) break;
+  }
+  return { loanId: l.id, valueDate: date, total: round2(out.reduce((a, x) => a + x.collected, 0)), guarantors: out };
+}
+
+/** A write-off request, with the securities collected first when asked (and permitted). */
+async function requestWriteOff(c, loanId, { collectSecurities: collect = false, user = null, ...rest } = {}) {
+  const yes = collect === true || collect === 'true';
+  if (yes) await controls.assertMayCollectSecurities(c, { user });
+  return writeOffs.requestWriteOff(c, loanId, { ...rest, user, collectSecurities: yes, beforeWriteOff: collectSecurities });
+}
+
+/** Approve the pending write-off; the securities are collected first if the request asked for it. */
+async function approveWriteOff(c, loanId, { note = null, createdBy, user = null } = {}) {
+  const { rows: [r] } = await c.query(
+    `SELECT r.collect_securities FROM loan_write_off_requests r JOIN loan_accounts l ON l.id = r.loan_id
+     WHERE (l.id::text = $1 OR l.account_no = $1) AND r.status = 'PENDING'`, [String(loanId)]);
+  if (r?.collect_securities) await controls.assertMayCollectSecurities(c, { user });
+  return writeOffs.decide(c, loanId, { approve: true, note, createdBy, user, beforeWriteOff: collectSecurities });
+}
+
+module.exports = { payOffQuote, payOff, terminate, undoTerminate, collectSecurities, requestWriteOff, approveWriteOff };

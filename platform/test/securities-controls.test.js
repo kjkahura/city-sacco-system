@@ -197,7 +197,7 @@ const accrue = (id, on) => T((c) => L.accrueInterest(c, id, { valueDate: on, cre
     r = await call('PATCH', `/api/loans/controls/users/${admin.id}`, { approvalLimit: null });
     check('a blank limit lifts it', r.status === 200 && r.body.approvalLimit === null);
 
-    section('a cap-locked loan accrues and is charged when unlocked');
+    section('a cap-locked loan is not charged for its locked days, and runs again once unlocked');
     const { m: hm } = await member();
     const hl = await disbursed(hm.id, 'CAPH', 3000, 3, '2026-01-01');
     await T((c) => L.markArrears(c, { asOf: '2026-02-04' }));
@@ -209,11 +209,11 @@ const accrue = (id, on) => T((c) => L.accrueInterest(c, id, { valueDate: on, cre
     check('locked: nothing applied, the four days accrued', ch.length === 0 && Number((await loanRow(hl.id)).penalty_unapplied) === 40,
       String((await loanRow(hl.id)).penalty_unapplied));
     r = await call('POST', `/api/loans/${hl.id}/repayments`, { amount: 30, channelId: 'cash', valueDate: '2026-02-08' });
-    const un = await call('POST', `/api/loans/${hl.id}/unlock`, {});
+    const un = await call('POST', `/api/loans/${hl.id}/unlock`, { valueDate: '2026-02-09' });
     check('with the charges paid the cap lock lifts and the count starts again', r.status === 201 && un.status === 200
       && Number((await loanRow(hl.id)).charges_since_arrears) === 0, `${r.status} ${un.status} ${un.reason}`);
     ch = await T((c) => P.accrueForLoan(c, hl.id, { asOf: '2026-02-09' }));
-    check('the next run charges the days accrued while locked, up to the cap', ch.length === 1 && ch[0].days_charged === 5 && Number(ch[0].amount) === 30,
+    check('the locked days are forfeited and the next run charges from the unlock', ch.length === 1 && ch[0].days_charged === 1 && Number(ch[0].amount) === 10,
       JSON.stringify(ch.map((x) => [x.amount, x.days_charged])));
 
     // ----------------------------------------------------------------------

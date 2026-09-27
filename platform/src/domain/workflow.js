@@ -29,6 +29,8 @@ const eligibility = require('./eligibility');
 const tranches = require('./tranches');
 const funding = require('./funding');
 const securities = require('./securities');
+const savings = require('./savings');
+const FA = require('./feeAmortization');
 const {
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMaySetDisbursementConditions,
 } = require('./controls');
@@ -50,6 +52,8 @@ const ACTIONS = {
   // A revolving loan does not close itself when its balance reaches zero,
   // since the member may draw again; closing it is a decision.
   CLOSE:            { from: ['ACTIVE'], to: 'CLOSED_REPAID' },
+  // The reference platform's Undo Closure, within the tenant's undo window.
+  UNDO_CLOSE:       { from: ['CLOSED_REPAID'], to: 'PREVIOUS' },
 };
 // Names the first API used; kept so nothing that learned them breaks.
 const ALIASES = { SUBMIT: 'REQUEST_APPROVAL', UNAPPROVE: 'UNDO_APPROVE' };
@@ -111,7 +115,94 @@ async function assertTopUpStands(c, application) {
   return { old, settlement: s };
 }
 
-async function transition(c, loanId, action, { createdBy, note = null, user = null, reason = null } = {}) {
+// --------------------------------------------------------------------------
+// Locks: what they suspend, and penalties when penalties resume
+// --------------------------------------------------------------------------
+
+/** What a lock suspends: all three unless told otherwise. */
+function suspension(given) {
+  const s = given && typeof given === 'object' ? given : {};
+  const flag = (v) => (v === undefined || v === null ? true : v === true || v === 'true');
+  return { interest: flag(s.interest), fees: flag(s.fees), penalties: flag(s.penalties) };
+}
+
+/** A non-financial transaction for a lock event, listed with the loan's transactions. */
+function lockRecord(c, l, kind, allocation, { createdBy, note, date }) {
+  return savings.record(c, {
+    reference: savings.ref('LK'), kind, memberId: l.member_id, loanAccountId: l.id, amount: 0, valueDate: date,
+    allocation, narration: note, createdBy,
+  });
+}
+
+/**
+ * Penalties resume on `date` after a lock that suspended them (the reference platform's
+ * Locking and Unlocking Loans):
+ *   - on an overdue balance (principal, principal and interest, all): the
+ *     locked days are not charged; penalties are worked out again from the
+ *     date. Each overdue installment is marked as charged to the day before,
+ *     at nothing (a forfeited charge), and what accrued while locked goes.
+ *   - on the outstanding principal: what accrued while locked is kept and
+ *     applied on the first installment due date from `date`
+ *     (penalty_deferred), and those days are marked the same way so they are
+ *     not charged twice.
+ */
+async function resumePenalties(c, l, date) {
+  const basis = l.penalty_basis;
+  if (!basis || basis === 'NONE') return { forfeited: 0, deferred: 0 };
+  const dayBefore = new Date(new Date(`${date}T00:00:00Z`).getTime() - 86400000).toISOString().slice(0, 10);
+  const { rows } = await c.query(
+    `INSERT INTO penalty_charges (loan_id, installment_id, charged_on, days_late, basis_amount, rate, amount, period_from, days_charged, forfeited)
+     SELECT i.loan_id, i.id, $2::date, GREATEST(0, $2::date - i.due_date), 0, 0, 0,
+            COALESCE((SELECT max(pc.charged_on) FROM penalty_charges pc WHERE pc.installment_id = i.id AND pc.reversed_at IS NULL), i.due_date),
+            GREATEST(0, $2::date - COALESCE((SELECT max(pc.charged_on) FROM penalty_charges pc WHERE pc.installment_id = i.id AND pc.reversed_at IS NULL), i.due_date)),
+            true
+     FROM loan_installments i
+     WHERE i.loan_id = $1 AND i.status NOT IN ('PAID', 'GRACE') AND i.due_date < $2::date
+       AND COALESCE((SELECT max(pc.charged_on) FROM penalty_charges pc WHERE pc.installment_id = i.id AND pc.reversed_at IS NULL), i.due_date) < $2::date
+     ON CONFLICT (installment_id, charged_on) WHERE waived_at IS NULL AND reversed_at IS NULL DO NOTHING
+     RETURNING id`, [l.id, dayBefore]);
+  const accrued = round2(Number(l.penalty_unapplied || 0));
+  if (basis === 'OUTSTANDING_PRINCIPAL' && accrued > 0) {
+    const { rows: [n] } = await c.query(
+      `SELECT min(due_date)::text AS d FROM loan_installments WHERE loan_id = $1 AND due_date >= $2::date AND status NOT IN ('PAID', 'GRACE')`, [l.id, date]);
+    await c.query(
+      `UPDATE loan_accounts SET penalty_deferred = penalty_deferred + $2, penalty_deferred_until = COALESCE($3::date, $4::date), penalty_unapplied = 0 WHERE id = $1`,
+      [l.id, accrued, n?.d || null, date]);
+    return { forfeited: rows.length, deferred: accrued };
+  }
+  await c.query('UPDATE loan_accounts SET penalty_unapplied = 0 WHERE id = $1', [l.id]);
+  return { forfeited: rows.length, deferred: 0, notCharged: accrued };
+}
+
+/**
+ * Change what a lock suspends while the loan stays locked (the reference platform: the Lock
+ * Account dialog again). Resuming penalties this way works as an unlock
+ * does for them.
+ */
+async function changeLock(c, loanId, { suspend, note = null, valueDate = null, createdBy } = {}) {
+  const l = await ledger.lock(c, loanId);
+  if (l.status !== 'LOCKED') throw err(`LOAN_NOT_LOCKED: ${l.status}`, 409);
+  const s = suspension(suspend);
+  const date = valueDate ? ymd(valueDate) : new Date().toISOString().slice(0, 10);
+  const before = { interest: l.lock_interest, fees: l.lock_fees, penalties: l.lock_penalties };
+  let penalties = null;
+  if (l.lock_penalties && !s.penalties) penalties = await resumePenalties(c, l, date);
+  await c.query('UPDATE loan_accounts SET lock_interest = $2, lock_fees = $3, lock_penalties = $4, updated_at = now() WHERE id = $1',
+    [l.id, s.interest, s.fees, s.penalties]);
+  await history(c, l.id, { from: 'LOCKED', to: 'LOCKED', action: 'LOCK_CHANGED', actor: createdBy, note });
+  const tx = await lockRecord(c, l, 'LOAN_LOCK_CHANGED', { before, suspend: s, ...(penalties ? { penalties } : {}) }, { createdBy, note, date });
+  return { loanId: l.id, suspend: s, transaction: tx };
+}
+
+/** Guarantors and collateral released as a loan closes, remembered so Undo Closure puts them back. */
+async function closeSecurities(c, loanId, { how = 'CLOSE' } = {}) {
+  const guarantors = await eligibility.releaseGuarantors(c, loanId);
+  const collateral = await securities.onClose(c, loanId);
+  await c.query('UPDATE loan_accounts SET closure = $2 WHERE id = $1',
+    [loanId, JSON.stringify({ how, guarantors: guarantors || [], collateral: collateral || [] })]);
+}
+
+async function transition(c, loanId, action, { createdBy, note = null, user = null, reason = null, suspend = null, valueDate = null } = {}) {
   const name = ALIASES[String(action).toUpperCase()] || String(action).toUpperCase();
   const t = ACTIONS[name];
   if (!t) throw err(`UNSUPPORTED_ACTION: ${action}`);
@@ -149,13 +240,21 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
       }
       to = l.status_before_lock || to || 'ACTIVE';
       set('locked_at', null); set('locked_reason', null); set('status_before_lock', null);
+      set('lock_interest', true); set('lock_fees', true); set('lock_penalties', true);
       // A cap lock lifted: the count of charges since arrears starts again,
       // so what accrued while locked is applied up to the cap (the reference platform applies
       // the charges a locked loan accrued once it is unlocked).
       if (l.locked_reason === 'CAPPED') set('charges_since_arrears', 0);
     }
     if (!to) throw err('NO_PREVIOUS_STATE_RECORDED', 409);
-    if (['UNDO_REJECT', 'UNDO_WITHDRAW'].includes(name)) {
+    if (name === 'UNDO_CLOSE') {
+      // A loan closed with a balance still owed never gets here (it is not
+      // CLOSED_REPAID); the one closed by a final repayment reopens with
+      // nothing owed. A lock it was paid off from does not come back.
+      if (to === 'LOCKED' || !['ACTIVE', 'IN_ARREARS'].includes(to)) to = l.arrears_since ? 'IN_ARREARS' : 'ACTIVE';
+      set('closure', null);
+    }
+    if (['UNDO_REJECT', 'UNDO_WITHDRAW', 'UNDO_CLOSE'].includes(name)) {
       const ctl = await controls(c);
       if (ctl.max_days_undo_close !== null && l.closed_on) {
         const days = Math.floor((Date.now() - new Date(l.closed_on).getTime()) / 86400000);
@@ -169,13 +268,17 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     if (b.total > 0) throw err(`LOAN_HAS_A_BALANCE: ${b.total}`, 409);
     if (Number(l.credit_balance) > 0) throw err(`LOAN_HAS_A_CREDIT_BALANCE: ${l.credit_balance}; it must be drawn or refunded first`, 409);
     set('closed_on', new Date().toISOString().slice(0, 10));
-    await eligibility.releaseGuarantors(c, l.id);
-    await securities.onClose(c, l.id);
+    await closeSecurities(c, l.id, { how: 'CLOSE' });
   }
+  const s = suspension(suspend);
   if (name === 'LOCK') {
     set('locked_at', new Date()); set('locked_reason', reason && ['MANUAL', 'CAPPED', 'ARREARS'].includes(reason) ? reason : 'MANUAL');
     set('status_before_lock', l.status);
+    set('lock_interest', s.interest); set('lock_fees', s.fees); set('lock_penalties', s.penalties);
   }
+  // Penalties suspended by the lock resume from the unlock date (the reference platform).
+  const eventDate = valueDate ? ymd(valueDate) : new Date().toISOString().slice(0, 10);
+  const resumed = name === 'UNLOCK' && l.lock_penalties ? await resumePenalties(c, l, eventDate) : null;
   if (['REJECT', 'WITHDRAW'].includes(name)) set('closed_on', new Date().toISOString().slice(0, 10));
 
   set('status', to);
@@ -184,6 +287,17 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     `UPDATE loan_accounts SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length} RETURNING *`, vals);
 
   if (['CLOSED_REJECTED', 'CLOSED_WITHDRAWN'].includes(to)) await eligibility.releaseGuarantors(c, l.id);
+  if (name === 'LOCK') await lockRecord(c, l, 'LOAN_LOCKED', { reason: reason || 'MANUAL', suspend: s }, { createdBy, note, date: eventDate });
+  if (name === 'UNLOCK') await lockRecord(c, l, 'LOAN_UNLOCKED', { reason: l.locked_reason, ...(resumed ? { penalties: resumed } : {}) }, { createdBy, note, date: eventDate });
+  if (name === 'UNDO_CLOSE') {
+    // What the closure released comes back, and so does deferred fee income
+    // recognised at closing.
+    const cl = l.closure || {};
+    if ((cl.guarantors || []).length) await c.query("UPDATE loan_guarantors SET status = 'PLEDGED' WHERE id = ANY($1::uuid[]) AND status = 'RELEASED'", [cl.guarantors]);
+    if ((cl.collateral || []).length) await c.query("UPDATE loan_collateral SET status = 'PLEDGED', released_at = NULL WHERE id = ANY($1::uuid[]) AND status = 'RELEASED'", [cl.collateral]);
+    await FA.undoClosure(c, l.id, { createdBy, narration: 'Closure undone' });
+    await lockRecord(c, l, 'LOAN_CLOSURE_UNDONE', { closedOn: l.closed_on, restored: cl }, { createdBy, note, date: eventDate });
+  }
   if (name === 'APPROVE') await freezeSettings(c, l.id);
   if (name === 'UNDO_APPROVE') await thawSettings(c, l.id);
   await history(c, l.id, { from: l.status, to, action: name, actor: createdBy, note });
@@ -272,12 +386,47 @@ async function arrearsIndicators(c, l, asOf = null) {
 // custom fields); to change the terms, undo the approval first.
 const CORE_FIELDS = { principal: 'principal', termMonths: 'term_months' };
 const TERM_FIELDS = [...Object.keys(CORE_FIELDS), ...Object.keys(ledger.OVERRIDES)];
-const NARRATIVE_FIELDS = ['purpose', 'notes'];
+const NARRATIVE_FIELDS = ['purpose', 'notes', 'name'];
 const COLUMN = {
   ...CORE_FIELDS,
   ...Object.fromEntries(Object.entries(ledger.OVERRIDES).map(([k, o]) => [k, o.column])),
-  purpose: 'purpose', notes: 'notes',
+  purpose: 'purpose', notes: 'notes', name: 'name',
 };
+
+// --------------------------------------------------------------------------
+// Deleting a loan created by mistake
+// --------------------------------------------------------------------------
+
+const DELETABLE = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'CLOSED_REJECTED', 'CLOSED_WITHDRAWN'];
+
+/**
+ * Delete a loan created by mistake (the reference platform's Delete Loan Account): only one
+ * never disbursed, with no transaction at all (a reversed one counts), no
+ * attachment, and no loan that refinances or replaces it. What hangs off
+ * it (its history, guarantors, collateral, rate periods, disbursement
+ * details, installments added by hand) goes with it; the audit log keeps
+ * the loan as it was.
+ */
+async function deleteLoan(c, loanId, { note = null, createdBy } = {}) {
+  const l = await ledger.lock(c, loanId);
+  if (!DELETABLE.includes(l.status)) throw err(`LOAN_NOT_DELETABLE_IN_STATE_${l.status}: reject, withdraw or close it instead`, 409);
+  if (Number(l.principal_disbursed) > 0 || l.disbursed_on) throw err('LOAN_WAS_DISBURSED', 409);
+  const { rows: [t] } = await c.query('SELECT count(*)::int AS n FROM transactions WHERE loan_account_id = $1', [l.id]);
+  if (t.n > 0) throw err(`LOAN_HAS_TRANSACTIONS: ${t.n}, reversed ones included`, 409);
+  const { rows: [a] } = await c.query('SELECT count(*)::int AS n FROM loan_attachments WHERE loan_id = $1', [l.id]);
+  if (a.n > 0) throw err(`LOAN_HAS_ATTACHMENTS: ${a.n}`, 409);
+  const { rows: [k] } = await c.query('SELECT account_no FROM loan_accounts WHERE refinance_of = $1 OR parent_loan_id = $1 LIMIT 1', [l.id]);
+  if (k) throw err(`ANOTHER_LOAN_REFERS_TO_IT: ${k.account_no}`, 409);
+  const { rows: [f] } = await c.query("SELECT count(*)::int AS n FROM loan_funding_sources WHERE loan_id = $1 AND status <> 'PLEDGED'", [l.id]);
+  if (f.n > 0) throw err('LOAN_HAS_FUNDING_MOVED', 409);
+  const snapshot = { ...l };
+  // Everything that hangs off a loan is keyed to it ON DELETE CASCADE.
+  await c.query('DELETE FROM loan_accounts WHERE id = $1', [l.id]);
+  await c.query(
+    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_DELETED','loan_account',$2,$3,$4)`,
+    [createdBy || 'SYSTEM', l.id, JSON.stringify(snapshot), JSON.stringify({ note })]);
+  return { deleted: l.id, accountNo: l.account_no };
+}
 
 // --------------------------------------------------------------------------
 // Disbursement details
@@ -571,7 +720,8 @@ async function capAllows(c, l, amount) {
 
 async function lockForCap(c, l) {
   await c.query(
-    `UPDATE loan_accounts SET status = 'LOCKED', locked_at = now(), locked_reason = 'CAPPED', status_before_lock = status, updated_at = now()
+    `UPDATE loan_accounts SET status = 'LOCKED', locked_at = now(), locked_reason = 'CAPPED', status_before_lock = status,
+       lock_interest = true, lock_fees = true, lock_penalties = true, updated_at = now()
      WHERE id = $1 AND status IN ('ACTIVE','IN_ARREARS')`, [l.id]);
   await history(c, l.id, { from: l.status, to: 'LOCKED', action: 'LOCK', actor: 'EOD', note: `charge cap ${l.charge_cap_percent}% of ${l.charge_cap_base} reached` });
   l.status = 'LOCKED';
@@ -602,8 +752,7 @@ async function enforceControls(c, { asOf = null, loanId = null } = {}) {
     const since = Math.floor((new Date(`${date}T00:00:00Z`) - new Date(`${ymd(r.last)}T00:00:00Z`)) / 86400000);
     if (since < Number(r.days)) continue;
     await c.query("UPDATE loan_accounts SET status = 'CLOSED_REPAID', closed_on = $2::date, updated_at = now() WHERE id = $1", [r.id, date]);
-    await eligibility.releaseGuarantors(c, r.id);
-    await securities.onClose(c, r.id);
+    await closeSecurities(c, r.id, { how: 'AUTO_CLOSE' });
     await history(c, r.id, { from: 'ACTIVE', to: 'CLOSED_REPAID', action: 'AUTO_CLOSE', actor: 'EOD', note: `nothing owed for ${since} day(s)` });
     out.closed += 1;
   }
@@ -620,7 +769,8 @@ async function enforceControls(c, { asOf = null, loanId = null } = {}) {
     if (limit !== null && charges >= limit) { await lockForCap(c, l); out.capped += 1; return; }
     if (l.auto_lock_arrears_days !== null && daysInArrears(l, date) >= Number(l.auto_lock_arrears_days)) {
       await c.query(
-        `UPDATE loan_accounts SET status = 'LOCKED', locked_at = now(), locked_reason = 'ARREARS', status_before_lock = status, updated_at = now() WHERE id = $1`, [l.id]);
+        `UPDATE loan_accounts SET status = 'LOCKED', locked_at = now(), locked_reason = 'ARREARS', status_before_lock = status,
+           lock_interest = true, lock_fees = true, lock_penalties = true, updated_at = now() WHERE id = $1`, [l.id]);
       await history(c, l.id, { from: 'IN_ARREARS', to: 'LOCKED', action: 'LOCK', actor: 'EOD', note: `${l.auto_lock_arrears_days} days in arrears` });
       out.lockedForArrears += 1;
     }
@@ -632,6 +782,7 @@ module.exports = {
   assertTopUpStands,
   ACTIONS, ALIASES, OPEN, RUNNING, transition, history, historyOf, previousState,
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMayWriteOff,
+  changeLock, resumePenalties, suspension, closeSecurities, deleteLoan,
   amend, TERM_FIELDS, NARRATIVE_FIELDS, setDisbursementDetails, disbursementDetails, DISBURSEMENT_FIELDS,
   markArrears, refreshArrears, daysInArrears, toleranceDeadline, freezeSettings, thawSettings, arrearsIndicators,
   capLimit, capAllows, enforceControls,

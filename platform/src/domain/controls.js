@@ -30,9 +30,11 @@ const CONTROL_FIELDS = {
   lockedPostingRoles: 'locked_posting_roles',
   customAllocationRoles: 'custom_allocation_roles',
   disbursementConditionsRoles: 'disbursement_conditions_roles',
+  payOffRoles: 'pay_off_roles', loanAdjustmentRoles: 'loan_adjustment_roles', collectSecuritiesRoles: 'collect_securities_roles',
 };
 // Role lists where NULL means "any role that may do the underlying action".
-const NULLABLE_ROLE_LISTS = ['custom_allocation_roles', 'disbursement_conditions_roles'];
+const NULLABLE_ROLE_LISTS = ['custom_allocation_roles', 'disbursement_conditions_roles', 'pay_off_roles', 'loan_adjustment_roles',
+  'collect_securities_roles'];
 const ROLES = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'];
 
 async function updateControls(c, patch, { actor } = {}) {
@@ -156,6 +158,24 @@ async function assertMayAllocateCustom(c, { user = null } = {}) {
   }
 }
 
+/**
+ * A permission kept as a role list on the controls: the roles listed, or
+ * any role the route allows when the list is NULL.
+ */
+async function assertRole(c, col, user, code) {
+  const roles = (await controls(c))[col];
+  if (roles === null || roles === undefined) return;
+  if (!user || !roles.includes(user.role)) {
+    throw err(`${code}_NOT_PERMITTED: needs one of ${roles.length ? roles.join(', ') : 'the roles the tenant allows (none set)'}`, 403);
+  }
+}
+/** The reference platform's Pay Off Loan Accounts permission. */
+const assertMayPayOff = (c, { user = null } = {}) => assertRole(c, 'pay_off_roles', user, 'PAY_OFF');
+/** The reference platform's Apply Loan Adjustments: writing charges off in a pay-off, reducing a balance. */
+const assertMayAdjust = (c, { user = null } = {}) => assertRole(c, 'loan_adjustment_roles', user, 'LOAN_ADJUSTMENT');
+/** The reference platform's Collect Securities, on a write-off. */
+const assertMayCollectSecurities = (c, { user = null } = {}) => assertRole(c, 'collect_securities_roles', user, 'COLLECT_SECURITIES');
+
 /** The reference platform's Set Disbursement Conditions permission, the same way. */
 async function assertMaySetDisbursementConditions(c, { user = null } = {}) {
   const roles = (await controls(c)).disbursement_conditions_roles;
@@ -206,6 +226,6 @@ async function setUserLimits(c, tenantId, userId, { approvalLimit, disbursementL
 
 module.exports = {
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMayPostOnLocked, CONTROL_FIELDS,
-  assertMayAllocateCustom, assertMaySetDisbursementConditions,
+  assertMayAllocateCustom, assertMaySetDisbursementConditions, assertMayPayOff, assertMayAdjust, assertMayCollectSecurities,
   staffLimits, setUserLimits,
 };

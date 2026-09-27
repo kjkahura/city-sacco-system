@@ -55,7 +55,10 @@ const types = require('./productTypes');
 async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   const l = await lock(c, loanId);
   const type = types.forLoan(l);
-  if (!['ACTIVE', 'IN_ARREARS'].includes(l.status)) return null;
+  // A lock that leaves interest running (the reference platform's Lock Account options)
+  // keeps accruing it.
+  const running = ['ACTIVE', 'IN_ARREARS'].includes(l.status) || (l.status === 'LOCKED' && l.lock_interest === false);
+  if (!running) return null;
   if (l.interest_accrual === 'NONE' || !type.accrues(l)) return null;
 
   let date = valueDate ? ymd(valueDate) : isoDate(new Date());
@@ -106,7 +109,7 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
 
   // A loan in arrears under a charge cap may not be charged past it; what
   // the cap refuses is not carried forward either.
-  if (amt > 0 && l.status === 'IN_ARREARS') {
+  if (amt > 0 && ['IN_ARREARS', 'LOCKED'].includes(l.status)) {
     const allowed = await workflow.capAllows(c, l, amt);
     if (allowed < amt) carry = 0;
     amt = allowed;
@@ -131,7 +134,7 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   await c.query(
     `UPDATE loan_accounts SET interest_accrued = interest_accrued + $1, accrued_through = $2::date,
        tax_charged = tax_charged + $4, interest_accrual_carry = $5,
-       charges_since_arrears = charges_since_arrears + CASE WHEN status = 'IN_ARREARS' THEN $1 ELSE 0 END,
+       charges_since_arrears = charges_since_arrears + CASE WHEN status IN ('IN_ARREARS', 'LOCKED') THEN $1 ELSE 0 END,
        interest_from_arrears_accrued = interest_from_arrears_accrued + $6,
        updated_at = now() WHERE id = $3`,
     [tx.gross, through, l.id, tx.tax, carry, fromArrears]
