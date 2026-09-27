@@ -5,6 +5,7 @@ const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const { apiError, badRequest, notFound } = require('../lib/http');
 const PA = require('../domain/productAccounting');
+const B = require('../domain/branches');
 
 /**
  * Loan products, the whole configuration surface, after the reference platform's loan
@@ -138,6 +139,7 @@ const num = (v) => (v === null || v === undefined ? null : Number(v));
 
 const publicProduct = (p) => ({
   id: p.id, name: p.name, description: p.description, category: p.category,
+  availableBranches: p.branch_ids || null, taxSourceId: p.tax_source_id || null,
   productType: p.product_type, method: p.method,
   interestType: p.interest_type, simpleBase: p.simple_base, interestPosting: p.interest_posting,
   rateFrequency: p.rate_frequency, monthlyRate: Number(p.monthly_rate), rate: Number(p.monthly_rate),
@@ -410,7 +412,27 @@ function toColumns(body) {
   for (const [k, v] of Object.entries(body || {})) {
     if (FIELDS[k]) cols[FIELDS[k]] = v;
   }
+  if (body && body.availableBranches !== undefined) cols.branch_ids = body.availableBranches;
+  if (body && body.taxSourceId !== undefined) cols.tax_source_id = body.taxSourceId;
   return cols;
+}
+
+/**
+ * Branch availability (branch IDs or codes; null or empty for every
+ * branch) and the VAT source, whose value becomes the product's tax rate
+ * (./rates updateTaxRates).
+ */
+async function resolveExtras(c, cols) {
+  if (cols.branch_ids !== undefined) cols.branch_ids = await B.resolveBranchIds(c, cols.branch_ids);
+  if (cols.tax_source_id !== undefined) {
+    if (cols.tax_source_id) {
+      const { rows: [src] } = await c.query('SELECT * FROM index_rate_sources WHERE id = $1', [String(cols.tax_source_id).toUpperCase()]);
+      if (!src || src.kind !== 'VAT') throw Object.assign(new Error(`TAX_SOURCE_MUST_BE_A_VAT_RATE_SOURCE: ${cols.tax_source_id}`), { status: 400 });
+      cols.tax_source_id = src.id;
+      const { rows: [r] } = await c.query('SELECT rate FROM index_rates WHERE source_id = $1 AND valid_from <= current_date ORDER BY valid_from DESC LIMIT 1', [src.id]);
+      if (r) cols.tax_rate_percent = Number(r.rate);
+    } else cols.tax_source_id = null;
+  }
 }
 
 async function loansUnder(c, productId) {
@@ -450,6 +472,7 @@ router.post('/', requireAuth(...ADMIN), async (req, res, next) => {
     const cols = toColumns(req.body);
     if (cols.product_type === 'INTEREST_FREE' && cols.monthly_rate === undefined) cols.monthly_rate = 0;
     const out = await withTenant(req.tenant.schema_name, async (c) => {
+      await resolveExtras(c, cols);
       const problems = await validate(c, cols, { creating: true });
       if (problems.length) return { problems };
       const keys = Object.keys(cols);
@@ -482,6 +505,7 @@ router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
         'SELECT * FROM loan_products WHERE id = $1 FOR UPDATE', [req.params.id]);
       if (!before) return { missing: true };
       const loans = await loansUnder(c, before.id);
+      await resolveExtras(c, cols);
       const problems = await validate(c, cols, { creating: false, before, loans });
       if (problems.length) return { problems };
       const keys = Object.keys(cols);

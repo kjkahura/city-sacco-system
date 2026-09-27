@@ -128,6 +128,15 @@ const branchRoutes = require('./routes/branches');
 tenantApi.use('/branches', branchRoutes.branches);
 tenantApi.use('/accounting', branchRoutes.accounting);
 tenantApi.use('/deposit-products', require('./routes/depositProducts'));
+const org = require('./routes/organization');
+tenantApi.use('/organization', org.organization);
+tenantApi.use('/centres', org.centres);
+tenantApi.use('/holidays', org.holidays);
+tenantApi.use('/transaction-channels', org.channels);
+tenantApi.use('/id-templates', org.idTemplates);
+tenantApi.use('/currencies', org.currencies);
+tenantApi.use('/custom-fields', org.customFields);
+tenantApi.use('/documents', org.documents);
 
 const shares = require('./routes/shares');
 tenantApi.use('/shares', shares);

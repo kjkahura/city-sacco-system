@@ -5,6 +5,8 @@ const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const { apiError, badRequest, notFound } = require('../lib/http');
 const PA = require('../domain/productAccounting');
+const B = require('../domain/branches');
+const CF = require('../domain/customFields');
 const AC = require('../domain/accountingChanges');
 
 /**
@@ -48,6 +50,7 @@ const num = (v) => (v === null || v === undefined ? null : Number(v));
 
 const publicProduct = (p) => ({
   id: p.id, name: p.name, description: p.description, isActive: p.is_active, isFundingAccount: p.is_funding_account,
+  availableBranches: p.branch_ids || null, withholdingSourceId: p.withholding_source_id || null, customFields: p.custom_fields || {},
   withdrawable: p.withdrawable, minBalance: Number(p.min_balance),
   interest: {
     paidIntoAccount: p.interest_paid_into_account, annualRate: Number(p.annual_rate), calcBalance: p.interest_calc_balance,
@@ -75,6 +78,8 @@ const publicProduct = (p) => ({
 function toColumns(body) {
   const cols = {};
   for (const [k, v] of Object.entries(body || {})) if (FIELDS[k]) cols[FIELDS[k]] = v;
+  if (body && body.availableBranches !== undefined) cols.branch_ids = body.availableBranches;
+  if (body && body.withholdingSourceId !== undefined) cols.withholding_source_id = body.withholdingSourceId;
   return cols;
 }
 
@@ -151,12 +156,36 @@ router.get('/:id', requireAuth(...READER), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/**
+ * Branch availability (IDs or codes; null for every branch), the
+ * withholding tax source (its value becomes the product's percentage, ./rates
+ * updateTaxRates) and the product's custom field values.
+ */
+async function resolveExtras(c, cols, body, { user, before = null } = {}) {
+  if (cols.branch_ids !== undefined) cols.branch_ids = await B.resolveBranchIds(c, cols.branch_ids);
+  if (cols.withholding_source_id !== undefined) {
+    if (cols.withholding_source_id) {
+      const { rows: [src] } = await c.query('SELECT * FROM index_rate_sources WHERE id = $1', [String(cols.withholding_source_id).toUpperCase()]);
+      if (!src || src.kind !== 'WITHHOLDING') throw Object.assign(new Error(`WITHHOLDING_SOURCE_MUST_BE_A_WITHHOLDING_RATE_SOURCE: ${cols.withholding_source_id}`), { status: 400 });
+      cols.withholding_source_id = src.id;
+      const { rows: [r] } = await c.query('SELECT rate FROM index_rates WHERE source_id = $1 AND valid_from <= current_date ORDER BY valid_from DESC LIMIT 1', [src.id]);
+      if (r) cols.withholding_tax_percent = Number(r.rate);
+    } else cols.withholding_source_id = null;
+  }
+  if (!before || (body && body.customFields !== undefined)) {
+    cols.custom_fields = JSON.stringify(await CF.prepare(c, 'SAVINGS_PRODUCT', {
+      patch: (body && body.customFields) || {}, previous: before ? before.custom_fields : {}, user, recordId: before ? before.id : null, creating: !before,
+    }));
+  }
+}
+
 router.post('/', requireAuth(...ADMIN), async (req, res, next) => {
   try {
     const id = String(req.body?.id || '').trim().toUpperCase();
     if (!/^[A-Z0-9_]{2,16}$/.test(id)) return badRequest(res, 'PRODUCT_ID_MUST_BE_2_TO_16_UPPERCASE_ALPHANUMERIC');
     const cols = toColumns(req.body);
     const out = await withTenant(req.tenant.schema_name, async (c) => {
+      await resolveExtras(c, cols, req.body, { user: req.auth });
       const problems = await validate(c, cols);
       if (problems.length) return { problems };
       const keys = Object.keys(cols);
@@ -178,11 +207,12 @@ router.post('/', requireAuth(...ADMIN), async (req, res, next) => {
 router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
   try {
     const cols = toColumns(req.body);
-    if (!Object.keys(cols).length) return badRequest(res, 'NO_UPDATABLE_FIELDS');
+    if (!Object.keys(cols).length && req.body?.customFields === undefined) return badRequest(res, 'NO_UPDATABLE_FIELDS');
     const out = await withTenant(req.tenant.schema_name, async (c) => {
       const { rows: [before] } = await c.query('SELECT * FROM savings_products WHERE id = $1 FOR UPDATE', [req.params.id]);
       if (!before) return { missing: true };
       const accounts = await accountsUnder(c, before.id);
+      await resolveExtras(c, cols, req.body, { user: req.auth, before });
       const problems = await validate(c, cols, { before, accounts });
       if (problems.length) return { problems };
       const keys = Object.keys(cols);

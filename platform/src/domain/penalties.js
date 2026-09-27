@@ -57,12 +57,12 @@ function daysLate(dueDate, asOf) {
  * Late days after `from` up to and including `to`: every day, or only the
  * working days when non-working days are excluded.
  */
-async function countDays(c, from, to, excludeNonWorking) {
+async function countDays(c, from, to, excludeNonWorking, branchId = null) {
   if (!(to > from)) return 0;
   if (!excludeNonWorking) return daysLate(from, to);
   const { rows: [r] } = await c.query(
     `SELECT count(*)::int AS n FROM generate_series($1::date + 1, $2::date, interval '1 day') AS d
-     WHERE EXTRACT(dow FROM d) NOT IN (0, 6) AND NOT EXISTS (SELECT 1 FROM holidays h WHERE h.holiday_date = d::date)`, [from, to]);
+     WHERE NOT is_closed_day(d::date, $3::uuid)`, [from, to, branchId]);
   return r.n;
 }
 
@@ -197,9 +197,9 @@ async function accrueForLoan(c, loanId, { asOf = null, createdBy = 'EOD' } = {})
       case 'OUTSTANDING_PRINCIPAL': basisAmount = L.principalOutstanding(l); break;
       default: basisAmount = round2(overduePrincipal + overdueInterest + overdueFees);
     }
-    const days = await countDays(c, from, date, exclude);
+    const days = await countDays(c, from, date, exclude, l.branch_id || null);
     if (!(days > 0)) continue;
-    const late = exclude ? await countDays(c, due, date, true) : daysLate(due, date);
+    const late = exclude ? await countDays(c, due, date, true, l.branch_id || null) : daysLate(due, date);
 
     // Inside the tolerance, short of the arrears amount tolerance, or on a
     // locked loan (any lock, the charge cap's included): accrued, not applied.

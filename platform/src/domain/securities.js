@@ -13,19 +13,21 @@ const { err, round2 } = acct;
  */
 
 const ledger = require('./ledger');
+const customFields = require('./customFields');
 const eligibility = require('./eligibility');
 
-async function addCollateral(c, loanId, { assetType = 'OTHER', description, value, originalCurrency = null, originalValue = null, reference = null, note = null, createdBy }) {
+async function addCollateral(c, loanId, { assetType = 'OTHER', description, value, originalCurrency = null, originalValue = null, reference = null, note = null, createdBy, customFields: cf = undefined, user = null }) {
   const l = await ledger.lock(c, loanId);
   if (!l.enable_collateral) throw err('PRODUCT_DOES_NOT_TAKE_COLLATERAL', 409);
   if (!['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'IN_ARREARS'].includes(l.status)) {
     throw err(`CANNOT_ADD_COLLATERAL_IN_STATE: ${l.status}`, 409);
   }
   if (!description || !(round2(value) > 0)) throw err('COLLATERAL_NEEDS_DESCRIPTION_AND_VALUE', 400);
+  const values = await customFields.prepare(c, 'COLLATERAL', { patch: cf || {}, user, creating: true });
   const { rows } = await c.query(
-    `INSERT INTO loan_collateral (loan_id, asset_type, description, value, original_currency, original_value, reference, note, added_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-    [l.id, assetType, description, round2(value), originalCurrency, originalValue, reference, note, createdBy || 'SYSTEM']);
+    `INSERT INTO loan_collateral (loan_id, asset_type, description, value, original_currency, original_value, reference, note, added_by, custom_fields)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    [l.id, assetType, description, round2(value), originalCurrency, originalValue, reference, note, createdBy || 'SYSTEM', JSON.stringify(values)]);
   await c.query(
     `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'COLLATERAL_ADDED','loan_collateral',$2,$3)`,
     [createdBy || 'SYSTEM', rows[0].id, JSON.stringify(rows[0])]);

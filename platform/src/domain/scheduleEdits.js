@@ -278,7 +278,7 @@ async function paymentHoliday(c, loanId, { from, count = 1, kind = 'NO_PRINCIPAL
         ...S.planInstallments({ principal, terms: inputs.terms, method: l.method, periods: periods.slice(n), flatBase, rounding: inputs.rounding, decimals })];
     lines = [];
     for (let k = 0; k < nominal.length; k += 1) {
-      const due = await ledger.shiftOffClosedDays(c, nominal[k], inputs.nonWorkingDays, { notBefore: k ? lines[k - 1].dueDate : null });
+      const due = await ledger.shiftOffClosedDays(c, nominal[k], inputs.nonWorkingDays, { notBefore: k ? lines[k - 1].dueDate : null, branchId: inputs.branchId });
       const p = planned[k] || { principal: 0, interest: 0 };
       lines.push({
         dueDate: due, nominalDue: nominal[k], principal: k < n ? 0 : p.principal, interest: k < n ? 0 : p.interest,
@@ -378,7 +378,7 @@ async function changeDueDay(c, loanId, { day, note = null, asOf = null, createdB
   const lines = [];
   for (let k = 0; k < tail.length; k += 1) {
     const nominal = onDay(ymd(tail[k].nominal_due));
-    const due = await ledger.shiftOffClosedDays(c, nominal, inputs.nonWorkingDays, { notBefore: k ? lines[k - 1].dueDate : prev });
+    const due = await ledger.shiftOffClosedDays(c, nominal, inputs.nonWorkingDays, { notBefore: k ? lines[k - 1].dueDate : prev, branchId: inputs.branchId });
     lines.push({ dueDate: due, nominalDue: nominal, principal: Number(tail[k].principal_due), interest: Number(tail[k].interest_due), fee: Number(tail[k].fee_due) });
   }
   if (lines[0].dueDate <= ctx.date || lines[0].dueDate <= prev) throw err(`THE_NEXT_DUE_DATE_WOULD_BE_${lines[0].dueDate}: not after ${ctx.date > prev ? ctx.date : prev}`, 409);

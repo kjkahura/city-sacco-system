@@ -30,6 +30,7 @@ const COL = require('../domain/collections');
 const ATT = require('../domain/attachments');
 const ELIG = require('../domain/eligibility');
 const HIST = require('../domain/loanHistory');
+const CF = require('../domain/customFields');
 
 const router = express.Router();
 
@@ -163,6 +164,8 @@ router.get('/:id', ...read(async (c, req) => {
     completed_loan_cycles: await HIST.loanCycles(c, rows[0].member_id),
     sub_state: rows[0].terminated_on ? 'TERMINATED' : null,
     eod_excluded: x ? { job: x.job, since: x.business_date, error: x.error } : null,
+    // Only the custom field values the user's role may see (./customFields).
+    custom_fields: (await CF.getValues(c, 'LOAN_ACCOUNT', rows[0].id, { user: req.auth, record: rows[0] })).values,
   };
 }));
 
@@ -256,13 +259,15 @@ router.get('/:id/eligibility', ...read(async (c, req) => {
 }));
 
 router.post('/', ...tx(async (c, req, res, { actor, user }) => {
-  const loan = await L.apply(c, { ...req.body, createdBy: actor, user });
+  // Values carried from a restructured loan are the system's to give.
+  const { carriedCustomFields: _ignored, ...body } = req.body || {};
+  const loan = await L.apply(c, { ...body, createdBy: actor, user });
   res.status(201);
   return loan;
 }, TELLER));
 
-router.post('/:id/guarantors', ...tx(async (c, req, res, { actor }) => {
-  const g = await L.addGuarantor(c, req.params.id, { ...req.body, createdBy: actor });
+router.post('/:id/guarantors', ...tx(async (c, req, res, { actor, user }) => {
+  const g = await L.addGuarantor(c, req.params.id, { ...req.body, createdBy: actor, user });
   res.status(201);
   return g;
 }, TELLER));
@@ -378,9 +383,9 @@ router.get('/:id/tranches', ...read((c, req) => TR.forLoan(c, req.params.id)));
 router.put('/:id/tranches', ...tx((c, req, _res, { actor }) => TR.setTranches(c, req.params.id, req.body?.tranches || req.body, { createdBy: actor }), TELLER));
 
 router.get('/:id/collateral', ...read((c, req) => SEC.forLoan(c, req.params.id)));
-router.post('/:id/collateral', ...tx(async (c, req, res, { actor }) => {
+router.post('/:id/collateral', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
-  return await SEC.addCollateral(c, req.params.id, { ...req.body, createdBy: actor });
+  return await SEC.addCollateral(c, req.params.id, { ...req.body, createdBy: actor, user });
 }, TELLER));
 router.post('/collateral/:collateralId/release', ...tx((c, req, _res, { actor }) =>
   SEC.releaseCollateral(c, req.params.collateralId, { ...req.body, createdBy: actor }), APPROVER));
@@ -434,13 +439,18 @@ router.post('/:id/disbursements', ...tx(async (c, req, res, { actor, user }) => 
   if (req.body?.savingsAccountId || (!req.body?.channelId && a?.disbursement_savings_account_id && a.status === 'APPROVED')) {
     return LT.disburseToDeposit(c, req.params.id, { ...req.body, createdBy: actor, user });
   }
-  return await L.disburse(c, req.params.id, { ...req.body, createdBy: actor, user });
+  const t = await L.disburse(c, req.params.id, { ...req.body, createdBy: actor, user });
+  return CF.applyToTransaction(c, t, req.body?.customFields, { user });
 }, APPROVER));
 
 router.post('/:id/repayments', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
-  if (req.body?.savingsAccountId) return LT.repayFromDeposit(c, req.params.id, { ...req.body, createdBy: actor, user });
-  return await L.repay(c, req.params.id, { ...req.body, createdBy: actor, user });
+  // `internal` marks a repayment the system makes under another permission
+  // (a pay-off, securities collected); it is never taken from the wire.
+  const { internal: _ignored, ...body } = req.body || {};
+  if (body.savingsAccountId) return LT.repayFromDeposit(c, req.params.id, { ...body, createdBy: actor, user });
+  const t = await L.repay(c, req.params.id, { ...body, createdBy: actor, user });
+  return CF.applyToTransaction(c, t, body.customFields, { user });
 }, TELLER));
 
 router.post('/:id/accrue-interest', ...tx(async (c, req, res, { actor }) => {
@@ -533,9 +543,10 @@ router.post('/:id/write-off/reject', ...tx((c, req, _res, { actor, user }) =>
 
 // After a write-off: money recovered through a channel (a teller receipt),
 // taken from a called guarantor's deposits, or a call forgone (management).
-router.post('/:id/recoveries', ...tx(async (c, req, res, { actor }) => {
+router.post('/:id/recoveries', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
-  return await L.recover(c, req.params.id, { ...req.body, createdBy: actor });
+  const t = await L.recover(c, req.params.id, { ...req.body, createdBy: actor, user });
+  return CF.applyToTransaction(c, t, req.body?.customFields, { user });
 }, TELLER));
 router.post('/:id/guarantors/:guarantorId/recover', ...tx(async (c, req, res, { actor }) => {
   res.status(201);

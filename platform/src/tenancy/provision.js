@@ -142,12 +142,14 @@ async function provisionTenant({
           [code, gname, type, regClass]
         );
       }
-      for (const [id, cname, ctype, gl] of SEED_CHANNELS) {
+      for (const [k, [id, cname, ctype, gl]] of SEED_CHANNELS.entries()) {
         await c.query(
-          'INSERT INTO transaction_channels (id, name, channel_type, gl_account_code) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING',
-          [id, cname, ctype, gl]
+          'INSERT INTO transaction_channels (id, name, channel_type, gl_account_code, sort_order) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING',
+          [id, cname, ctype, gl, k + 1]
         );
       }
+      // Cash is the predefined channel: it can be renamed, not deleted or deactivated (the reference platform).
+      await c.query("UPDATE transaction_channels SET is_default = true WHERE id = 'cash'");
       await c.query(
         `INSERT INTO savings_products (id, name, annual_rate, gl_liability, gl_interest_exp, gl_fee_inc)
          VALUES ('SAV01','Ordinary Savings',4.000,'200-100','500-100','400-200') ON CONFLICT DO NOTHING`

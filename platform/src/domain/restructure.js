@@ -308,7 +308,7 @@ async function restructure(c, loanId, {
   // the one-active-loan rule: the new principal already includes it.
   const fresh = await loans.apply(c, {
     memberId: old.member_id, productId: np.id, principal: plan.amount, termMonths: term, branchId: old.branch_id,
-    monthlyRate, purpose: `Reschedule of ${old.account_no}`, notes: note, createdBy,
+    monthlyRate, purpose: `Reschedule of ${old.account_no}`, notes: note, createdBy, carriedCustomFields: old.custom_fields,
   }, { settles: old.id });
   return settle(c, { kind, old, np, fresh, plan, extra: 0, channel: null, channelId: null, arrears, date, note, createdBy, keepAccountNo: keepAccountNo === true || keepAccountNo === 'true' });
 }
@@ -350,6 +350,7 @@ async function requestRefinance(c, loanId, params = {}) {
   const application = await loans.apply(c, {
     ...overrides, memberId: old.member_id, productId: np.id, principal: gross, termMonths,
     branchId: old.branch_id, purpose: `Top-up of ${old.account_no}`, notes: note, createdBy,
+    carriedCustomFields: old.custom_fields, customFields: params.customFields || {}, user: params.user || null,
   }, { refinance: { of: old.id, arrears, topUp: round2(gross - s.amount) } });
   await c.query(
     'UPDATE loan_accounts SET refinance_capitalize = $2, refinance_carry_fees = $3, keep_account_no = $4 WHERE id = $1',

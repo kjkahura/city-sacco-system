@@ -105,7 +105,7 @@ async function bill(c, loanId, { date, createdBy = 'EOD' } = {}) {
   const { rows: [n] } = await c.query('SELECT COALESCE(max(number), 0) + 1 AS n FROM loan_installments WHERE loan_id = $1', [l.id]);
   // A bill is not a schedule to extend: under Extend Schedule it moves forward.
   const rule = l.non_working_days === 'EXTEND_SCHEDULE' ? 'MOVE_FORWARD' : (l.non_working_days || 'MOVE_FORWARD');
-  const dueDate = due.custom ? billing : await ledger.shiftOffClosedDays(c, billing, rule, { notBefore: l.disbursed_on });
+  const dueDate = due.custom ? billing : await ledger.shiftOffClosedDays(c, billing, rule, { notBefore: l.disbursed_on, branchId: l.branch_id || null });
   let installment = null;
   const something = principalDue > 0 || interestDue > 0 || feeDue > 0;
   if (something || due.custom) {

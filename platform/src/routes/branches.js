@@ -26,8 +26,9 @@ const run = (fn, { write = false, status = 200 } = {}) => async (req, res, next)
 
 const branches = express.Router();
 branches.get('/', requireAuth(...READER), run((c) => B.list(c)));
-branches.post('/', requireAuth(...ADMIN), run((c, req) => B.create(c, { ...req.body, createdBy: req.auth.email }), { write: true, status: 201 }));
-branches.patch('/:id', requireAuth(...ADMIN), run((c, req) => B.update(c, req.params.id, { ...req.body, createdBy: req.auth.email }), { write: true }));
+branches.get('/:id', requireAuth(...READER), run((c, req) => B.detail(c, req.params.id)));
+branches.post('/', requireAuth(...ADMIN), run((c, req) => B.create(c, { ...req.body, createdBy: req.auth.email, user: req.auth }), { write: true, status: 201 }));
+branches.patch('/:id', requireAuth(...ADMIN), run((c, req) => B.update(c, req.params.id, { ...req.body, createdBy: req.auth.email, user: req.auth }), { write: true }));
 
 const accounting = express.Router();
 accounting.get('/inter-branch-rules', requireAuth(...LEDGER), run((c) => B.rules(c)));

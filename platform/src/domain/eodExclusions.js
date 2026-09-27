@@ -107,4 +107,29 @@ async function include(c, loanId, { asOf = null, note = null, createdBy } = {}) 
   return { loanId: l.id, accountNo: l.account_no, excludedSince: ymd(x.business_date), job: x.job, caughtUpTo: date, catchUp: done };
 }
 
-module.exports = { list, forLoan, include, catchUp };
+/**
+ * Try every loan still left out again (the reference platform retries failed accounts every
+ * hour). Each in its own savepoint: one that still fails is rolled back,
+ * stays out, and has the attempt counted with its error.
+ */
+async function retryAll(c, { createdBy = 'EOD_RETRY' } = {}) {
+  const { rows } = await c.query('SELECT id, loan_id FROM loan_eod_exclusions WHERE included_at IS NULL ORDER BY excluded_at');
+  const out = { tried: rows.length, included: [], stillFailing: [] };
+  for (const x of rows) {
+    await c.query('SAVEPOINT eod_retry');
+    try {
+      const r = await include(c, x.loan_id, { note: 'hourly retry', createdBy });
+      await c.query('RELEASE SAVEPOINT eod_retry');
+      out.included.push(r.accountNo);
+    } catch (e) {
+      await c.query('ROLLBACK TO SAVEPOINT eod_retry');
+      await c.query('RELEASE SAVEPOINT eod_retry');
+      await c.query('UPDATE loan_eod_exclusions SET retries = retries + 1, last_retry_at = now(), last_retry_error = $2 WHERE id = $1',
+        [x.id, String(e.message).slice(0, 500)]);
+      out.stillFailing.push(x.loan_id);
+    }
+  }
+  return out;
+}
+
+module.exports = { list, forLoan, include, catchUp, retryAll };

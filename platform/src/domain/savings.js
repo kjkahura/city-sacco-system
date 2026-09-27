@@ -4,6 +4,8 @@ const acct = require('./accounting');
 const S = require('./schedule');
 const PA = require('./productAccounting');
 const accruals = require('./accruals');
+const channels = require('./channels');
+const customFields = require('./customFields');
 const { err, round2 } = acct;
 
 /**
@@ -223,12 +225,12 @@ async function postWithChannel(c, a, { channelGl, amount, direction, productLegs
 // Deposits, withdrawals, transfers
 // --------------------------------------------------------------------------
 
-async function deposit(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null }) {
+async function deposit(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null, user = null }) {
   const a = await lock(c, accountId);
   if (a.status !== 'ACTIVE') throw err(`ACCOUNT_NOT_ACTIVE: ${a.status}`, 409);
   const amt = round2(amount);
   if (!(amt > 0)) throw err('INVALID_AMOUNT');
-  const ch = await channel(c, channelId);
+  const ch = await channels.assertUsable(c, channelId, { side: 'SAVINGS', type: 'DEPOSIT', amount: amt, productId: a.product_id, user });
   if (!ch.gl_account_code) throw err(`CHANNEL_HAS_NO_GL_ACCOUNT: ${channelId}`);
 
   const legs = inLegs(a, amt);
@@ -247,7 +249,7 @@ async function deposit(c, accountId, { amount, channelId = 'cash', valueDate, na
   });
 }
 
-async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null, offsetPledge = null }) {
+async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null, offsetPledge = null, user = null }) {
   const a = await lock(c, accountId);
   if (a.status !== 'ACTIVE') throw err(`ACCOUNT_NOT_ACTIVE: ${a.status}`, 409);
   // `offsetPledge`: a guarantor's pledge being collected (./loanClosures
@@ -264,7 +266,7 @@ async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, n
     throw err(`INSUFFICIENT_AVAILABLE_BALANCE: available ${available}, requested ${amt}` +
       (pledged ? ` (${pledged} pledged as loan security)` : ''), 409);
   }
-  const ch = await channel(c, channelId);
+  const ch = await channels.assertUsable(c, channelId, { side: 'SAVINGS', type: 'WITHDRAWAL', amount: amt, productId: a.product_id, user });
   if (!ch.gl_account_code) throw err(`CHANNEL_HAS_NO_GL_ACCOUNT: ${channelId}`);
 
   const legs = outLegs(a, amt);
@@ -762,7 +764,7 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
 // Opening
 // --------------------------------------------------------------------------
 
-async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = undefined, overdraftLimit = 0, openedOn = null }) {
+async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = undefined, overdraftLimit = 0, openedOn = null, customFields: cf = {}, user = null }) {
   const { rows: [p] } = await c.query('SELECT * FROM savings_products WHERE id = $1', [productId]);
   if (!p) throw err('UNKNOWN_DEPOSIT_PRODUCT', 404);
   if (p.is_active === false) throw err('DEPOSIT_PRODUCT_INACTIVE', 409);
@@ -773,12 +775,18 @@ async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = un
   }
   const { rows: [m] } = await c.query('SELECT branch_id FROM members WHERE id = $1', [memberId]);
   if (!m) throw err('MEMBER_NOT_FOUND', 404);
+  const branch = branchId === undefined ? m.branch_id : branchId;
+  // The product must be offered in the account's branch (the reference platform's product availability).
+  if (p.branch_ids && p.branch_ids.length && branch && !p.branch_ids.includes(branch)) {
+    throw err(`DEPOSIT_PRODUCT_NOT_AVAILABLE_IN_THIS_BRANCH: ${p.id}`, 409);
+  }
+  const values = await customFields.prepare(c, 'SAVINGS_ACCOUNT', { item: p.id, patch: cf || {}, user, creating: true });
   const no = accountNo || (await c.query(
     `SELECT 'SA' || lpad((count(*)+1)::text, 6, '0') AS n FROM savings_accounts`)).rows[0].n;
   const { rows } = await c.query(
-    `INSERT INTO savings_accounts (account_no, member_id, product_id, status, branch_id, overdraft_limit, opened_on, period_started_on)
-     VALUES ($1,$2,$3,'ACTIVE',$4,$5,COALESCE($6::date, current_date),COALESCE($6::date, current_date)) RETURNING *`,
-    [no, memberId, productId, branchId === undefined ? m.branch_id : branchId, lim, openedOn]
+    `INSERT INTO savings_accounts (account_no, member_id, product_id, status, branch_id, overdraft_limit, opened_on, period_started_on, custom_fields)
+     VALUES ($1,$2,$3,'ACTIVE',$4,$5,COALESCE($6::date, current_date),COALESCE($6::date, current_date),$7) RETURNING *`,
+    [no, memberId, productId, branch, lim, openedOn, JSON.stringify(values)]
   );
   return rows[0];
 }

@@ -10,6 +10,7 @@
 
 <div id="login" class="login">
   <form id="login-form" class="card">
+    <img id="login-logo" alt="" hidden class="login-logo">
     <h1>SACCO back office</h1>
     <label>SACCO<input name="tenant" autocomplete="organization" required placeholder="citysacco"></label>
     <label>Email<input name="email" type="email" autocomplete="username" required></label>
@@ -32,6 +33,7 @@
 
 <div id="app" hidden>
   <header>
+    <img id="sacco-icon" alt="" hidden class="sacco-icon">
     <strong id="sacco-name">&nbsp;</strong>
     <nav id="nav">
       <button data-view="members" class="active">Members</button>
@@ -43,6 +45,7 @@
       <button data-view="products">Products</button>
       <button data-view="controls">Controls</button>
       <button data-view="accounting">Accounting</button>
+      <button data-view="organization">Organization</button>
     </nav>
     <span class="spacer"></span>
     <span id="whoami" class="hint"></span>

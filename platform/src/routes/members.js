@@ -6,6 +6,9 @@ const { requireAuth } = require('../tenancy/resolve');
 const { apiError, notFound, badRequest, paginate, withPaginationHeaders, applyFilterCriteria } = require('../lib/http');
 const { pageQuery, sendPage } = require('../lib/page');
 const HIST = require('../domain/loanHistory');
+const CF = require('../domain/customFields');
+const IDT = require('../domain/idTemplates');
+const B = require('../domain/branches');
 
 const router = express.Router();
 
@@ -18,7 +21,7 @@ const router = express.Router();
  */
 
 const COLUMNS = `id, member_no, first_name, last_name, national_id, kra_pin, phone,
-                 email, date_of_birth, gender, branch_id, employer, status,
+                 email, date_of_birth, gender, branch_id, centre_id, employer, status,
                  joined_on, exited_on, created_at`;
 
 router.get('/', requireAuth(), async (req, res, next) => {
@@ -71,7 +74,10 @@ router.get('/:id', requireAuth(), async (req, res, next) => {
       const sql = byId
         ? `SELECT ${COLUMNS} FROM members WHERE id = $1`
         : `SELECT ${COLUMNS} FROM members WHERE member_no = $1`;
-      return (await c.query(sql, [req.params.id])).rows[0];
+      const m = (await c.query(sql, [req.params.id])).rows[0];
+      if (!m) return null;
+      const cf = await CF.getValues(c, 'MEMBER', m.id, { user: req.auth });
+      return { ...m, customFields: cf.values, customFieldScores: cf.scores };
     });
     return row ? res.json(row) : notFound(res, 'member');
   } catch (e) { next(e); }
@@ -92,21 +98,31 @@ router.post('/', requireAuth('TENANT_ADMIN', 'MANAGER', 'TELLER'), async (req, r
 
     const row = await withTenant(req.tenant.schema_name, async (c) => {
       // Member numbers are per tenant and generated inside the tenant's own
-      // schema, so two SACCOs can both have member 0001.
+      // schema, so two SACCOs can both have member 0001. The digits are
+      // compared as numbers: as text, '0006' sorts after '000007'.
       const memberNo = b.memberNo || (await c.query(
-        `SELECT 'M' || lpad((COALESCE(MAX(NULLIF(regexp_replace(member_no,'\\D','','g'),''))::bigint,0)+1)::text, 6, '0') AS n
+        `SELECT 'M' || lpad((COALESCE(MAX(NULLIF(regexp_replace(member_no,'\\D','','g'),'')::bigint),0)+1)::text, 6, '0') AS n
          FROM members`
       )).rows[0].n;
 
+      // Branch and centre (the centre must be in the member's branch), the
+      // identification documents the templates ask for, and custom fields.
+      const branch = b.branchId ? await B.resolve(c, b.branchId) : null;
+      if (branch && branch.status !== 'ACTIVE') throw Object.assign(new Error('BRANCH_IS_DEACTIVATED'), { status: 409 });
+      const centre = await B.centreFor(c, b.centreId, branch ? branch.id : null);
+      const branchId = branch ? branch.id : centre ? centre.branch_id : null;
+      const docs = await IDT.forNewMember(c, b.identificationDocuments || []);
+      const values = await CF.prepare(c, 'MEMBER', { patch: b.customFields || {}, user: req.auth, creating: true });
       const { rows } = await c.query(
         `INSERT INTO members (member_no, first_name, last_name, national_id, kra_pin,
-                              phone, email, date_of_birth, gender, employer, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,'ACTIVE'))
+                              phone, email, date_of_birth, gender, employer, status, branch_id, centre_id, custom_fields)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,'ACTIVE'),$12,$13,$14)
          RETURNING ${COLUMNS}`,
         [memberNo, b.firstName, b.lastName, b.nationalId || null, b.kraPin || null,
          b.phone || null, b.email || null, b.dateOfBirth || null, b.gender || null,
-         b.employer || null, b.status || null]
+         b.employer || null, b.status || null, branchId, centre ? centre.id : null, JSON.stringify(values)]
       );
+      await IDT.storeForMember(c, rows[0].id, docs, { createdBy: req.auth.email });
 
       await c.query(
         `INSERT INTO audit_log (actor, action, entity, entity_id, after)
@@ -134,12 +150,24 @@ router.patch('/:id', requireAuth('TENANT_ADMIN', 'MANAGER'), async (req, res, ne
       params.push(v);
       sets.push(`${col} = $${params.length}`);
     }
-    if (!sets.length) return badRequest(res, 'NO_UPDATABLE_FIELDS');
-    params.push(req.params.id);
+    const extra = req.body?.centreId !== undefined || req.body?.customFields !== undefined;
+    if (!sets.length && !extra) return badRequest(res, 'NO_UPDATABLE_FIELDS');
 
     const row = await withTenant(req.tenant.schema_name, async (c) => {
-      const before = (await c.query('SELECT * FROM members WHERE id = $1', [req.params.id])).rows[0];
+      const before = (await c.query('SELECT * FROM members WHERE id::text = $1 OR member_no = $1 FOR UPDATE', [req.params.id])).rows[0];
       if (!before) return null;
+      // The centre, in the member's own branch; custom fields under their edit rights.
+      if (req.body.centreId !== undefined) {
+        const centre = await B.centreFor(c, req.body.centreId, before.branch_id);
+        params.push(centre ? centre.id : null);
+        sets.push(`centre_id = $${params.length}`);
+      }
+      if (req.body.customFields !== undefined) {
+        const values = await CF.prepare(c, 'MEMBER', { patch: req.body.customFields, previous: before.custom_fields, user: req.auth, recordId: before.id });
+        params.push(JSON.stringify(values));
+        sets.push(`custom_fields = $${params.length}`);
+      }
+      params.push(before.id);
       const { rows } = await c.query(
         `UPDATE members SET ${sets.join(', ')}, updated_at = now()
          WHERE id = $${params.length} RETURNING ${COLUMNS}`, params
@@ -147,11 +175,33 @@ router.patch('/:id', requireAuth('TENANT_ADMIN', 'MANAGER'), async (req, res, ne
       await c.query(
         `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
          VALUES ($1,'MEMBER_UPDATED','member',$2,$3,$4)`,
-        [req.auth.email, req.params.id, JSON.stringify(before), JSON.stringify(rows[0])]
+        [req.auth.email, before.id, JSON.stringify(before), JSON.stringify(rows[0])]
       );
       return rows[0];
     });
     return row ? res.json(row) : notFound(res, 'member');
+  } catch (e) { next(e); }
+});
+
+// Identification documents (./idTemplates).
+const txn = (fn, roles, { write = true, status = 200 } = {}) => [requireAuth(...roles), async (req, res, next) => {
+  try {
+    const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res));
+    if (out !== undefined) res.status(status).json(out);
+  } catch (e) { next(e); }
+}];
+router.get('/:id/identifications', ...txn((c, req) => IDT.documents(c, req.params.id), [], { write: false }));
+router.post('/:id/identifications', ...txn((c, req) => IDT.addDocument(c, req.params.id, req.body || {}, { createdBy: req.auth.email }),
+  ['TENANT_ADMIN', 'MANAGER', 'TELLER'], { status: 201 }));
+router.delete('/:id/identifications/:docId', ...txn((c, req) => IDT.removeDocument(c, req.params.id, req.params.docId, { createdBy: req.auth.email }),
+  ['TENANT_ADMIN', 'MANAGER']));
+router.get('/:id/identifications/:docId/attachment', requireAuth(), async (req, res, next) => {
+  try {
+    const a = await withTenantRead(req.tenant.schema_name, (c) => IDT.attachment(c, req.params.id, req.params.docId));
+    res.set('content-type', a.attachment_type);
+    res.set('content-disposition', `attachment; filename="${String(a.attachment_name).replace(/[^A-Za-z0-9._-]/g, '_')}"`);
+    res.set('x-content-type-options', 'nosniff');
+    res.send(a.attachment);
   } catch (e) { next(e); }
 });
 

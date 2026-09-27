@@ -354,20 +354,118 @@ async function historyOf(c, loanId) {
 // Index rate sources (Administration)
 // --------------------------------------------------------------------------
 
-async function addSource(c, { id, name, notes = null, createdBy }) {
+const SOURCE_KINDS = ['INTEREST', 'VAT', 'WITHHOLDING'];
+
+/**
+ * A rate source (the reference platform's Rate Source): an index interest rate, a
+ * value-added tax rate for loan products, or a withholding tax rate for
+ * deposit products.
+ */
+async function addSource(c, { id, name, notes = null, kind = 'INTEREST', createdBy }) {
   if (!id || !name) throw err('AN_INDEX_SOURCE_NEEDS_AN_ID_AND_A_NAME', 400);
+  const k = String(kind || 'INTEREST').toUpperCase();
+  if (!SOURCE_KINDS.includes(k)) throw err(`RATE_SOURCE_KIND_IS_ONE_OF: ${SOURCE_KINDS.join(', ')}`, 400);
   const { rows: [r] } = await c.query(
-    'INSERT INTO index_rate_sources (id, name, notes, created_by) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING RETURNING *',
-    [String(id).toUpperCase(), name, notes, createdBy || 'SYSTEM']);
+    'INSERT INTO index_rate_sources (id, name, notes, kind, created_by) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING RETURNING *',
+    [String(id).toUpperCase(), name, notes, k, createdBy || 'SYSTEM']);
   if (!r) throw err(`INDEX_SOURCE_EXISTS: ${id}`, 409);
   return r;
+}
+
+async function findSource(c, id) {
+  const { rows: [s] } = await c.query('SELECT * FROM index_rate_sources WHERE id = $1', [String(id).toUpperCase()]);
+  if (!s) throw err(`UNKNOWN_INDEX_RATE_SOURCE: ${id}`, 404);
+  return s;
+}
+
+/** Where a source is used: products and running loans. */
+async function sourceUse(c, id) {
+  const { rows: [u] } = await c.query(
+    `SELECT (SELECT count(*) FROM loan_products WHERE index_source_id = $1 OR tax_source_id = $1 OR $1 = ANY(COALESCE(allowed_index_sources, '{}')))
+          + (SELECT count(*) FROM savings_products WHERE withholding_source_id = $1)
+          + (SELECT count(*) FROM loan_rate_periods p JOIN loan_accounts l ON l.id = p.loan_id
+              WHERE p.index_source_id = $1 AND l.status IN ('APPROVED', 'ACTIVE', 'IN_ARREARS', 'LOCKED')) AS n`, [id]);
+  return Number(u.n);
+}
+
+async function updateSource(c, id, { name, notes } = {}, { createdBy } = {}) {
+  const s = await findSource(c, id);
+  const { rows: [after] } = await c.query('UPDATE index_rate_sources SET name = COALESCE($2, name), notes = COALESCE($3, notes) WHERE id = $1 RETURNING *',
+    [s.id, name || null, notes ?? null]);
+  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'INDEX_SOURCE_CHANGED','index_rate',$2,$3,$4)`,
+    [createdBy || 'SYSTEM', s.id, JSON.stringify(s), JSON.stringify(after)]);
+  return after;
+}
+
+/** A source and all its values, if nothing uses it (the reference platform warns; here it is refused). */
+async function deleteSource(c, id, { createdBy } = {}) {
+  const s = await findSource(c, id);
+  const n = await sourceUse(c, s.id);
+  if (n > 0) throw err(`RATE_SOURCE_IN_USE: ${s.id} is used by ${n} product(s) or running loan(s)`, 409);
+  await c.query('DELETE FROM index_rate_sources WHERE id = $1', [s.id]);
+  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'INDEX_SOURCE_DELETED','index_rate',$2,$3)`,
+    [createdBy || 'SYSTEM', s.id, JSON.stringify(s)]);
+  return { deleted: s.id };
+}
+
+/** A value already in force that something uses is history: it cannot be edited or deleted. */
+async function assertValueChangeable(c, s, validFrom) {
+  if (ymd(validFrom) < isoDate(new Date()) && await sourceUse(c, s.id) > 0) {
+    throw err(`RATE_VALUE_IN_USE: ${s.id} from ${ymd(validFrom)} is in force for accounts using it`, 409);
+  }
+}
+
+async function editIndexRate(c, sourceId, validFrom, { rate, notes } = {}, { createdBy } = {}) {
+  const s = await findSource(c, sourceId);
+  const { rows: [before] } = await c.query('SELECT * FROM index_rates WHERE source_id = $1 AND valid_from = $2::date', [s.id, ymd(validFrom)]);
+  if (!before) throw err(`NO_VALUE_FROM: ${ymd(validFrom)}`, 404);
+  await assertValueChangeable(c, s, before.valid_from);
+  if (rate !== undefined && !Number.isFinite(Number(rate))) throw err('RATE_MUST_BE_A_NUMBER', 400);
+  const { rows: [after] } = await c.query(
+    'UPDATE index_rates SET rate = COALESCE($3, rate), notes = COALESCE($4, notes) WHERE source_id = $1 AND valid_from = $2::date RETURNING *',
+    [s.id, ymd(validFrom), rate === undefined ? null : Number(rate), notes ?? null]);
+  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'INDEX_RATE_CHANGED','index_rate',$2,$3,$4)`,
+    [createdBy || 'SYSTEM', s.id, JSON.stringify(before), JSON.stringify(after)]);
+  if (s.kind !== 'INTEREST') await updateTaxRates(c, { date: isoDate(new Date()) });
+  return after;
+}
+
+async function deleteIndexRate(c, sourceId, validFrom, { createdBy } = {}) {
+  const s = await findSource(c, sourceId);
+  const { rows: [before] } = await c.query('SELECT * FROM index_rates WHERE source_id = $1 AND valid_from = $2::date', [s.id, ymd(validFrom)]);
+  if (!before) throw err(`NO_VALUE_FROM: ${ymd(validFrom)}`, 404);
+  await assertValueChangeable(c, s, before.valid_from);
+  await c.query('DELETE FROM index_rates WHERE source_id = $1 AND valid_from = $2::date', [s.id, ymd(validFrom)]);
+  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'INDEX_RATE_DELETED','index_rate',$2,$3)`,
+    [createdBy || 'SYSTEM', s.id, JSON.stringify(before)]);
+  if (s.kind !== 'INTEREST') await updateTaxRates(c, { date: isoDate(new Date()) });
+  return { deleted: { sourceId: s.id, validFrom: ymd(validFrom) } };
+}
+
+/**
+ * The reference platform's TAX_RATE_UPDATE: each loan product with a VAT source and each
+ * deposit product with a withholding tax source takes the source's value in
+ * force on `date`. Products without a source keep their own percentage.
+ */
+async function updateTaxRates(c, { date = isoDate(new Date()) } = {}) {
+  const { rows: loans } = await c.query(
+    `UPDATE loan_products p SET tax_rate_percent = r.rate, updated_at = now()
+     FROM (SELECT DISTINCT ON (source_id) source_id, rate FROM index_rates WHERE valid_from <= $1::date ORDER BY source_id, valid_from DESC) r
+     WHERE p.tax_source_id = r.source_id AND p.tax_rate_percent IS DISTINCT FROM r.rate RETURNING p.id, p.tax_rate_percent`, [date]);
+  const { rows: deposits } = await c.query(
+    `UPDATE savings_products p SET withholding_tax_percent = r.rate
+     FROM (SELECT DISTINCT ON (source_id) source_id, rate FROM index_rates WHERE valid_from <= $1::date ORDER BY source_id, valid_from DESC) r
+     WHERE p.withholding_source_id = r.source_id AND p.withholding_tax_percent IS DISTINCT FROM r.rate RETURNING p.id, p.withholding_tax_percent`, [date]);
+  return { date, loanProducts: loans, depositProducts: deposits };
 }
 
 /** A new value of an index from a date. Values already in force are history and are not changed. */
 async function setIndexRate(c, sourceId, { validFrom, rate, notes = null, createdBy }) {
   if (!validFrom || !Number.isFinite(Number(rate))) throw err('AN_INDEX_RATE_NEEDS_A_DATE_AND_A_RATE', 400);
+  const { rows: [existing] } = await c.query('SELECT * FROM index_rates WHERE source_id = $1 AND valid_from = $2::date', [sourceId, validFrom]);
   const { rowCount } = await c.query('SELECT 1 FROM index_rate_sources WHERE id = $1', [sourceId]);
   if (!rowCount) throw err(`UNKNOWN_INDEX_RATE_SOURCE: ${sourceId}`, 404);
+  if (existing) await assertValueChangeable(c, { id: sourceId }, existing.valid_from);
   const { rows: [r] } = await c.query(
     `INSERT INTO index_rates (source_id, valid_from, rate, notes, created_by) VALUES ($1,$2::date,$3,$4,$5)
      ON CONFLICT (source_id, valid_from) DO UPDATE SET rate = EXCLUDED.rate, notes = EXCLUDED.notes, created_by = EXCLUDED.created_by
@@ -375,6 +473,9 @@ async function setIndexRate(c, sourceId, { validFrom, rate, notes = null, create
   await c.query(
     `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'INDEX_RATE_SET','index_rate',$2,$3)`,
     [createdBy || 'SYSTEM', sourceId, JSON.stringify(r)]);
+  // A tax rate already in force reaches its products at once.
+  const { rows: [src] } = await c.query('SELECT kind FROM index_rate_sources WHERE id = $1', [sourceId]);
+  if (src.kind !== 'INTEREST' && ymd(r.valid_from) <= isoDate(new Date())) await updateTaxRates(c, { date: isoDate(new Date()) });
   return r;
 }
 
@@ -392,5 +493,5 @@ async function ratesOf(c, sourceId) {
 
 module.exports = {
   planPeriods, start, reviewLoan, reviewAll, historyOf, rateOn, clampRate, indexRateOn, changeRate,
-  addSource, setIndexRate, sources, ratesOf,
+  addSource, setIndexRate, sources, ratesOf, updateSource, deleteSource, editIndexRate, deleteIndexRate, updateTaxRates, sourceUse, SOURCE_KINDS,
 };

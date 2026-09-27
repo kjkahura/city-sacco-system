@@ -14,6 +14,9 @@ const FA = require('../domain/feeAmortization');
 const P2 = require('../domain/provisioning');
 const CL = require('../domain/close');
 const G = require('../domain/eodGuard');
+const CAL = require('../domain/calendar');
+const ORG = require('../domain/organization');
+const EX = require('../domain/eodExclusions');
 
 /**
  * End-of-day processing.
@@ -49,6 +52,19 @@ async function finish(runId, status, detail = {}, error = null) {
 }
 
 const JOBS = {
+  /**
+   * Re-date open loans after a holiday or non-working day change, before
+   * anything reads their due dates (./calendar sync).
+   */
+  async syncCalendar(tenant) {
+    return withTenant(tenant.schema_name, (c) => CAL.sync(c, { createdBy: 'EOD' }));
+  },
+
+  /** The reference platform's TAX_RATE_UPDATE: products with a tax rate source take its value for the day. */
+  async updateTaxRates(tenant, businessDate) {
+    return withTenant(tenant.schema_name, (c) => RATES.updateTaxRates(c, { date: businessDate }));
+  },
+
   /**
    * Review indexed and adjustable loan rates before the night's interest,
    * so interest from a change date is at the new rate.
@@ -275,17 +291,73 @@ async function runJob(tenant, job, { businessDate = null, force = false } = {}) 
  * posts, arrears before penalties (penalties read arrears state), and
  * provisioning last because it reads the arrears the others just produced.
  */
-const DEFAULT_JOBS = ['ensureFinancialYear', 'billRevolving', 'reviewRates', 'accrueInterest', 'applyPostdatedPayments', 'accrueSavings', 'applyPlannedFees', 'collectSettlements', 'markArrears', 'accruePenalties',
+const DEFAULT_JOBS = ['ensureFinancialYear', 'syncCalendar', 'billRevolving', 'reviewRates', 'updateTaxRates', 'accrueInterest', 'applyPostdatedPayments', 'accrueSavings', 'applyPlannedFees', 'collectSettlements', 'markArrears', 'accruePenalties',
   'applyFees', 'amortizeFees', 'enforceControls', 'provision', 'postAccruals', 'autoClosure'];
 
 async function runAll({ businessDate = null, jobs = DEFAULT_JOBS, force = false } = {}) {
   const { rows: tenants } = await pool.query(
-    "SELECT id, slug, schema_name FROM platform.tenants WHERE status = 'ACTIVE' ORDER BY slug");
+    "SELECT id, slug, schema_name, timezone FROM platform.tenants WHERE status = 'ACTIVE' ORDER BY slug");
   const results = [];
   for (const t of tenants) {
-    for (const job of jobs) {
-      // One tenant failing must not stop the rest of the fleet.
-      results.push(await runJob(t, job, { businessDate, force }));
+    // One tenant failing must not stop the rest of the fleet.
+    results.push(...(await runTenant(t, { businessDate: businessDate || new Date().toISOString().slice(0, 10), jobs, force, trigger: 'MANUAL', createdBy: 'PLATFORM' })).jobs);
+  }
+  return results;
+}
+
+/**
+ * The end of day for one tenant, on its own business date (its local date
+ * unless given), recorded in eod_completions when any job ran: the state,
+ * the jobs that failed and the loans left out that day (the reference platform's EOD
+ * completion notification, Accounts Updated).
+ */
+async function runTenant(tenant, { businessDate = null, jobs = DEFAULT_JOBS, force = false, trigger = 'MANUAL', createdBy = 'SYSTEM' } = {}) {
+  const date = businessDate || ORG.localClock(tenant.timezone || 'Africa/Nairobi').date;
+  const started = new Date();
+  const out = [];
+  for (const job of jobs) out.push(await runJob(tenant, job, { businessDate: date, force }));
+  const ran = out.filter((r) => !r.skipped);
+  let completion = null;
+  if (ran.length) {
+    completion = await withTenant(tenant.schema_name, async (c) => {
+      const { rows: [x] } = await c.query(
+        'SELECT count(*)::int AS n FROM loan_eod_exclusions WHERE business_date = $1::date AND included_at IS NULL', [date]);
+      const failedJobs = ran.filter((r) => r.ok === false).length;
+      const { rows: [row] } = await c.query(
+        `INSERT INTO eod_completions (business_date, trigger, state, started_at, failed_jobs, failed_loans, failed_deposits, jobs, created_by)
+         VALUES ($1::date,$2,$3,$4,$5,$6,0,$7,$8) RETURNING *`,
+        [date, trigger, failedJobs ? 'FAILED' : 'COMPLETE', started.toISOString(), failedJobs, x.n,
+          JSON.stringify(out.map((r) => ({ job: r.job, ok: r.ok !== false, skipped: r.skipped || null, error: r.error || null }))), createdBy]);
+      return row;
+    });
+  }
+  return { tenant: tenant.slug, businessDate: date, jobs: out, completion };
+}
+
+/**
+ * The scheduler's hourly call: every active tenant in AUTOMATIC mode whose
+ * local hour is the end-of-day hour runs its end of day for its local date;
+ * a tenant in MANUAL mode is left for its own Run Now (the reference platform's EOD
+ * Processing setting). A tenant set to retry loans left out has them tried
+ * again every hour.
+ */
+async function runScheduled({ eodHour = Number(process.env.EOD_HOUR ?? 22), at = new Date() } = {}) {
+  const { rows: tenants } = await pool.query(
+    "SELECT id, slug, schema_name, timezone FROM platform.tenants WHERE status = 'ACTIVE' ORDER BY slug");
+  const results = [];
+  for (const t of tenants) {
+    try {
+      const clock = ORG.localClock(t.timezone || 'Africa/Nairobi', at);
+      const s = await withTenant(t.schema_name, (c) => ORG.settings(c));
+      if (s && s.eod_retry_excluded) {
+        const retried = await withTenant(t.schema_name, (c) => EX.retryAll(c, { createdBy: 'EOD_RETRY' }));
+        if (retried.tried) results.push({ tenant: t.slug, retried });
+      }
+      if (clock.hour !== eodHour || !s || s.eod_mode !== 'AUTOMATIC') continue;
+      const r = await runTenant(t, { businessDate: clock.date, trigger: 'AUTOMATIC', createdBy: 'EOD' });
+      results.push({ tenant: t.slug, businessDate: r.businessDate, completion: r.completion ? r.completion.state : 'ALREADY_RUN' });
+    } catch (e) {
+      results.push({ tenant: t.slug, ok: false, error: e.message });
     }
   }
   return results;
@@ -302,4 +374,5 @@ async function history({ slug = null, limit = 50 } = {}) {
   return rows;
 }
 
-module.exports = { JOBS, DEFAULT_JOBS, runJob, runAll, history };
+module.exports = {
+  runTenant, runScheduled, JOBS, DEFAULT_JOBS, runJob, runAll, history };

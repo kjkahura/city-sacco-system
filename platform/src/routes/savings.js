@@ -6,6 +6,7 @@ const { requireAuth } = require('../tenancy/resolve');
 const { notFound } = require('../lib/http');
 const { pageQuery, sendPage, pageParams } = require('../lib/page');
 const S = require('../domain/savings');
+const CF = require('../domain/customFields');
 const acct = require('../domain/accounting');
 const LOANS = require('../domain/loans');
 const LT = require('../domain/loanTransfers');
@@ -19,7 +20,7 @@ const tx = (handler, roles = []) => [
   async (req, res, next) => {
     try {
       const out = await withTenant(req.tenant.schema_name, (c) =>
-        handler(c, req, res, { actor: req.auth.email }));
+        handler(c, req, res, { actor: req.auth.email, user: req.auth }));
       if (out === undefined) return;
       if (out === null) return notFound(res, 'savings account');
       res.json(out);
@@ -42,9 +43,9 @@ router.get('/', requireAuth(), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/', ...tx(async (c, req, res) => {
+router.post('/', ...tx(async (c, req, res, { user }) => {
   res.status(201);
-  return await S.open(c, req.body);
+  return await S.open(c, { ...req.body, user });
 }, TELLER));
 
 router.get('/:id/balance', ...tx((c, req) => S.summary(c, req.params.id)));
@@ -64,14 +65,18 @@ router.get('/:id/transactions', requireAuth(), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/:id/deposits', ...tx(async (c, req, res, { actor }) => {
+router.post('/:id/deposits', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
-  return await S.deposit(c, req.params.id, { ...req.body, createdBy: actor });
+  const t = await S.deposit(c, req.params.id, { ...req.body, createdBy: actor, user });
+  return CF.applyToTransaction(c, t, req.body?.customFields, { user });
 }, TELLER));
 
-router.post('/:id/withdrawals', ...tx(async (c, req, res, { actor }) => {
+router.post('/:id/withdrawals', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
-  return await S.withdraw(c, req.params.id, { ...req.body, createdBy: actor });
+  // offsetPledge is for collecting a guarantor's pledge (./loanClosures), never from the wire.
+  const { offsetPledge: _ignored, ...body } = req.body || {};
+  const t = await S.withdraw(c, req.params.id, { ...body, createdBy: actor, user });
+  return CF.applyToTransaction(c, t, body.customFields, { user });
 }, TELLER));
 
 router.post('/:id/transfers', ...tx(async (c, req, res, { actor }) => {

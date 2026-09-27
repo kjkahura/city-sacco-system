@@ -365,10 +365,32 @@ async function currencyDecimals(c) {
   return r ? Number(r.currency_decimals) : 2;
 }
 
-/** Every holiday on the calendar, for BUS/252. */
-async function holidaySet(c) {
-  const { rows } = await c.query('SELECT holiday_date::text AS d FROM holidays');
-  return new Set(rows.map((r) => r.d));
+/**
+ * Every holiday on the calendar, for BUS/252: the dated ones, and the
+ * recurring ones on their day and month in each year from 2000 to 2100.
+ * The organization's non-working days of the week ride along as
+ * `nonWorking`, for ./schedule dayCount.
+ */
+async function holidaySet(c, branchId = null) {
+  const { rows } = await c.query(
+    `SELECT holiday_date::text AS d, recurring FROM holidays h
+     WHERE (h.branch_id IS NULL OR h.branch_id = $1::uuid)
+       AND (h.currency_code IS NULL OR h.currency_code = (SELECT t.currency_code FROM platform.tenants t WHERE t.schema_name = current_schema()))`,
+    [branchId]);
+  const set = new Set();
+  for (const r of rows) {
+    if (!r.recurring) { set.add(r.d); continue; }
+    const md = r.d.slice(4);
+    for (let y = 2000; y <= 2100; y += 1) set.add(`${y}${md}`);
+  }
+  set.nonWorking = await nonWorkingDays(c);
+  return set;
+}
+
+/** The organization's non-working days of the week, 0 Sunday to 6 Saturday. */
+async function nonWorkingDays(c) {
+  const { rows: [r] } = await c.query('SELECT non_working_days FROM organization_settings WHERE id = 1');
+  return r ? r.non_working_days.map(Number) : [0, 6];
 }
 
 /**
@@ -377,7 +399,7 @@ async function holidaySet(c) {
  */
 async function termsFor(c, l) {
   const t = terms(l);
-  if (t.convention === 'BUS_252') t.holidays = await holidaySet(c);
+  if (t.convention === 'BUS_252') t.holidays = await holidaySet(c, l.branch_id || null);
   t.decimals = await currencyDecimals(c);
   return t;
 }
@@ -390,6 +412,8 @@ async function scheduleInputsFor(c, l) {
   const inputs = scheduleInputs(l);
   inputs.terms = await termsFor(c, l);
   inputs.decimals = inputs.terms.decimals;
+  // Branch holidays count for the loan's branch.
+  inputs.branchId = l.branch_id || null;
   return inputs;
 }
 
@@ -437,16 +461,20 @@ function scheduleInputs(l) {
 const NON_WORKING_DAY_RULES = ['DO_NOT_RESCHEDULE', 'MOVE_FORWARD', 'MOVE_BACKWARD', 'EXTEND_SCHEDULE'];
 
 /**
- * The days the SACCO is shut between two dates: weekends and anything in
- * the holidays table. Returns a predicate on YYYY-MM-DD.
+ * The days the SACCO is shut between two dates: the organization's
+ * non-working days of the week and its holidays, with the branch's own
+ * holidays when a branch is given (is_closed_day, migration 027). Returns a
+ * predicate on YYYY-MM-DD; a date outside the range is looked up as well.
  */
-async function closedDays(c, fromIso, toIso) {
+async function closedDays(c, fromIso, toIso, branchId = null) {
   const { rows } = await c.query(
-    'SELECT holiday_date::text AS d FROM holidays WHERE holiday_date BETWEEN $1::date AND $2::date', [fromIso, toIso]);
-  const holidays = new Set(rows.map((r) => r.d));
+    `SELECT d::date::text AS d FROM generate_series($1::date, $2::date, interval '1 day') AS d
+     WHERE is_closed_day(d::date, $3::uuid)`, [fromIso, toIso, branchId]);
+  const closed = new Set(rows.map((r) => r.d));
+  const nonWorking = await nonWorkingDays(c);
   return (iso) => {
-    const dow = new Date(`${iso}T00:00:00Z`).getUTCDay();
-    return dow === 0 || dow === 6 || holidays.has(iso);
+    if (iso >= fromIso && iso <= toIso) return closed.has(iso);
+    return nonWorking.includes(new Date(`${iso}T00:00:00Z`).getUTCDay());
   };
 }
 
@@ -458,10 +486,10 @@ async function closedDays(c, fromIso, toIso) {
  * never goes back to or before `notBefore` (disbursement, or the previous
  * installment); it moves forward instead.
  */
-async function shiftOffClosedDays(c, iso, rule = 'MOVE_FORWARD', { notBefore = null } = {}) {
+async function shiftOffClosedDays(c, iso, rule = 'MOVE_FORWARD', { notBefore = null, branchId = null } = {}) {
   const day = ymd(iso);
   if (rule === 'DO_NOT_RESCHEDULE') return day;
-  const closed = await closedDays(c, isoDate(addDays(day, -14)), isoDate(addDays(day, 14)));
+  const closed = await closedDays(c, isoDate(addDays(day, -14)), isoDate(addDays(day, 14)), branchId);
   if (!closed(day)) return day;
   if (rule === 'MOVE_BACKWARD') {
     let d = day;
@@ -558,7 +586,7 @@ const isMonthEnd = (d) => {
 module.exports = {
   OVERRIDES, effective, overrideSql, resolveOverrides, within,
   PRODUCT_COLUMNS, lock, read, principalOutstanding, balances, settlement, settlementPlan, terms,
-  scheduleInputs, scheduleInputsFor, termsFor, currencyDecimals, holidaySet, shiftOffClosedDays, closedDays, NON_WORKING_DAY_RULES,
+  scheduleInputs, scheduleInputsFor, termsFor, currencyDecimals, holidaySet, nonWorkingDays, shiftOffClosedDays, closedDays, NON_WORKING_DAY_RULES,
   isAccrual, booksEntries, interestAccrues, paidCredit, creditsFor, writeOffCredit, post,
   interestFor, isMonthEnd, SNAPSHOT_SETTINGS, withSnapshot, settingSql,
 };

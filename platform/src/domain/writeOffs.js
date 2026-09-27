@@ -7,6 +7,7 @@ const fees = require('./fees');
 const funding = require('./funding');
 const workflow = require('./workflow');
 const controls = require('./controls');
+const channels = require('./channels');
 const provisioning = require('./provisioning');
 const PA = require('./productAccounting');
 const types = require('./productTypes');
@@ -509,7 +510,7 @@ async function recoveryCredit(c, l, amount) {
 }
 
 /** Money recovered on a written-off loan through a channel. */
-async function recover(c, loanId, { amount, channelId = 'cash', source = 'MEMBER', collateralId = null, valueDate, narration, createdBy } = {}) {
+async function recover(c, loanId, { amount, channelId = 'cash', source = 'MEMBER', collateralId = null, valueDate, narration, createdBy, user = null } = {}) {
   const { l, left } = await writtenOff(c, loanId);
   if (!SOURCES.includes(source)) throw err(`RECOVERY_SOURCE_MUST_BE_ONE_OF: ${SOURCES.join(', ')} (guarantors: /guarantors/:id/recover)`, 400);
   const amt = round2(amount);
@@ -519,7 +520,7 @@ async function recover(c, loanId, { amount, channelId = 'cash', source = 'MEMBER
     const { rowCount } = await c.query("SELECT 1 FROM loan_collateral WHERE id = $1 AND loan_id = $2 AND status = 'SEIZED'", [collateralId, l.id]);
     if (!rowCount) throw err('COLLATERAL_NOT_SEIZED_ON_THIS_LOAN', 409);
   }
-  const { rows: [ch] } = await c.query('SELECT * FROM transaction_channels WHERE id = $1 AND is_active', [channelId]);
+  const ch = await channels.assertUsable(c, channelId, { side: 'LOAN', type: 'RECOVERY', amount: amt, productId: l.product_id, user });
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
   const date = valueDate ? ymd(valueDate) : today();
 

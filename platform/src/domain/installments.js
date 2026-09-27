@@ -78,7 +78,7 @@ async function buildSchedule(c, l, { persist = true, custom = true } = {}) {
   if (inputs.nonWorkingDays === 'EXTEND_SCHEDULE') {
     const span = S.nominalDueDates({ start, count: count + 60, interval: inputs.interval, fixedDays: inputs.fixedDays,
       shortMonth: inputs.shortMonth, firstOffsetDays: inputs.firstOffsetDays });
-    skipDate = await closedDays(c, start, isoDate(span[span.length - 1]));
+    skipDate = await closedDays(c, start, isoDate(span[span.length - 1]), inputs.branchId);
   }
   const lines = S.draftSchedule({ start, count, principal, ...inputs, skipDate });
   const feePlan = await fees.scheduledFees(c, l, lines);
@@ -86,7 +86,7 @@ async function buildSchedule(c, l, { persist = true, custom = true } = {}) {
   let previous = start;
   for (const line of lines) {
     const dueDate = skipDate ? line.nominalDue
-      : await shiftOffClosedDays(c, line.nominalDue, inputs.nonWorkingDays, { notBefore: previous });
+      : await shiftOffClosedDays(c, line.nominalDue, inputs.nonWorkingDays, { notBefore: previous, branchId: inputs.branchId });
     installments.push({ ...line, dueDate, fee: round2(feePlan[line.number] || 0) });
     previous = dueDate;
   }

@@ -2,6 +2,7 @@
 
 const acct = require('./accounting');
 const savings = require('./savings');
+const customFields = require('./customFields');
 const lending = require('./controls');
 const { err, round2 } = acct;
 const { lock } = require('./ledger');
@@ -35,7 +36,7 @@ const OPEN_APPLICATION = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL'];
 const TAKES_GUARANTORS = [...OPEN_APPLICATION, 'APPROVED', 'ACTIVE', 'IN_ARREARS', 'LOCKED'];
 const COVER_CHECKED = ['APPROVED', 'ACTIVE', 'IN_ARREARS', 'LOCKED'];
 
-async function addGuarantor(c, loanId, { memberId, amount, createdBy = null }) {
+async function addGuarantor(c, loanId, { memberId, amount, createdBy = null, customFields: cf = undefined, user = null }) {
   const l = await lock(c, loanId);
   if (l.enable_guarantors === false) throw err('PRODUCT_DOES_NOT_TAKE_GUARANTORS', 409);
   if (!TAKES_GUARANTORS.includes(l.status)) {
@@ -61,11 +62,12 @@ async function addGuarantor(c, loanId, { memberId, amount, createdBy = null }) {
 
   // A guarantor released earlier pledges again on the same row.
   if (again && again.status === 'PLEDGED') throw err('ALREADY_A_GUARANTOR_ON_THIS_LOAN', 409);
+  const values = await customFields.prepare(c, 'GUARANTOR', { patch: cf || {}, user, creating: true, recordId: again ? again.id : null });
   const { rows } = again
-    ? await c.query("UPDATE loan_guarantors SET pledged_amount = $2, status = 'PLEDGED', recovered = 0 WHERE id = $1 RETURNING *", [again.id, amt])
+    ? await c.query("UPDATE loan_guarantors SET pledged_amount = $2, status = 'PLEDGED', recovered = 0, custom_fields = $3 WHERE id = $1 RETURNING *", [again.id, amt, JSON.stringify(values)])
     : await c.query(
-      `INSERT INTO loan_guarantors (loan_id, member_id, pledged_amount) VALUES ($1,$2,$3) RETURNING *`,
-      [l.id, memberId, amt]);
+      `INSERT INTO loan_guarantors (loan_id, member_id, pledged_amount, custom_fields) VALUES ($1,$2,$3,$4) RETURNING *`,
+      [l.id, memberId, amt, JSON.stringify(values)]);
   if (!OPEN_APPLICATION.includes(l.status)) {
     await c.query(
       `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'GUARANTOR_ADDED','loan_guarantor',$2,$3)`,

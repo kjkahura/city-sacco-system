@@ -2,6 +2,7 @@
 
 const acct = require('./accounting');
 const savings = require('./savings');
+const channels = require('./channels');
 const { pageQuery } = require('../lib/page');
 const { err, round2 } = acct;
 
@@ -37,14 +38,13 @@ async function open(c, { memberId, productId = 'SHR01', accountNo }) {
   return rows[0];
 }
 
-async function purchase(c, accountId, { units, channelId = 'cash', valueDate, narration, createdBy }) {
+async function purchase(c, accountId, { units, channelId = 'cash', valueDate, narration, createdBy, user = null }) {
   const a = await lock(c, accountId);
   if (a.status !== 'ACTIVE') throw err(`SHARE_ACCOUNT_NOT_ACTIVE: ${a.status}`, 409);
   const u = round4(units);
   if (!(u > 0)) throw err('INVALID_UNITS');
 
-  const { rows: [ch] } = await c.query(
-    'SELECT * FROM transaction_channels WHERE id = $1 AND is_active', [channelId]);
+  const ch = await channels.assertUsable(c, channelId, { user });
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
 
   const amount = round2(u * Number(a.unit_price));

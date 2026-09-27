@@ -46,9 +46,12 @@ function localHour(tz = process.env.SCHEDULER_TZ || 'Africa/Nairobi') {
 
 const TASKS = [
   {
+    // Every hour: each tenant runs its end of day at the end-of-day hour in
+    // its own time zone, when its end of day is AUTOMATIC, and retries the
+    // loans it left out (./eod runScheduled).
     name: 'end-of-day',
-    hour: Number(process.env.EOD_HOUR ?? 22),
-    run: () => eod.runAll({}),   // eod.DEFAULT_JOBS
+    hour: 'EVERY',
+    run: () => eod.runScheduled({}),
   },
   {
     name: 'backup',
@@ -77,9 +80,10 @@ async function tick({ log = console.log } = {}) {
   const fired = [];
 
   for (const task of TASKS) {
-    if (hour !== task.hour) continue;
-    if (lastRunOn.get(task.name) === today) continue;
-    lastRunOn.set(task.name, today);
+    const key = task.hour === 'EVERY' ? `${today}T${new Date().getUTCHours()}` : today;
+    if (task.hour !== 'EVERY' && hour !== task.hour) continue;
+    if (lastRunOn.get(task.name) === key) continue;
+    lastRunOn.set(task.name, key);
 
     const out = await withGlobalLock(task.name, async () => {
       const started = Date.now();

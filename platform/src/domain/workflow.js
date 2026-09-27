@@ -31,6 +31,7 @@ const funding = require('./funding');
 const securities = require('./securities');
 const savings = require('./savings');
 const FA = require('./feeAmortization');
+const customFields = require('./customFields');
 const {
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMaySetDisbursementConditions,
 } = require('./controls');
@@ -371,7 +372,7 @@ async function arrearsIndicators(c, l, asOf = null) {
   let inArrears = 0;
   if (l.arrears_since && ['IN_ARREARS', 'LOCKED'].includes(l.status)) {
     const tol = Number(ledger.effective(l).arrearsToleranceDays || 0);
-    inArrears = days(await toleranceDeadline(c, l.arrears_since, tol, l.arrears_non_working_days === 'EXCLUDE'));
+    inArrears = days(await toleranceDeadline(c, l.arrears_since, tol, l.arrears_non_working_days === 'EXCLUDE', l.branch_id || null));
   }
   return { daysLate, daysInArrears: inArrears, asOf: date };
 }
@@ -513,6 +514,15 @@ async function disbursementDetails(c, loanId) {
 }
 
 async function amend(c, loanId, patch, { actor, user = null } = {}) {
+  // Custom field values: editable in any state, closed included (the reference platform),
+  // under each field's edit rights (./customFields).
+  if (patch && patch.customFields !== undefined) {
+    const { customFields: cf, ...rest } = patch;
+    const l0 = await ledger.lock(c, loanId);
+    await customFields.setValues(c, 'LOAN_ACCOUNT', l0.id, cf, { user, createdBy: actor });
+    if (!Object.keys(rest).length) return (await c.query('SELECT * FROM loan_accounts WHERE id = $1', [l0.id])).rows[0];
+    patch = rest;
+  }
   // Disbursement details have their own rules and audit trail.
   const detailKeys = Object.keys(patch || {}).filter((k) => DISBURSEMENT_FIELDS[k]);
   if (detailKeys.length) {
@@ -587,7 +597,7 @@ function daysInArrears(l, asOf = null) {
  * late: due plus the tolerance days, counting only working days when the
  * product says to exclude non-working ones.
  */
-async function toleranceDeadline(c, due, days, excludeNonWorking) {
+async function toleranceDeadline(c, due, days, excludeNonWorking, branchId = null) {
   if (!(days > 0)) return ymd(due);
   if (!excludeNonWorking) {
     const { rows: [r] } = await c.query('SELECT ($1::date + $2::int) AS d', [ymd(due), days]);
@@ -598,10 +608,9 @@ async function toleranceDeadline(c, due, days, excludeNonWorking) {
        SELECT $1::date, 0
        UNION ALL
        SELECT day + 1,
-              CASE WHEN EXTRACT(dow FROM day + 1) IN (0, 6)
-                     OR EXISTS (SELECT 1 FROM holidays h WHERE h.holiday_date = day + 1) THEN n ELSE n + 1 END
+              CASE WHEN is_closed_day((day + 1)::date, $3::uuid) THEN n ELSE n + 1 END
        FROM d WHERE n < $2::int
-     ) SELECT max(day) AS d FROM d`, [ymd(due), days]);
+     ) SELECT max(day) AS d FROM d`, [ymd(due), days, branchId]);
   return ymd(r.d);
 }
 
@@ -614,7 +623,7 @@ async function toleranceDeadline(c, due, days, excludeNonWorking) {
 async function markArrears(c, { asOf = null, loanId = null } = {}) {
   const date = asOf || new Date().toISOString().slice(0, 10);
   const { rows: cands } = await c.query(
-    `SELECT i.*, l.account_no, l.status AS loan_status, l.arrears_since, l.principal_disbursed, l.principal_capitalized, l.principal_paid,
+    `SELECT i.*, l.account_no, l.branch_id, l.status AS loan_status, l.arrears_since, l.principal_disbursed, l.principal_capitalized, l.principal_paid,
             ${ledger.overrideSql('arrearsToleranceDays')} AS tol_days,
             ${ledger.overrideSql('arrearsTolerancePercent')} AS tol_pct,
             ${ledger.settingSql('arrears_tolerance_floor')} AS tol_floor,
@@ -638,7 +647,7 @@ async function markArrears(c, { asOf = null, loanId = null } = {}) {
   out.guard = await G.eachLoan(c, { job: 'markArrears', date }, [...byLoan.keys()], async (loanId) => {
     let f = null;
     for (const i of byLoan.get(loanId)) {
-      const deadline = await toleranceDeadline(c, i.due_date, Number(i.tol_days), i.arrears_non_working_days === 'EXCLUDE');
+      const deadline = await toleranceDeadline(c, i.due_date, Number(i.tol_days), i.arrears_non_working_days === 'EXCLUDE', i.branch_id || null);
       if (date <= deadline) continue;
       const shortfall = round2((i.principal_due - i.principal_paid) + (i.interest_due - i.interest_paid) + (i.fee_due - i.fee_paid));
       if (shortfall <= 0) continue;

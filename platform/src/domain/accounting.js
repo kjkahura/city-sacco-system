@@ -77,6 +77,22 @@ async function balanceBranches(c, lines, home) {
 }
 
 /**
+ * The booking day under the organization's accounting cutoff: the local
+ * date in its time zone, moved to the next day once the cutoff time has
+ * passed. NULL when no cutoff is set (organization_settings, migration 027),
+ * and the posting day is used as before.
+ */
+async function cutoffDay(c) {
+  const { rows: [r] } = await c.query(
+    `SELECT CASE WHEN (now() AT TIME ZONE t.timezone)::time >= s.accounting_cutoff
+                 THEN ((now() AT TIME ZONE t.timezone)::date + 1)::text
+                 ELSE (now() AT TIME ZONE t.timezone)::date::text END AS d
+     FROM organization_settings s JOIN platform.tenants t ON t.schema_name = current_schema()
+     WHERE s.id = 1 AND s.accounting_cutoff IS NOT NULL`);
+  return r ? r.d : null;
+}
+
+/**
  * @param {import('pg').PoolClient} c  open client with search_path on a tenant
  * @param {object} p
  * @param {Array<{glCode:string, amount:number, memberId?:string, branchId?:string}>} p.debits
@@ -99,6 +115,10 @@ async function post(c, {
     .map((l) => ({ ...l, branchId: l.branchId === undefined ? branchId : l.branchId }));
   lines = await balanceBranches(c, lines, branchId);
 
+  // With no booking date given, the day is today, or tomorrow once the
+  // organization's accounting cutoff time has passed (the reference platform's Accounting
+  // Cutoff, in the organization's time zone).
+  if (!bookingDate) bookingDate = await cutoffDay(c);
   const date = bookingDate ? isoDay(bookingDate) : isoDay(new Date());
   if (!CLOSING_SOURCES.includes(sourceType)) await assertOpen(c, date, lines.map((l) => l.branchId));
 
@@ -334,6 +354,6 @@ async function balances(c, { from = null, to = null } = {}) {
 }
 
 module.exports = {
-  post, reverse, balance, balances, trialBalance, verifyRollup, round2, err, closedThrough, isoDay,
+  post, reverse, balance, balances, trialBalance, verifyRollup, round2, err, closedThrough, isoDay, cutoffDay,
   MOVEMENT_SQL, MOVEMENT_SQL_TRADING, MOVEMENT_SQL_FROM_LINES,
 };

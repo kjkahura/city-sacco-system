@@ -6,6 +6,9 @@ const S = require('./schedule');
 const tax = require('./tax');
 const ledger = require('./ledger');
 const controls = require('./controls');
+const channels = require('./channels');
+const CFD = require('./customFields');
+const branches = require('./branches');
 const tranches = require('./tranches');
 const funding = require('./funding');
 const eligibility = require('./eligibility');
@@ -135,7 +138,8 @@ async function nextAccountNo(c, p) {
  */
 async function apply(c, params, { refinance = null, settles = refinance?.of || null } = {}) {
   const { memberId, productId = 'NL01', principal, termMonths, purpose, notes, name, accountNo, createdBy,
-    tranches: plannedTranches = null, fundingSources = null, collateral = null, branchId = undefined } = params;
+    tranches: plannedTranches = null, fundingSources = null, collateral = null, branchId = undefined,
+    customFields = {}, carriedCustomFields = null, user = null } = params;
   const { rows: [p] } = await c.query('SELECT * FROM loan_products WHERE id = $1 AND is_active', [productId]);
   if (!p) throw err('UNKNOWN_LOAN_PRODUCT', 404);
 
@@ -157,8 +161,19 @@ async function apply(c, params, { refinance = null, settles = refinance?.of || n
   const status = p.initial_state || 'PENDING_APPROVAL';
   // The loan sits in its member's branch unless told otherwise.
   const { rows: [mem] } = await c.query('SELECT branch_id FROM members WHERE id = $1', [memberId]);
+  const loanBranch = branchId === undefined ? mem?.branch_id || null : branchId;
+  // The product must be offered in the loan's branch (the reference platform's product
+  // availability); a restructure stays with the product it was given.
+  if (!settles) branches.assertProductAvailable(p, loanBranch, 'loan product');
+  // Custom fields for the product; a reschedule or top-up carries the old
+  // loan's values across (carriedCustomFields) and does not ask for the
+  // required ones.
+  const values = await CFD.prepare(c, 'LOAN_ACCOUNT', {
+    item: p.id, patch: customFields || {}, previous: carriedCustomFields ? await CFD.carry(c, 'LOAN_ACCOUNT', p.id, carriedCustomFields) : {},
+    user, creating: !settles,
+  });
   const cols = {
-    branch_id: branchId === undefined ? mem?.branch_id || null : branchId,
+    branch_id: loanBranch, custom_fields: JSON.stringify(values),
     account_no: no, member_id: memberId, product_id: productId, principal: amount, term_months: term,
     product_type: p.product_type || 'FIXED_TERM', status, purpose: purpose || null, notes: notes || null, name: name ? String(name).slice(0, 200) : null,
     ...own,
@@ -244,6 +259,21 @@ async function disburse(c, loanId, { amount, channelId = null, valueDate, narrat
     await c.query('UPDATE loan_accounts SET first_repayment_date = $2::date WHERE id = $1', [l.id, ymd(firstRepaymentDate)]);
     l = await lock(c, l.id);
   }
+  // A member of a centre with a weekly meeting day repays on it: the first
+  // repayment moves to the next meeting day on or after the date the
+  // schedule would have given it (the reference platform's Weekly Meeting Day).
+  if (first && !l.first_repayment_date && type.schedulesUpfront && !(Array.isArray(l.fixed_days_of_month) && l.fixed_days_of_month.length)) {
+    const { rows: [ce] } = await c.query(
+      "SELECT ce.meeting_day FROM members m JOIN centres ce ON ce.id = m.centre_id WHERE m.id = $1 AND ce.status = 'ACTIVE' AND ce.meeting_day IS NOT NULL",
+      [l.member_id]);
+    if (ce) {
+      const inputs = ledger.scheduleInputs(l);
+      let d = S.addDays(S.addInterval(date, inputs.interval, 1), inputs.firstOffsetDays || 0);
+      while (d.getUTCDay() !== Number(ce.meeting_day)) d = S.addDays(d, 1);
+      await c.query('UPDATE loan_accounts SET first_repayment_date = $2::date WHERE id = $1', [l.id, isoDate(d)]);
+      l = await lock(c, l.id);
+    }
+  }
   if (first && l.first_repayment_date && ymd(l.first_repayment_date) <= date) {
     throw err(`FIRST_REPAYMENT_DATE_NOT_AFTER_DISBURSEMENT: ${ymd(l.first_repayment_date)}`, 409);
   }
@@ -260,10 +290,8 @@ async function disburse(c, loanId, { amount, channelId = null, valueDate, narrat
   // The required securities, checked again before the money leaves.
   if (first) await eligibility.assertCovered(c, l);
 
-  const { rows: [ch] } = await c.query(
-    'SELECT * FROM transaction_channels WHERE id = $1 AND is_active', [channelId]
-  );
-  if (!ch) throw err(`UNKNOWN_TRANSACTION_CHANNEL: ${channelId}`);
+  // The channel's usage rights and loan constraints (./channels).
+  const ch = await channels.assertUsable(c, channelId, { side: 'LOAN', type: 'DISBURSEMENT', amount: amt, productId: l.product_id, user });
   if (!ch.gl_account_code) throw err(`CHANNEL_HAS_NO_GL_ACCOUNT: ${channelId}`);
 
   // Disbursement fees: on the amount paid out now. Upfront fees (and the
@@ -516,7 +544,7 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   let left = round2(amount);
   if (!(left > 0)) throw err('INVALID_REPAYMENT_AMOUNT');
 
-  const ch = (await c.query('SELECT * FROM transaction_channels WHERE id = $1 AND is_active', [channelId])).rows[0];
+  const ch = await channels.assertUsable(c, channelId, { side: 'LOAN', type: 'REPAYMENT', amount: left, productId: l.product_id, user });
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
 
   const asOf = valueDate ? ymd(valueDate) : isoDate(new Date());

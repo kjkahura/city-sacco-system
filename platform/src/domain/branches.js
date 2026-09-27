@@ -3,6 +3,7 @@
 const acct = require('./accounting');
 const ledger = require('./ledger');
 const savings = require('./savings');
+const CF = require('./customFields');
 const { err, round2, isoDay } = acct;
 
 /**
@@ -33,27 +34,194 @@ async function list(c) {
   return rows;
 }
 
-async function create(c, { code, name, town = null, phone = null, createdBy }) {
+const BRANCH_FIELDS = { name: 'name', town: 'town', phone: 'phone', address: 'address', email: 'email', notes: 'notes' };
+
+function branchCols(body, creating) {
+  const out = {};
+  for (const [k, col] of Object.entries(BRANCH_FIELDS)) {
+    if (body[k] === undefined) continue;
+    out[col] = body[k] === '' ? null : String(body[k]).slice(0, col === 'notes' ? 4000 : 255);
+  }
+  if (creating && !out.name) throw err('BRANCH_NAME_REQUIRED', 400);
+  if (body.name !== undefined && !out.name) throw err('BRANCH_NAME_REQUIRED', 400);
+  if (out.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(out.email)) throw err('INVALID_EMAIL', 400);
+  return out;
+}
+
+/**
+ * A branch (the reference platform's Administration > Organization > Branches): name and ID
+ * (code) required; address, phone, email, notes and custom fields optional.
+ */
+async function create(c, { code, createdBy, user = null, customFields = {}, ...body }) {
   if (!code || !/^[A-Z0-9_-]{2,16}$/.test(code)) throw err('BRANCH_CODE_MUST_BE_2_TO_16_UPPERCASE_CHARACTERS', 400);
-  if (!name) throw err('BRANCH_NAME_REQUIRED', 400);
+  const cols = { code, ...branchCols(body, true) };
+  cols.custom_fields = JSON.stringify(await CF.prepare(c, 'BRANCH', { patch: customFields, user, creating: true }));
+  const keys = Object.keys(cols);
   const { rows } = await c.query(
-    'INSERT INTO branches (code, name, town, phone) VALUES ($1,$2,$3,$4) ON CONFLICT (code) DO NOTHING RETURNING *', [code, name, town, phone]);
+    `INSERT INTO branches (${keys.join(', ')}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(', ')}) ON CONFLICT (code) DO NOTHING RETURNING *`,
+    keys.map((k) => cols[k]));
   if (!rows.length) throw err('BRANCH_CODE_EXISTS', 409);
   await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'BRANCH_CREATED','branch',$2,$3)`,
     [createdBy || 'SYSTEM', rows[0].id, JSON.stringify(rows[0])]);
   return rows[0];
 }
 
-async function update(c, id, { name, town, phone, status, createdBy }) {
+/**
+ * Edit a branch, or deactivate it (status CLOSED) and reactivate it. A
+ * branch with active accounts can be deactivated; one with active centres
+ * cannot (the reference platform). A deactivated branch still shows in searches and reports.
+ */
+async function update(c, id, { status, createdBy, user = null, customFields, ...body }) {
   const { rows: [before] } = await c.query('SELECT * FROM branches WHERE id::text = $1 OR code = $1 FOR UPDATE', [id]);
   if (!before) throw err('BRANCH_NOT_FOUND', 404);
-  if (status && !['ACTIVE', 'CLOSED'].includes(status)) throw err('STATUS_MUST_BE_ACTIVE_OR_CLOSED', 400);
+  const cols = branchCols(body, false);
+  if (status !== undefined) {
+    const st = status === 'INACTIVE' ? 'CLOSED' : status;
+    if (!['ACTIVE', 'CLOSED'].includes(st)) throw err('STATUS_MUST_BE_ACTIVE_OR_CLOSED', 400);
+    if (st === 'CLOSED' && before.status !== 'CLOSED') {
+      const { rows: [n] } = await c.query("SELECT count(*)::int AS n FROM centres WHERE branch_id = $1 AND status = 'ACTIVE'", [before.id]);
+      if (n.n > 0) throw err(`BRANCH_HAS_ACTIVE_CENTRES: ${n.n}; deactivate them first`, 409);
+    }
+    cols.status = st;
+  }
+  if (customFields !== undefined) {
+    cols.custom_fields = JSON.stringify(await CF.prepare(c, 'BRANCH', { patch: customFields, previous: before.custom_fields, user, recordId: before.id }));
+  }
+  const keys = Object.keys(cols);
+  if (!keys.length) throw err('NO_UPDATABLE_FIELDS', 400);
   const { rows: [after] } = await c.query(
-    `UPDATE branches SET name = COALESCE($2, name), town = COALESCE($3, town), phone = COALESCE($4, phone),
-       status = COALESCE($5, status) WHERE id = $1 RETURNING *`, [before.id, name ?? null, town ?? null, phone ?? null, status ?? null]);
+    `UPDATE branches SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`,
+    [before.id, ...keys.map((k) => cols[k])]);
   await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'BRANCH_CHANGED','branch',$2,$3,$4)`,
     [createdBy || 'SYSTEM', before.id, JSON.stringify(before), JSON.stringify(after)]);
   return after;
+}
+
+/** A branch with its centres, what sits in it, its holidays and its activity (the reference platform's branch view). */
+async function detail(c, id) {
+  const b = await resolve(c, id);
+  const { rows: [counts] } = await c.query(
+    `SELECT (SELECT count(*)::int FROM members WHERE branch_id = $1) AS members,
+            (SELECT count(*)::int FROM loan_accounts WHERE branch_id = $1 AND status IN ('ACTIVE', 'IN_ARREARS', 'LOCKED')) AS active_loans,
+            (SELECT count(*)::int FROM savings_accounts WHERE branch_id = $1 AND status = 'ACTIVE') AS active_deposits`, [b.id]);
+  const { rows: centres } = await c.query('SELECT * FROM centres WHERE branch_id = $1 ORDER BY code', [b.id]);
+  const { rows: holidays } = await c.query('SELECT id, name AS description, holiday_date, recurring FROM holidays WHERE branch_id = $1 ORDER BY holiday_date', [b.id]);
+  const { rows: activity } = await c.query(
+    `SELECT actor, action, created_at FROM audit_log WHERE entity = 'branch' AND entity_id = $1 ORDER BY created_at DESC LIMIT 50`, [String(b.id)]);
+  return { ...b, ...counts, centres, holidays, activity };
+}
+
+/** Branch references (IDs or codes) as IDs; null or an empty list for every branch. */
+async function resolveBranchIds(c, list) {
+  if (list === null || list === undefined || (Array.isArray(list) && !list.length)) return null;
+  if (!Array.isArray(list)) throw err('AVAILABLE_BRANCHES_IS_A_LIST_OR_NULL', 400);
+  const ids = [];
+  for (const ref of list) ids.push((await resolve(c, String(ref))).id);
+  return [...new Set(ids)];
+}
+
+/** Refuse a product the branch may not offer (the reference platform's product availability per branch). */
+function assertProductAvailable(product, branchId, label = 'product') {
+  if (!product.branch_ids || !product.branch_ids.length || !branchId) return;
+  if (!product.branch_ids.includes(branchId)) throw err(`${label.toUpperCase()}_NOT_AVAILABLE_IN_THIS_BRANCH: ${product.id}`, 409);
+}
+
+// --------------------------------------------------------------------------
+// Centres
+// --------------------------------------------------------------------------
+
+const CENTRE_FIELDS = { name: 'name', address: 'address', notes: 'notes' };
+
+async function centres(c, { branchId = null, includeInactive = true } = {}) {
+  const branch = branchId ? (await resolve(c, branchId)).id : null;
+  const { rows } = await c.query(
+    `SELECT ce.*, b.code AS branch_code, b.name AS branch_name, (SELECT count(*)::int FROM members m WHERE m.centre_id = ce.id) AS members
+     FROM centres ce JOIN branches b ON b.id = ce.branch_id
+     WHERE ($1::uuid IS NULL OR ce.branch_id = $1) AND ($2::boolean OR ce.status = 'ACTIVE') ORDER BY b.code, ce.code`,
+    [branch, includeInactive]);
+  return rows;
+}
+
+async function findCentre(c, id) {
+  const { rows: [ce] } = await c.query('SELECT * FROM centres WHERE id::text = $1 OR code = $1', [String(id)]);
+  if (!ce) throw err(`UNKNOWN_CENTRE: ${id}`, 404);
+  return ce;
+}
+
+function meetingDay(v) {
+  if (v === undefined) return undefined;
+  if (v === null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0 || n > 6) throw err('MEETING_DAY_IS_0_SUNDAY_TO_6_SATURDAY', 400);
+  return n;
+}
+
+/**
+ * A centre: a subdivision of a branch that members can belong to, with an
+ * optional weekly meeting day. A new loan for a member of a centre with a
+ * meeting day has its first repayment moved to the next meeting day (./loans).
+ */
+async function createCentre(c, { code, branchId, meetingDay: md, customFields = {}, createdBy, user = null, ...body } = {}) {
+  if (!code || !/^[A-Z0-9_-]{2,16}$/.test(code)) throw err('CENTRE_CODE_MUST_BE_2_TO_16_UPPERCASE_CHARACTERS', 400);
+  if (!body.name) throw err('CENTRE_NAME_REQUIRED', 400);
+  const b = await resolve(c, branchId);
+  if (b.status !== 'ACTIVE') throw err('BRANCH_IS_DEACTIVATED', 409);
+  const cols = { code, branch_id: b.id, meeting_day: meetingDay(md) ?? null };
+  for (const [k, col] of Object.entries(CENTRE_FIELDS)) if (body[k] !== undefined) cols[col] = body[k] || null;
+  cols.custom_fields = JSON.stringify(await CF.prepare(c, 'CENTRE', { patch: customFields, user, creating: true }));
+  const keys = Object.keys(cols);
+  const { rows: [ce] } = await c.query(
+    `INSERT INTO centres (${keys.join(', ')}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(', ')}) ON CONFLICT (code) DO NOTHING RETURNING *`,
+    keys.map((k) => cols[k]));
+  if (!ce) throw err('CENTRE_CODE_EXISTS', 409);
+  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'CENTRE_CREATED','centre',$2,$3)`,
+    [createdBy || 'SYSTEM', ce.id, JSON.stringify(ce)]);
+  return ce;
+}
+
+async function updateCentre(c, id, { meetingDay: md, status, customFields, branchId, createdBy, user = null, ...body } = {}) {
+  const before = await findCentre(c, id);
+  const cols = {};
+  for (const [k, col] of Object.entries(CENTRE_FIELDS)) if (body[k] !== undefined) cols[col] = body[k] || null;
+  if (cols.name === null) throw err('CENTRE_NAME_REQUIRED', 400);
+  const m = meetingDay(md);
+  if (m !== undefined) cols.meeting_day = m;
+  if (branchId !== undefined) {
+    const b = await resolve(c, branchId);
+    if (b.id !== before.branch_id) {
+      const { rows: [n] } = await c.query('SELECT count(*)::int AS n FROM members WHERE centre_id = $1', [before.id]);
+      if (n.n > 0) throw err(`CENTRE_HAS_MEMBERS: ${n.n}; it cannot move branch`, 409);
+      cols.branch_id = b.id;
+    }
+  }
+  if (status !== undefined) {
+    if (!['ACTIVE', 'INACTIVE'].includes(status)) throw err('STATUS_MUST_BE_ACTIVE_OR_INACTIVE', 400);
+    if (status === 'ACTIVE') {
+      const { rows: [b] } = await c.query('SELECT status FROM branches WHERE id = $1', [cols.branch_id || before.branch_id]);
+      if (b.status !== 'ACTIVE') throw err('BRANCH_IS_DEACTIVATED', 409);
+    }
+    cols.status = status;
+  }
+  if (customFields !== undefined) {
+    cols.custom_fields = JSON.stringify(await CF.prepare(c, 'CENTRE', { patch: customFields, previous: before.custom_fields, user, recordId: before.id }));
+  }
+  const keys = Object.keys(cols);
+  if (!keys.length) throw err('NO_UPDATABLE_FIELDS', 400);
+  const { rows: [after] } = await c.query(
+    `UPDATE centres SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`,
+    [before.id, ...keys.map((k) => cols[k])]);
+  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'CENTRE_CHANGED','centre',$2,$3,$4)`,
+    [createdBy || 'SYSTEM', before.id, JSON.stringify(before), JSON.stringify(after)]);
+  return after;
+}
+
+/** The centre a member may be put in: active, and in the member's branch. */
+async function centreFor(c, centreId, branchId) {
+  if (!centreId) return null;
+  const ce = await findCentre(c, centreId);
+  if (ce.status !== 'ACTIVE') throw err('CENTRE_IS_DEACTIVATED', 409);
+  if (branchId && ce.branch_id !== branchId) throw err('CENTRE_IS_IN_ANOTHER_BRANCH', 409);
+  return ce;
 }
 
 async function resolve(c, id) {
@@ -294,4 +462,5 @@ async function moveAccount(c, { kind, accountId, branchId, createdBy }) {
 
 module.exports = {
   list, create, update, resolve, rules, setRules, closures, close, reopen, settings, updateSettings, autoClose, moveAccount,
+  detail, resolveBranchIds, assertProductAvailable, centres, findCentre, createCentre, updateCentre, centreFor,
 };

@@ -64,8 +64,10 @@ function addInterval(d, { unit = 'MONTHS', every = 1 } = {}, times = 1) {
 
 /**
  * Days from `from` (exclusive) to `to` (inclusive) under a convention.
- * BUS_252 counts business days only: not Saturdays or Sundays, and not the
- * dates in `holidays` (a Set of YYYY-MM-DD), Brazil's convention.
+ * BUS_252 counts business days only: not the organization's non-working
+ * days of the week (Saturday and Sunday unless `holidays.nonWorking` says
+ * otherwise), and not the dates in `holidays` (a Set of YYYY-MM-DD),
+ * Brazil's convention.
  */
 function dayCount(from, to, convention, holidays = null) {
   const a = toUTC(from);
@@ -73,9 +75,11 @@ function dayCount(from, to, convention, holidays = null) {
   if (b <= a) return 0;
   if (convention === 'BUS_252') {
     let n = 0;
+    // The organization's non-working days of the week, when the holidays
+    // carry them (ledger.holidaySet); Saturday and Sunday otherwise.
+    const off = (holidays && Array.isArray(holidays.nonWorking)) ? holidays.nonWorking : [0, 6];
     for (let d = addDays(a, 1); d <= b; d = addDays(d, 1)) {
-      const dow = d.getUTCDay();
-      if (dow !== 0 && dow !== 6 && !(holidays && holidays.has(isoDate(d)))) n += 1;
+      if (!off.includes(d.getUTCDay()) && !(holidays && holidays.has(isoDate(d)))) n += 1;
     }
     return n;
   }

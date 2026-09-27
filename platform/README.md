@@ -1560,6 +1560,100 @@ After the reference platform's "Closing and exiting a loan account" pages.
   unlock, as before, because on a fixed schedule the installment interest
   is contractual.
 
+### Managing your organization
+
+After the reference platform's "Managing your Organization" pages. The console's
+Organization page covers all of it.
+
+- **Organization details.** `GET` and `PUT /api/organization` (tenant
+  admin): institution name, contact details (street address, city,
+  region, postcode, country, phone, email), base currency, time zone, date
+  and date/time formats and the decimal mark. The name, time zone and
+  currency live on `platform.tenants`. The base currency changes only while
+  nothing is posted, and only to a currency in the register.
+- **Branding.** `PUT /api/organization/branding/logo` or `/icon` with a
+  base64 PNG, JPEG, GIF or WebP up to 512 KB (SVG is refused: it can carry
+  script). The logo is public for the tenant, for the sign-in screen.
+- **Branches.** Address, email and notes as well as code, name, town and
+  phone; `GET /api/branches/:id` shows centres, counts, holidays and
+  activity. A branch with active centres cannot be deactivated.
+- **Centres.** `/api/centres`: a code, a name, a branch, an optional weekly
+  meeting day (0 Sunday to 6 Saturday), deactivate and reactivate. A member
+  may be put in a centre of their branch. A loan to a member of a centre
+  with a meeting day has its first repayment moved to the next meeting day
+  on or after the date the schedule would give it.
+- **Product availability per branch.** `availableBranches` on loan and
+  deposit products (IDs or codes; null for every branch). An application or
+  deposit account in another branch is refused.
+- **Holidays and non-working days.** `/api/holidays`: holidays on a date or
+  recurring every year, organization-wide, for a branch or for a currency,
+  each with an ID; `PUT /api/holidays/non-working-days` sets the days of the
+  week. One SQL function, `is_closed_day`, answers for schedules, arrears
+  tolerance and penalty days, with a loan's branch holidays counted for it.
+  A change marks the calendar changed; `syncCalendar` (or
+  `POST /api/holidays/sync`) then moves the unpaid installments due after
+  today to where the product's rule puts their nominal dates. Amounts stay;
+  installments already due are not moved.
+- **Transaction channels.** `/api/transaction-channels`: create, edit,
+  deactivate, delete if never used, and reorder. Cash is the default and
+  cannot be deleted or deactivated. Usage rights by role, and loan and
+  deposit constraints by amount, transaction type and product, matched ALL
+  or ANY, are checked on disbursements, repayments, recoveries, deposits and
+  withdrawals. The `internal` repayment flag and the `offsetPledge`
+  withdrawal flag are refused from the wire.
+- **ID templates.** `/api/id-templates`: ID type, issuing authority, an input
+  mask (# digit, @ letter, $ either), mandatory, allow attachments; a toggle
+  for Other documents. Members carry documents
+  (`/api/members/:id/identifications`), checked against the mask; mandatory
+  templates are required when a member is created. A template in use cannot
+  be deleted.
+- **Rates.** A rate source has a kind: INTEREST, VAT or WITHHOLDING. Loan
+  products take `taxSourceId` (VAT) and deposit products
+  `withholdingSourceId`; the value in force becomes the product's
+  percentage, at once for a value dated today or earlier and through
+  `updateTaxRates` for later ones. A value already in force for a source in
+  use cannot be edited or deleted, nor can a source in use.
+- **Currencies.** `/api/currencies`: the base currency and other ISO 4217
+  fiat currencies (code and decimals fixed, name, symbol and position
+  editable), exchange rates (buy and sell, from a moment, never before the
+  latest) and accounting rates. Products and accounts stay in the base
+  currency; cryptocurrencies and non-traditional currencies are not offered.
+- **End of day.** `GET` and `PUT /api/organization/eod`: AUTOMATIC or MANUAL,
+  an accounting cutoff time (a posting with no booking date after it is
+  booked on the next local day) and hourly retries of loans left out.
+  `POST /api/organization/eod/run` is Run Now for a tenant on manual end of
+  day. Each run is recorded in `eod_completions` with its state, failed jobs
+  and loans left out (the reference platform's Accounts Updated event, kept for when
+  notifications exist).
+- **Custom fields.** `/api/custom-fields`: sets (standard or grouped) and
+  definitions for members, loan accounts, deposit accounts, deposit
+  products, guarantors, collateral, branches, centres, users and
+  transactions by channel. Nine the reference platform types less group links (there are no
+  groups): free text with a mask and a unique flag, selection with scores
+  and dependent options, number, checkbox, date, date and time, member and
+  user links. Usage is Available, Default or Required, per loan product,
+  deposit product or channel where the reference platform allows it. View and edit rights
+  are per role. Values sit with the record in `custom_fields` in the reference platform's
+  API v2 shape; `GET` and `PUT /api/custom-fields/values/:entity/:id` read
+  and change them in any state, and the create paths (members, loan
+  applications, deposit accounts, branches, centres, guarantors, collateral,
+  deposit products, channel postings) take `customFields`. A reschedule or
+  top-up carries the old loan's values across. Deactivated fields keep
+  their values; only unused fields are deleted. At most 200 values per
+  record.
+- **Product documents.** `/api/documents/templates/:kind/:productId`: HTML
+  templates per product, for an account or a transaction, with
+  placeholders (organization, member, account, transaction and custom
+  fields), statement and schedule blocks and page breaks.
+  `GET /api/documents/:kind/:accountId/:docId` fills one in the
+  organization's date format and decimal mark and serves it under a content
+  security policy that allows no script.
+- **Native fields** need nothing new: custom field sets appear in JSON
+  under their `_` IDs, beside the native fields.
+- **Found on the way:** new member numbers compared the digits of existing
+  numbers as text, so '0006' sorted after '000007' and a number could repeat.
+  They are compared as numbers now.
+
 ## Shares and dividends
 
 Shares are equity, not a deposit. Buying them credits share capital; a
@@ -1658,17 +1752,24 @@ The test suite runs a full backup, restore and integrity round trip.
 
 **Scheduling** is a plain timer behind `pg_try_advisory_lock`, so two
 instances cannot both fire a sweep. Set `SCHEDULER=on`. On Kubernetes, leave
-it off and use a CronJob calling the CLI instead.
+it off and use a CronJob calling the CLI instead. The end-of-day sweep runs
+every hour: each tenant whose end of day is AUTOMATIC runs it when the local
+hour in its own time zone is `EOD_HOUR` (22 by default), on its local date,
+and each tenant set to retry loans left out has them tried again.
 
 ## The daily sequence
 
-`eod.DEFAULT_JOBS`, run by the scheduler or by `cli eod:run`, in this order:
+`eod.DEFAULT_JOBS`, run by the scheduler or by `cli eod:run`, in this order
+(abridged; `src/ops/eod.js` has the full list):
 
 1. `ensureFinancialYear`: opens the calendar year covering the business date
    if no financial year does. On 1 January the new year opens itself; a SACCO
    on a July to June year opens its years by hand and this leaves them alone.
-2. `billRevolving`: generates the installment on every revolving loan whose
-   billing date has come
+2. `syncCalendar`: re-dates open loans after a holiday or non-working day
+   change; then `billRevolving`, which generates the installment on every
+   revolving loan whose billing date has come, and `updateTaxRates` (after
+   `reviewRates`): products with a VAT or withholding tax rate source take
+   its value for the day
 3. `accrueInterest`
 4. `accrueSavings`: deposit interest (positive, negative and overdraft)
    accrued through the date, applied on each product's application dates
