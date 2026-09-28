@@ -117,6 +117,9 @@ const TABLES = {
   group_members: 'The individual members of each group.',
   group_member_roles: 'The role names each group member holds in the group.',
   client_controls: 'The client and group internal controls (one row): initial state, duplicate checks, required assignments, group membership and size, anonymization.',
+  account_counters: 'The counters deposit and share account numbers are given from.',
+  member_media: 'Members\' pictures and signatures.',
+  member_identification_files: 'The files on a member\'s identification document (up to five).',
 };
 
 const ABBR = { inc: 'income', rec: 'receivable', exp: 'expense', od: 'overdraft', neg: 'negative', ns: 'non-scheduled', gl: 'GL' };
@@ -972,6 +975,22 @@ const COLUMNS = {
   'loan_products.available_for': 'Who may hold it: INDIVIDUALS, GROUPS or both.',
   'savings_products.available_for': 'Who may hold it: INDIVIDUALS, GROUPS or both.',
   'share_products.available_for': 'Who may hold it: INDIVIDUALS, GROUPS or both.',
+  'account_counters.kind': 'SAVINGS (deposit accounts) or SHARES (share accounts).',
+  'account_counters.prefix': 'The letters before the number (SA, SH).',
+  'account_counters.width': 'The digits the number is padded to; a longer number is not cut.',
+  'account_counters.next_number': 'The next number to give; one already taken is stepped over.',
+  'member_media.kind': 'PICTURE or SIGNATURE.',
+  'member_media.content': 'The image.',
+  'member_media.content_type': 'image/png, image/jpeg or image/gif, as read from the image itself.',
+  'member_media.file_name': 'The uploaded file\'s name.',
+  'member_media.size_bytes': 'Its size in bytes.',
+  'member_media.uploaded_by': 'The user (email) who uploaded it.',
+  'member_media.uploaded_at': 'When it was uploaded.',
+  'member_identification_files.identification_id': 'The identification document (member_identifications.id).',
+  'member_identification_files.file_name': 'The uploaded file\'s name.',
+  'member_identification_files.content_type': 'image/png, image/jpeg or application/pdf, as read from the file itself.',
+  'member_identification_files.content': 'The file.',
+  'member_identification_files.size_bytes': 'Its size in bytes (at most 50 MB).',
 };
 
 /** Loan product columns that mirror a loan override are described once, here. */

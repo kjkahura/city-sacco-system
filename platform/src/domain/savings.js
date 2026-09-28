@@ -1,5 +1,7 @@
 'use strict';
 
+const NUMBERS = require('./accountNumbers');
+
 const acct = require('./accounting');
 const S = require('./schedule');
 const PA = require('./productAccounting');
@@ -783,8 +785,7 @@ async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = un
     throw err(`DEPOSIT_PRODUCT_NOT_AVAILABLE_IN_THIS_BRANCH: ${p.id}`, 409);
   }
   const values = await customFields.prepare(c, 'SAVINGS_ACCOUNT', { item: p.id, patch: cf || {}, user, creating: true });
-  const no = accountNo || (await c.query(
-    `SELECT 'SA' || lpad((count(*)+1)::text, 6, '0') AS n FROM savings_accounts`)).rows[0].n;
+  const no = accountNo || await NUMBERS.next(c, 'SAVINGS');
   const { rows } = await c.query(
     `INSERT INTO savings_accounts (account_no, member_id, product_id, status, branch_id, overdraft_limit, opened_on, period_started_on, custom_fields)
      VALUES ($1,$2,$3,'ACTIVE',$4,$5,COALESCE($6::date, current_date),COALESCE($6::date, current_date),$7) RETURNING *`,

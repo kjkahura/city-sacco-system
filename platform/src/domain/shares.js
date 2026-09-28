@@ -1,5 +1,7 @@
 'use strict';
 
+const NUMBERS = require('./accountNumbers');
+
 const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const savings = require('./savings');
@@ -30,8 +32,7 @@ async function lock(c, accountId) {
 }
 
 async function open(c, { memberId, productId = 'SHR01', accountNo }) {
-  const no = accountNo || (await c.query(
-    `SELECT 'SH' || lpad((count(*)+1)::text, 6, '0') AS n FROM share_accounts`)).rows[0].n;
+  const no = accountNo || await NUMBERS.next(c, 'SHARES');
   const { rows } = await c.query(
     `INSERT INTO share_accounts (account_no, member_id, product_id) VALUES ($1,$2,$3) RETURNING *`,
     [no, memberId, productId]

@@ -160,8 +160,10 @@ accounting.get('/journal', requireAuth(), async (req, res, next) => {
        WHERE ($1::date IS NULL OR e.booking_date >= $1::date)
          AND ($2::date IS NULL OR e.booking_date <= $2::date)
          AND ($3::text IS NULL OR l.gl_code = $3::text)
+         AND ($4::uuid[] IS NULL OR l.branch_id = ANY($4::uuid[]))
        ORDER BY e.booking_date DESC, e.id, l.line_no`,
-      [req.query.from || null, req.query.to || null, req.query.glCode || null],
+      // A branch-limited user reads the lines of their branches (lib/ledgerScope).
+      [req.query.from || null, req.query.to || null, req.query.glCode || null, req.ledgerBranches || null],
       req.query
     ));
     sendPage(res, page);

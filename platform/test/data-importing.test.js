@@ -159,7 +159,7 @@ function templateWorkbook() {
       d.status === 'PENDING_APPROVAL' && d.import_state === 'DRAFT' && d.as_of === '2026-06-30', JSON.stringify(d.errors).slice(0, 800));
     const sorted = (o) => JSON.stringify(Object.fromEntries(Object.entries(o || {}).sort()));
     check('the review says what it will create',
-      sorted(d.summary.creates) === sorted({ glAccounts: 1, branches: 1, centres: 1, members: 3, deposits: 2, shares: 0, loans: 6, installments: 21, transactions: 6, openingEntryLines: 7 }),
+      sorted(d.summary.creates) === sorted({ glAccounts: 1, branches: 1, centres: 1, members: 3, groups: 0, groupMembers: 0, deposits: 2, shares: 0, loans: 6, installments: 21, transactions: 6, openingEntryLines: 7 }),
       JSON.stringify(d.summary.creates));
     check('the subledgers match the chart of accounts, so no warnings', d.warnings.length === 0, JSON.stringify(d.warnings));
 
@@ -273,10 +273,10 @@ function templateWorkbook() {
     const m1 = b1.body.errors.map((e) => `${e.sheet}:${e.row}:${e.message}`);
     const has = (re) => m1.some((m) => re.test(m));
     check('INVALID', b1.body.status === 'INVALID', b1.text.slice(0, 200));
-    check('groups are not imported (they are created in the console or through /api/groups)', has(/^Groups:.*Groups are not imported/), m1.join(' | '));
+    check('groups are imported now: the Groups sheet is not refused as a whole', !has(/Groups are not imported/), m1.join(' | '));
     check('an ID over 32 characters', has(/^Clients:2:Member number is longer than 32 characters/));
     check('text over 255 characters', has(/^Clients:3:First name is longer than 255 characters/));
-    check('a group loan', has(/^Loan Accounts:2:Group loans are not imported/));
+    check('a group loan is no longer refused for being a group loan', !has(/Group loans are not imported/), m1.join(' | '));
     check('a principal interval other than 1', has(/^Loan Accounts:3:Principal paid less often/));
     check('a closed loan that still owes', has(/^Loan Accounts:4:A closed loan owes nothing/));
     check('transactions that do not start with the disbursement', has(/^Loan Accounts:5:.*start with its DISBURSEMENT/));

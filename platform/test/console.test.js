@@ -421,6 +421,17 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForSelector('#client-controls');
     check('the organization page has the client and group types, role names and client controls',
       /new members start/i.test(await page.textContent('#org-clients')) && /Client/.test(await page.textContent('#org-clients')));
+    await page.click('[data-branch-open]');
+    await page.waitForSelector('#branch-detail');
+    check('a branch opens on its own page (with its report templates, when there are any)', /Running loans/.test(await page.textContent('#branch-detail')));
+    await page.evaluate((m) => memberDetail(m), mid);
+    await page.waitForSelector('#member-media');
+    check('the member page has the picture and signature card', true);
+    if (await page.$('tr[data-tbl="dep"]')) {
+      await page.click('tr[data-tbl="dep"]');
+      await page.waitForSelector('#deposit-detail');
+      check('a deposit account opens on its own page', /Balance/.test(await page.textContent('#deposit-detail')));
+    } else check('the member has a deposit account to open', false);
     await page.click('nav button[data-view=organization]');
     await page.waitForSelector('#org-details');
     check('the organization page shows its details, end of day, channels and holidays',

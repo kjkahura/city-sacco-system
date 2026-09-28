@@ -134,6 +134,9 @@ src/
     clientSetup.js     client and group types, ID patterns, group role names,
                        the client controls
     duplicates.js      the duplicate client checks
+    memberFiles.js     member pictures and signatures, identification document
+                       files, expiry flags
+    accountNumbers.js  deposit and share account numbers from a counter
   ops/
     eod.js             end-of-day jobs, idempotent per business date
     backup.js          pg_dump per tenant, retention, restore verification
@@ -148,6 +151,7 @@ src/
     http.js            error envelope, filter operators, legacy slicing
     page.js            SQL-side paging: offset, limit, count(*) OVER ()
     searchCriteria.js     the reference platform's :search bodies as SQL over a map of fields
+    ledgerScope.js     accounting reports for a branch-limited user
     limits.js          rate limiting and per-tenant concurrency gates
     ratestore.js       Redis-backed counters, memory fallback
 public/                the back office console: index.html, app.js, styles.css
@@ -288,6 +292,15 @@ the `numeric` type, never read into JS, adjusted, and written back. That
 closes the read-modify-write race two tellers posting to the same loan would
 otherwise hit, and keeps the arithmetic in exact decimal. Ten concurrent
 repayments against one loan are in the test suite for exactly this.
+
+Deposit and share account numbers (`SA000001`, `SH000001`) come from a
+counter per kind (`account_counters`), locked while a number is given out,
+so accounts opened at the same time get different numbers; a number already
+taken (by an import or by hand) is stepped over, and the six digits widen
+instead of being cut (`SA1000000` follows `SA999999`). Numbers already given
+did not change. `POST /api/savings/:id/close` closes an empty deposit
+account (`CLOSE_SAVINGS_ACCOUNTS`): no balance, nothing accrued or owed, and
+not a running loan's settlement account.
 
 ```
 POST /api/loans/eligibility            deposits multiplier check
@@ -1822,10 +1835,18 @@ SA, SU. IDs are at most 32 characters and other text 255, as in the reference pl
   officer (checked against the SACCO's active users) and loan cycles
   completed in the old system. The Status column takes Active, Inactive,
   Dormant or Exited: Active, Inactive and Dormant are imported INACTIVE and
-  become ACTIVE with the member's running accounts. Groups are not
-  imported: a Groups sheet with rows, a Group ID or a loan with client type
-  G is refused, and groups are created in the console or through
-  `/api/groups` after the import.
+  become ACTIVE with the member's running accounts. A member's Group ID
+  column names the groups they belong to (comma separated, on the Groups
+  sheet or already in the system) and Group role their role names there
+  (IDs or names).
+- Groups: Group ID, name, type (a group type ID; blank for the default),
+  branch, centre, credit officer, phones, email, address, notes and custom
+  fields (`GROUP`). They are created through the same rules as the console,
+  and the group controls (membership of more than one group, the size limit)
+  apply. A Group ID shares the member numbers' series, so the same ID on
+  both sheets is refused. A deposit, share or loan account names a group by
+  its Group ID; a loan of a group has client type G, and a G loan of a
+  member (or a C loan of a group) is refused.
 - Deposit Accounts: the balance (including interest accrued and not yet
   applied), the dates applied and opened (the balance is recorded on the
   opening date, as in the reference platform), notes, an overdraft limit, and for an
@@ -2070,7 +2091,8 @@ group size limit (NONE, WARNING or HARD). Loan, deposit and share products
 say who may hold them (`availableFor`: INDIVIDUALS, GROUPS; the reference platform's
 `PURE_GROUPS` is read as GROUPS). Loan and deposit products start as
 INDIVIDUALS; share products start open to both, since a chama may hold share
-capital. A group has no member portal. Solidarity group loans, where one
+capital. A group has no member portal. Groups are imported from the Groups
+sheet (see "Data importing"). Solidarity group loans, where one
 loan is split among a group's members, are not built.
 
 ### The reference platform's API v2
@@ -2084,6 +2106,35 @@ patch of `/state` is the state action that leads there), `DELETE /:id`,
 operators, custom fields as `_set.field`, done in SQL), and
 `GET /clients/:id/role` (the client type). `/api/members` stays in the
 platform's own shape.
+
+### Pictures, signatures and identification document files
+
+`PUT`, `GET` and `DELETE /api/members/:id/picture` and `/signature` (the reference platform's
+profile picture and client signature): the image as the raw request body,
+PNG, JPEG or GIF, up to 50 MB, checked by its first bytes and not by the
+type the request claims. Setting one needs `EDIT_CLIENT`; a blacklisted
+member's may still change (the reference platform); anonymizing removes them. Groups have
+none.
+
+An identification document takes up to five files of up to 50 MB each
+(The reference platform's limits), PNG, JPEG or PDF, as the raw request body:
+`POST /api/members/:id/identifications/:docId/files?fileName=`, listed by
+`GET .../files`, downloaded by `GET .../files/:fileId` (`VIEW_DOCUMENTS`)
+and removed by `DELETE .../files/:fileId`. The single scan a document could
+carry before (sent as base64 JSON, up to 700 KB) still works and counts as
+one of the five (file ID `original`).
+
+A document past its valid-until date is flagged `expired` (and one still
+valid has `expiresInDays`); nothing is refused because of it. A member
+shows `expiredIdDocuments`, and the MEMBERS custom view has an Expired ID
+documents field to find them.
+
+### Groups in custom views
+
+Custom views have a GROUPS entity (the reference platform's), with the group's ID, name,
+type, state, number of members, contact details, association, running loans
+and balances, and its custom fields; `GET /api/groups?viewfilter=` lists
+what a saved view matches, and menu items can hold group views.
 
 ### Client controls
 
@@ -2099,7 +2150,9 @@ Change association, the state actions, the state history, Anonymize and
 Delete, as the user's permissions allow. The Groups page lists and creates
 groups; a group's page shows its members and roles. The Organization page
 has the client and group types, the group role names and the client
-controls.
+controls. A member's page has the picture and signature, and each
+identification document its files and expiry. A deposit account and a
+branch each open on a page of their own, with their report templates.
 
 ## Staff users
 
@@ -2178,7 +2231,27 @@ year-end close, dividends, imports, backups, extracts, accounting closures)
 needs every branch (403 `ALL_BRANCH_ACCESS_REQUIRED`). A database where the
 app may not create roles has no `sacco_branch_scoped` role; there a
 branch-limited user is refused (503 `BRANCH_ACCESS_UNAVAILABLE`) rather than
-shown every branch. The general ledger is not split by branch access.
+shown every branch.
+
+The general ledger has no row security: the daily balance rollups are
+written by triggers as entries post, and hiding journal rows from them would
+corrupt them. Branch access is applied to the accounting reports instead
+(`src/lib/ledgerScope.js`), before their routes run. For a branch-limited
+user:
+
+- the balance sheet, the income statement, the trial balance and
+  `POST /api/accounting/reports` run for one of their branches: their only
+  one when they name none; with more than one they name it (403
+  `BRANCH_REQUIRED`); another branch, or entries with none (`NONE`), is
+  refused (403 `OUTSIDE_YOUR_BRANCH_ACCESS`);
+- `GET /api/accounting/journal` shows the lines of their branches;
+- an accounting report made through the API is read only for their
+  branches;
+- what is read for the whole organization only (GL balances, the rollup
+  check, prudential ratios and limits, returns, provisioning, financial
+  years) is refused (403 `ALL_BRANCH_ACCESS_REQUIRED`).
+
+A user with every branch sees no change.
 
 ### Transaction limits
 
@@ -2803,10 +2876,12 @@ shows only when the user holds its permission.
 
 ### Not built yet
 
-Indicators for groups and lines of credit. Groups exist now (see "Members
-and groups"); their indicators, and lines of credit, wait for an audit
-against the reference platform's Credit Arrangements. The client indicators count
-individual members only.
+Indicators for lines of credit, which wait for an audit against the reference platform's
+Credit Arrangements. The client indicators count individual members only;
+groups have their own: GROUPS, ACTIVE_GROUPS, GROUP_MEMBERS (members in
+groups), GROUP_BORROWERS (groups with running loans) and
+GROUP_LOAN_PORTFOLIO, for the organization, a branch, a centre or a credit
+officer.
 
 All built from posted journal lines, so they cannot drift from the ledger.
 

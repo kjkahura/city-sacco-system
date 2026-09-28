@@ -9,9 +9,10 @@ const PF = require('./portfolio');
  * deposit product or credit officer. They are the position now; the
  * portfolio report gives them over time.
  *
- * The reference platform's indicators for groups and lines of credit have no counterpart
- * here: the platform has neither. An indicator that does not apply to the
- * scope (deposit figures for a loan product) is null with the reason.
+ * The client figures count individual members; groups have figures of
+ * their own (the reference platform's group indicators). Lines of credit have none: the
+ * platform has none yet. An indicator that does not apply to the scope
+ * (deposit figures for a loan product) is null with the reason.
  */
 
 function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
@@ -29,6 +30,11 @@ const CATALOG = {
   ACTIVE_SAVERS: ['OUTREACH', 'Active savers', 'COUNT'],
   FEMALE_CLIENTS_PERCENT: ['OUTREACH', 'Female clients', 'PERCENT'],
   FEMALE_BORROWERS_PERCENT: ['OUTREACH', 'Female borrowers', 'PERCENT'],
+  GROUPS: ['OUTREACH', 'Groups', 'COUNT'],
+  ACTIVE_GROUPS: ['OUTREACH', 'Active groups', 'COUNT'],
+  GROUP_MEMBERS: ['OUTREACH', 'Members in groups', 'COUNT'],
+  GROUP_BORROWERS: ['OUTREACH', 'Groups with running loans', 'COUNT'],
+  GROUP_LOAN_PORTFOLIO: ['LOANS', 'Group loan portfolio', 'AMOUNT'],
 
   DEPOSIT_ACCOUNTS: ['DEPOSITS', 'Active deposit accounts', 'COUNT'],
   DEPOSIT_BALANCE: ['DEPOSITS', 'Deposit balance', 'AMOUNT'],
@@ -161,6 +167,21 @@ async function compute(c, { entityType = 'ORGANIZATION', entityId = null, codes 
   } else ['CLIENTS', 'ACTIVE_CLIENTS', 'NEW_CLIENTS_THIS_MONTH', 'FEMALE_CLIENTS_PERCENT'].forEach((k) => na.add(k));
   if (f.applies.loans) { v.ACTIVE_BORROWERS = o.borrowers; v.FEMALE_BORROWERS_PERCENT = pct(o.female_borrowers, o.borrowers); } else { na.add('ACTIVE_BORROWERS'); na.add('FEMALE_BORROWERS_PERCENT'); }
   if (f.applies.deposits) v.ACTIVE_SAVERS = o.savers; else na.add('ACTIVE_SAVERS');
+
+  // Groups: the groups in scope, their members, and their running loans.
+  if (f.applies.members) {
+    const { rows: [g] } = await c.query(
+      `WITH grp AS (SELECT m.* FROM members m WHERE m.holder_type = 'GROUP' AND ${f.member})
+       SELECT (SELECT count(*) FROM grp)::int AS groups,
+              (SELECT count(*) FROM grp WHERE status = 'ACTIVE')::int AS active_groups,
+              (SELECT count(DISTINCT gm.member_id) FROM group_members gm JOIN grp ON grp.id = gm.group_id)::int AS group_members,
+              (SELECT count(DISTINCT l.member_id) FROM loan_accounts l JOIN grp ON grp.id = l.member_id
+                WHERE l.status IN ('ACTIVE','IN_ARREARS','LOCKED'))::int AS group_borrowers,
+              (SELECT COALESCE(SUM(GREATEST(l.principal_disbursed - l.principal_paid, 0)), 0) FROM loan_accounts l JOIN grp ON grp.id = l.member_id
+                WHERE l.status IN ('ACTIVE','IN_ARREARS','LOCKED')) AS group_portfolio`, f.params);
+    v.GROUPS = g.groups; v.ACTIVE_GROUPS = g.active_groups; v.GROUP_MEMBERS = g.group_members;
+    v.GROUP_BORROWERS = g.group_borrowers; v.GROUP_LOAN_PORTFOLIO = round2(g.group_portfolio);
+  } else ['GROUPS', 'ACTIVE_GROUPS', 'GROUP_MEMBERS', 'GROUP_BORROWERS', 'GROUP_LOAN_PORTFOLIO'].forEach((k) => na.add(k));
 
   // Deposits.
   if (f.applies.deposits) {

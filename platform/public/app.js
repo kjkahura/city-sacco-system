@@ -300,13 +300,14 @@ function table(columns, rows, { onRow = null, empty = 'Nothing to show' } = {}) 
       const v = typeof c.value === 'function' ? c.value(r) : r[c.key];
       return `<td class="${c.num ? 'num' : ''}">${c.html ? (v ?? '') : esc(v ?? '')}</td>`;
     }).join('');
-    return `<tr class="${onRow ? 'clickable' : ''}" data-row="${i}">${cells}</tr>`;
+    // Only a clickable table's rows are wired, each to its own table (onRow: true is 'main').
+    return onRow ? `<tr class="clickable" data-row="${i}" data-tbl="${esc(onRow === true ? 'main' : onRow)}">${cells}</tr>` : `<tr>${cells}</tr>`;
   }).join('');
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
-function wireRows(rows, onRow) {
-  view().querySelectorAll('tr[data-row]').forEach((tr) => {
+function wireRows(rows, onRow, key = 'main') {
+  view().querySelectorAll(`tr[data-row][data-tbl="${key}"]`).forEach((tr) => {
     tr.addEventListener('click', () => onRow(rows[Number(tr.dataset.row)]));
   });
 }
@@ -671,12 +672,18 @@ async function memberDetail(m0) {
     { label: 'Balance', num: true, value: (a) => money(a.balance) },
     { label: '', html: true, value: (a) => (can('CLOSE_SAVINGS_ACCOUNTS') && ['ACTIVE', 'DORMANT'].includes(a.status) && Number(a.balance) === 0
       ? `<button class="link" data-close-acc="${esc(a.id)}">close</button>` : '') },
-  ], savings.body || [], { empty: 'No savings accounts' })}`)}
+  ], savings.body || [], { onRow: 'dep', empty: 'No savings accounts' })}`)}
       ${card('Shares', table([
     { label: 'Account', key: 'account_no' },
     { label: 'Units', num: true, value: (a) => Number(a.units).toLocaleString() },
   ], myShares, { empty: 'No share account' }))}
     </div>
+    ${isGroup ? '' : `<div id="member-media">${card('Picture and signature', `<div class="grid">
+      <figure><figcaption>Picture</figcaption>${m.media?.picture ? '<img id="media-picture" alt="picture" style="max-width:200px;max-height:200px">' : '<p class="hint">None</p>'}
+        ${can('EDIT_CLIENT') && !m.anonymized_at ? `<button class="secondary" data-media-up="picture">Upload</button>${m.media?.picture ? ' <button class="link" data-media-drop="picture">remove</button>' : ''}` : ''}</figure>
+      <figure><figcaption>Signature</figcaption>${m.media?.signature ? '<img id="media-signature" alt="signature" style="max-width:300px;max-height:120px">' : '<p class="hint">None</p>'}
+        ${can('EDIT_CLIENT') && !m.anonymized_at ? `<button class="secondary" data-media-up="signature">Upload</button>${m.media?.signature ? ' <button class="link" data-media-drop="signature">remove</button>' : ''}` : ''}</figure>
+      </div><p class="hint">PNG, JPEG or GIF, up to 50 MB.</p>`)}</div>`}
     ${isGroup ? `<div id="group-members">${card('Group members', `${table([
     { label: 'No.', key: 'member_no' }, { label: 'Name', value: (x) => `${x.first_name} ${x.last_name}` },
     { label: 'Roles', value: (x) => (x.roles || []).map((r) => roleName.get(r) || r).join(', ') },
@@ -703,9 +710,10 @@ async function memberDetail(m0) {
   ], h.closedLoans || [], { empty: 'No closed loans' })}`)}</div>` : ''}
     ${isGroup ? '' : `<div id="identifications">${card('Identification documents', `${table([
     { label: 'Type', key: 'id_type' }, { label: 'Number', key: 'document_id' }, { label: 'Issued by', key: 'issuing_authority' },
-    { label: 'Valid until', value: (x) => day(x.valid_until) },
-    { label: '', html: true, value: (x) => `${x.hasAttachment ? `<button class="link" data-id-file="${esc(x.id)}">attachment</button> ` : ''}<button class="link" data-id-drop="${esc(x.id)}">remove</button>` },
+    { label: 'Valid until', html: true, value: (x) => `${day(x.valid_until)}${x.expired ? ' <span class="badge bad" data-expired>expired</span>' : x.expiresInDays !== null && x.expiresInDays <= 30 ? ` <span class="badge">in ${x.expiresInDays} days</span>` : ''}` },
+    { label: '', html: true, value: (x) => `<button class="link" data-id-files="${esc(x.id)}">files</button> <button class="link" data-id-drop="${esc(x.id)}">remove</button>` },
   ], ids.body || [], { empty: 'No identification documents' })}
+      ${m.expiredIdDocuments ? `<p class="notice">${m.expiredIdDocuments} document(s) past their valid-until date.</p>` : ''}
       <button class="secondary" id="id-add">Add document</button>`)}</div>`}
     ${cf.ok ? customFieldsCard(cf.body) : ''}`;
 
@@ -713,6 +721,8 @@ async function memberDetail(m0) {
   memberTasks(m);
   entityReports('MEMBER', m.member_no);
   wireRows(loans.body || [], loanDetail);
+  wireRows(savings.body || [], (a) => depositDetail(a, m), 'dep');
+  view().querySelectorAll('tr[data-tbl="dep"] button').forEach((b) => b.addEventListener('click', (e) => e.stopPropagation()));
   const reload = () => memberDetail(m);
   const on = (sel, fn) => { const b = $(sel); if (b) b.addEventListener('click', fn); };
   if (cf.ok) wireCustomFields(cf.body, isGroup ? 'GROUP' : 'MEMBER', m.id, reload);
@@ -789,8 +799,23 @@ async function memberDetail(m0) {
     toast(res.ok ? 'Removed from the group' : res.error, !res.ok);
     if (res.ok) reload();
   }));
-  view().querySelectorAll('[data-id-file]').forEach((b) => b.addEventListener('click', () =>
-    openFile(`/api/members/${m.id}/identifications/${b.dataset.idFile}/attachment`, 'document', { save: true })));
+  view().querySelectorAll('[data-id-files]').forEach((b) => b.addEventListener('click', () => idFiles(m, b.dataset.idFiles, reload)));
+  for (const kind of ['picture', 'signature']) {
+    const img = $(`#media-${kind}`);
+    if (img) blobUrl(`/api/members/${m.id}/${kind}`).then((u) => { if (u) img.src = u; });
+  }
+  view().querySelectorAll('[data-media-up]').forEach((b) => b.addEventListener('click', async () => {
+    const d = await ask([{ label: 'Image (PNG, JPEG or GIF)', name: 'file', type: 'file' }], `Upload ${b.dataset.mediaUp}`);
+    if (!d || !d.file || !d.file.size) return;
+    const res = await apiRaw('PUT', `/api/members/${m.id}/${b.dataset.mediaUp}?fileName=${encodeURIComponent(d.file.name)}`, d.file, d.file.type);
+    toast(res.ok ? 'Uploaded' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
+  view().querySelectorAll('[data-media-drop]').forEach((b) => b.addEventListener('click', async () => {
+    const res = await api('DELETE', `/api/members/${m.id}/${b.dataset.mediaDrop}`);
+    toast(res.ok ? 'Removed' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
   view().querySelectorAll('[data-id-drop]').forEach((b) => b.addEventListener('click', async () => {
     const res = await api('DELETE', `/api/members/${m.id}/identifications/${b.dataset.idDrop}`);
     toast(res.ok ? 'Document removed' : res.error, !res.ok);
@@ -814,6 +839,88 @@ async function memberDetail(m0) {
     toast(res.ok ? 'Document added' : res.error, !res.ok);
     if (res.ok) reload();
   });
+}
+
+/** A file fetched with the session's headers, as an object URL (for an <img>), or null. */
+async function blobUrl(path) {
+  const headers = {};
+  if (S.tenant) headers['x-tenant'] = S.tenant;
+  if (S.access) headers.authorization = `Bearer ${S.access}`;
+  const res = await fetch(path, { headers });
+  return res.ok ? URL.createObjectURL(await res.blob()) : null;
+}
+
+/** The files on an identification document: up to five, each up to 50 MB. */
+async function idFiles(m, docId, reload) {
+  const r = await api('GET', `/api/members/${m.id}/identifications/${docId}/files`);
+  if (!r.ok) return toast(r.error, true);
+  const dlg = showDialog('Document files', `${table([
+    { label: 'File', key: 'fileName' }, { label: 'Type', key: 'contentType' }, { label: 'Size', num: true, value: (f) => `${Math.ceil(f.sizeBytes / 1024)} KB` },
+    { label: '', html: true, value: (f) => `<button class="link" data-f-get="${esc(f.id)}">download</button>${can('DELETE_DOCUMENTS') ? ` <button class="link" data-f-drop="${esc(f.id)}">remove</button>` : ''}` },
+  ], r.body, { empty: 'No files' })}
+    ${can('CREATE_DOCUMENTS') && r.body.length < 5 ? '<button class="secondary" id="f-add">Add file</button>' : ''}<p class="hint">PNG, JPEG or PDF, up to 50 MB each, five at most.</p>`);
+  dlg.querySelectorAll('[data-f-get]').forEach((b) => b.addEventListener('click', () =>
+    openFile(`/api/members/${m.id}/identifications/${docId}/files/${b.dataset.fGet}`, 'document', { save: true })));
+  dlg.querySelectorAll('[data-f-drop]').forEach((b) => b.addEventListener('click', async () => {
+    const res = await api('DELETE', `/api/members/${m.id}/identifications/${docId}/files/${b.dataset.fDrop}`);
+    toast(res.ok ? 'File removed' : res.error, !res.ok);
+    dlg.close(); dlg.remove();
+    if (res.ok) idFiles(m, docId, reload);
+  }));
+  const add = $('#f-add', dlg);
+  if (add) add.addEventListener('click', async () => {
+    dlg.close(); dlg.remove();
+    const d = await ask([{ label: 'File (PNG, JPEG or PDF)', name: 'file', type: 'file' }], 'Add a file to the document');
+    if (!d || !d.file || !d.file.size) return;
+    const res = await apiRaw('POST', `/api/members/${m.id}/identifications/${docId}/files?fileName=${encodeURIComponent(d.file.name)}`, d.file, d.file.type || 'application/octet-stream');
+    toast(res.ok ? 'File added' : res.error, !res.ok);
+    idFiles(m, docId, reload);
+  });
+}
+
+/** A deposit account: its balance, its transactions, closing it, and its report templates. */
+async function depositDetail(a, holder = null) {
+  const [bal, tx] = await Promise.all([api('GET', `/api/savings/${a.id}/balance`), api('GET', `/api/savings/${a.id}/transactions?limit=50`)]);
+  if (!bal.ok) throw new Error(bal.error);
+  const b = bal.body;
+  view().innerHTML = `
+    <button class="secondary" id="back">← ${holder ? esc(holder.member_no) : 'Back'}</button>
+    <h1>Deposit account <span class="badge">${esc(b.accountNo)}</span> ${stateBadge(b.status)}</h1>
+    <div class="grid" id="deposit-detail">${card('Balances', `<dl class="kv">
+      <dt>Product</dt><dd>${esc(b.productId)}</dd><dt>Balance</dt><dd>${money(b.balance)}</dd><dt>Available</dt><dd>${money(b.available)}</dd>
+      <dt>Pledged (member)</dt><dd>${money(b.pledged)}</dd><dt>Overdraft limit</dt><dd>${money(b.overdraftLimit)}</dd>
+      <dt>Interest accrued</dt><dd>${money(b.interest.accrued)}</dd><dt>Interest last applied</dt><dd>${esc(b.interest.lastApplied || '—')}</dd></dl>
+      ${can('CLOSE_SAVINGS_ACCOUNTS') && ['ACTIVE', 'DORMANT'].includes(b.status) && Number(b.balance) === 0 ? '<button class="secondary" id="dep-close">Close account</button>' : ''}`)}</div>
+    ${card('Transactions', table([
+    { label: 'Date', value: (t) => day(t.value_date || t.created_at) }, { label: 'Kind', key: 'kind' }, { label: 'Reference', key: 'reference' },
+    { label: 'Amount', num: true, value: (t) => money(t.amount) },
+  ], tx.body || [], { empty: 'No transactions' }))}`;
+  $('#back').addEventListener('click', () => (holder ? memberDetail(holder) : membersView()));
+  const close = $('#dep-close');
+  if (close) close.addEventListener('click', async () => {
+    const res = await api('POST', `/api/savings/${a.id}/close`, {});
+    toast(res.ok ? 'Account closed' : res.error, !res.ok);
+    if (res.ok) depositDetail(a, holder);
+  });
+  entityReports('DEPOSIT', b.accountNo);
+}
+
+/** A branch (the reference platform's branch view): what sits in it, its centres and holidays, and its report templates. */
+async function branchDetail(code) {
+  const r = await api('GET', `/api/branches/${encodeURIComponent(code)}`);
+  if (!r.ok) throw new Error(r.error);
+  const b = r.body;
+  view().innerHTML = `
+    <button class="secondary" id="back">← Organization</button>
+    <h1>${esc(b.name)} <span class="badge">${esc(b.code)}</span> ${stateBadge(b.status)}</h1>
+    <div class="grid" id="branch-detail">${card('Branch', `<dl class="kv"><dt>Members</dt><dd>${esc(b.members)}</dd>
+      <dt>Running loans</dt><dd>${esc(b.active_loans)}</dd><dt>Open deposit accounts</dt><dd>${esc(b.active_deposits)}</dd>
+      <dt>Town</dt><dd>${esc(b.town || '—')}</dd><dt>Phone · email</dt><dd>${esc(b.phone || '—')} · ${esc(b.email || '—')}</dd></dl>`)}
+      ${card('Centres', table([{ label: 'Code', key: 'code' }, { label: 'Name', key: 'name' }, { label: 'Status', key: 'status' }], b.centres || [], { empty: 'No centres' }))}
+      ${card('Holidays', table([{ label: 'Date', value: (h) => day(h.holiday_date) }, { label: 'Description', key: 'description' },
+    { label: 'Recurring', value: (h) => (h.recurring ? 'yes' : '') }], b.holidays || [], { empty: 'No branch holidays' }))}</div>`;
+  $('#back').addEventListener('click', orgView);
+  entityReports('BRANCH', b.code);
 }
 
 // --------------------------------------------------------------------------
@@ -3488,7 +3595,7 @@ async function orgView() {
     ${card('Branches and centres', `<div id="org-branches">${table([
     { label: 'Code', key: 'code' }, { label: 'Name', key: 'name' }, { label: 'Status', key: 'status' },
     { label: 'Email', key: 'email' }, { label: 'Members', num: true, key: 'members' },
-    { label: '', html: true, value: (b) => (manage ? `<button class="link" data-branch="${esc(b.code)}">edit</button>` : '') },
+    { label: '', html: true, value: (b) => `<button class="link" data-branch-open="${esc(b.code)}">open</button>${manage ? ` <button class="link" data-branch="${esc(b.code)}">edit</button>` : ''}` },
   ], branches.body || [], { empty: 'No branches' })}</div>
     ${manage ? '<button class="secondary" id="branch-add">New branch</button>' : ''}
     <h3>Centres</h3><div id="org-centres">${table([
@@ -3598,6 +3705,7 @@ async function orgView() {
     ...(b.code ? [{ label: 'Status', name: 'status', options: ['ACTIVE', 'CLOSED'], value: b.status }] : []),
   ], b.code ? `Branch ${b.code}` : 'New branch');
   on('#branch-add', async () => { const d = await branchForm(); if (d) done(await api('POST', '/api/branches', d), 'Branch created'); });
+  view().querySelectorAll('[data-branch-open]').forEach((b) => b.addEventListener('click', () => branchDetail(b.dataset.branchOpen)));
   each('branch', async (code) => {
     const b = (branches.body || []).find((x) => x.code === code);
     const d = await branchForm(b);
@@ -3924,7 +4032,7 @@ async function showImport(id) {
       const items = p.body?.items || [];
       const cols = Object.keys(items[0] || {}).filter((c) => c !== 'schedule');
       const box = $('#imp-preview', dlg);
-      box.innerHTML = `${table(cols.map((c) => ({ label: c, value: (r) => (Array.isArray(r[c]) ? r[c].join('; ') : r[c]) })), items)}
+      box.innerHTML = `${table(cols.map((c) => ({ label: c, value: (r) => (Array.isArray(r[c]) ? r[c].join('; ') : r[c]) })), items, { onRow: kind === 'loans' ? 'imp' : null })}
         ${p.body.total > items.length ? `<p class="hint">First ${items.length} of ${p.body.total}.</p>` : ''}<div id="imp-schedule"></div>`;
       if (kind === 'loans') {
         box.querySelectorAll('tr[data-row]').forEach((tr) => tr.addEventListener('click', () => {

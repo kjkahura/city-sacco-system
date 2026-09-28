@@ -11,6 +11,7 @@ const CF = require('../domain/customFields');
 const IDT = require('../domain/idTemplates');
 const CL = require('../domain/clients');
 const PERMS = require('../lib/permissions');
+const MF = require('../domain/memberFiles');
 
 const router = express.Router();
 
@@ -110,7 +111,8 @@ const reassignMembers = [requireAuth(), async (req, res, next) => {
 
 async function detail(c, m, user) {
   const cf = await CF.getValues(c, m.holder_type === 'GROUP' ? 'GROUP' : 'MEMBER', m.id, { user });
-  const out = { ...m, customFields: cf.values, customFieldScores: cf.scores };
+  const out = { ...m, customFields: cf.values, customFieldScores: cf.scores, media: await MF.mediaOf(c, m.id) };
+  out.expiredIdDocuments = (await c.query('SELECT count(*)::int AS n FROM member_identifications WHERE member_id = $1 AND valid_until < current_date', [m.id])).rows[0].n;
   if (m.holder_type === 'GROUP') out.groupMembers = await CL.groupMembers(c, m.id);
   else out.groups = await CL.groupsOf(c, m.id);
   return out;
@@ -200,7 +202,7 @@ const txn = (fn, { write = true, status = 200 } = {}) => [requireAuth(), async (
     if (out !== undefined) res.status(status).json(out);
   } catch (e) { next(e); }
 }];
-router.get('/:id/identifications', ...txn((c, req) => IDT.documents(c, req.params.id), { write: false }));
+router.get('/:id/identifications', ...txn(async (c, req) => MF.withExpiry(await IDT.documents(c, req.params.id), await orgToday(c)), { write: false }));
 router.post('/:id/identifications', ...txn((c, req) => IDT.addDocument(c, req.params.id, req.body || {}, { createdBy: req.auth.email }), { status: 201 }));
 router.delete('/:id/identifications/:docId', ...txn((c, req) => IDT.removeDocument(c, req.params.id, req.params.docId, { createdBy: req.auth.email })));
 router.get('/:id/identifications/:docId/attachment', requireAuth(), async (req, res, next) => {
@@ -212,6 +214,35 @@ router.get('/:id/identifications/:docId/attachment', requireAuth(), async (req, 
     res.send(a.attachment);
   } catch (e) { next(e); }
 });
+
+// Files as the raw request body (a picture, a signature, a document file), up to 50 MB.
+const rawFile = express.raw({ type: (r) => !/json/.test(r.headers['content-type'] || ''), limit: MF.MAX_BYTES + 1024 });
+const sendFile = (res, f, { inline = true } = {}) => {
+  res.set('content-type', f.content_type);
+  res.set('content-disposition', `${inline ? 'inline' : 'attachment'}; filename="${String(f.file_name || 'file').replace(/[^A-Za-z0-9._-]/g, '_')}"`);
+  res.set('x-content-type-options', 'nosniff');
+  res.send(f.content);
+};
+
+// The member's picture and signature (the reference platform's profile picture and client signature).
+for (const kind of ['picture', 'signature']) {
+  router.put(`/:id/${kind}`, rawFile, ...txn((c, req) => MF.putMedia(c, req.params.id, kind, req.body, { fileName: req.query.fileName, actor: req.auth.email })));
+  router.get(`/:id/${kind}`, requireAuth(), async (req, res, next) => {
+    try { sendFile(res, await withTenantRead(req.tenant.schema_name, (c) => MF.getMedia(c, req.params.id, kind))); } catch (e) { next(e); }
+  });
+  router.delete(`/:id/${kind}`, ...txn((c, req) => MF.removeMedia(c, req.params.id, kind, { actor: req.auth.email })));
+}
+
+// Files on an identification document: up to five, each up to 50 MB (the reference platform's limits).
+router.get('/:id/identifications/:docId/files', ...txn((c, req) => MF.listFiles(c, req.params.id, req.params.docId), { write: false }));
+router.post('/:id/identifications/:docId/files', rawFile, ...txn((c, req) => MF.addFile(c, req.params.id, req.params.docId, req.body,
+  { fileName: req.query.fileName, actor: req.auth.email }), { status: 201 }));
+router.get('/:id/identifications/:docId/files/:fileId', requireAuth(), async (req, res, next) => {
+  try {
+    sendFile(res, await withTenantRead(req.tenant.schema_name, (c) => MF.getFile(c, req.params.id, req.params.docId, req.params.fileId)), { inline: false });
+  } catch (e) { next(e); }
+});
+router.delete('/:id/identifications/:docId/files/:fileId', ...txn((c, req) => MF.removeFile(c, req.params.id, req.params.docId, req.params.fileId, { actor: req.auth.email })));
 
 module.exports = router;
 module.exports.searchMembers = searchMembers;

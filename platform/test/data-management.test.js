@@ -255,10 +255,10 @@ const hooks = [];
     check('the template downloads as a workbook', tpl.status === 200 && tpl.headers.get('content-type').includes('spreadsheetml'));
     const names = tbook.map((x) => x.name);
     check('with a sheet to fill in per kind of record, in order',
-      ['Instructions', 'Settings', 'GL Accounts', 'Chart of Accounts', 'Branches', 'Centres', 'Members', 'Deposit Accounts', 'Share Accounts',
+      ['Instructions', 'Settings', 'GL Accounts', 'Chart of Accounts', 'Branches', 'Centres', 'Members', 'Groups', 'Deposit Accounts', 'Share Accounts',
         'Loan Accounts', 'Loan Schedule', 'Loan Transactions', 'GL Balances'].every((n, i) => names[i] === n), names.join(','));
     check('and a reference sheet per kind of record already in the system (the reference platform)',
-      ['Branches Data', 'Centres Data', 'Credit Officers', 'Loan Products', 'Deposit Products', 'Share Products', 'GL Accounts Data', 'ID Templates'].every((n) => names.includes(n)));
+      ['Branches Data', 'Centres Data', 'Credit Officers', 'Loan Products', 'Deposit Products', 'Share Products', 'GL Accounts Data', 'Group Types', 'Group Role Names', 'ID Templates'].every((n) => names.includes(n)));
     const sheetXml = (n) => unzip(tpl.buffer).get(`xl/worksheets/sheet${names.indexOf(n) + 1}.xml`).toString();
     check('sheets to fill in have green headings, reference sheets grey', /<c r="A1" s="4"/.test(sheetXml('Members')) && /<c r="A1" s="5"/.test(sheetXml('Loan Products')));
     const mhead = tbook.find((x) => x.name === 'Members').rows[0];
@@ -329,7 +329,7 @@ const hooks = [];
     check('a clean workbook is PENDING_APPROVAL', up3.status === 201 && up3.body.status === 'PENDING_APPROVAL', JSON.stringify(up3.body?.errors?.slice(0, 5)));
     const sorted = (o) => JSON.stringify(Object.fromEntries(Object.entries(o || {}).sort()));
     check('the review shows what it will create',
-      sorted(up3.body.summary.creates) === sorted({ glAccounts: 2, branches: 1, centres: 1, members: 2, deposits: 2, shares: 1, loans: 2, installments: 13, transactions: 0, openingEntryLines: 7 }),
+      sorted(up3.body.summary.creates) === sorted({ glAccounts: 2, branches: 1, centres: 1, members: 2, groups: 0, groupMembers: 0, deposits: 2, shares: 1, loans: 2, installments: 13, transactions: 0, openingEntryLines: 7 }),
       JSON.stringify(up3.body.summary.creates));
     check('the subledgers match the trial balance, so there are no warnings', up3.body.warnings.length === 0, JSON.stringify(up3.body.warnings));
     check('before approval nothing is in the live tables', (await q1("SELECT count(*)::int AS n FROM members WHERE member_no LIKE 'IM00%'")).n === 0

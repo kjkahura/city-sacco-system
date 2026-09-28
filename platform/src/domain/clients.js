@@ -610,7 +610,8 @@ async function remove(c, ref, { user = null, holderType = null } = {}) {
 /**
  * Anonymize an exited member once the tenant's retention period has passed
  * since the exit: personal details, ID documents, portal access and custom
- * field values go; the number, the accounts and the ledger stay.
+ * field values, the picture and the signature go; the number, the
+ * accounts and the ledger stay.
  */
 async function anonymize(c, ref, { user = null } = {}) {
   const m = await find(c, ref, { holderType: 'CLIENT', lock: true });
@@ -634,6 +635,7 @@ async function anonymize(c, ref, { user = null } = {}) {
             address_line2 = NULL, city = NULL, postcode = NULL, region = NULL, country = NULL, notes = NULL, state_reason = NULL,
             exit_reason = NULL, custom_fields = '{}', anonymized_at = now(), updated_at = now() WHERE id = $1`, [m.id]);
   await c.query('DELETE FROM member_identifications WHERE member_id = $1', [m.id]);
+  await c.query('DELETE FROM member_media WHERE member_id = $1', [m.id]);
   await removePortal(c, m.id);
   await c.query('UPDATE member_state_changes SET reason = NULL WHERE member_id = $1', [m.id]);
   await redactAudit(c, m);

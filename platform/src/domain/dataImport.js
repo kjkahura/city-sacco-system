@@ -8,6 +8,7 @@ const LM = require('./loanMigration');
 const SV = require('./savings');
 const SH = require('./shares');
 const B = require('./branches');
+const CL = require('./clients');
 const CF = require('./customFields');
 const IDT = require('./idTemplates');
 
@@ -118,7 +119,8 @@ const SHEETS = [
     { h: 'Gender', k: 'gender', map: lookup(GENDER, 'M, F or O') },
     { h: 'Employer', k: 'employer' },
     { h: 'Branch ID', k: 'branch', id: true }, { h: 'Centre ID', k: 'centre', id: true },
-    { h: 'Group ID', k: 'groupId', id: true, hint: 'Not supported: create groups in the console or through /api/groups' },
+    { h: 'Group ID', k: 'groupId', a: ['Group IDs'], hint: 'The groups the member belongs to (Groups sheet or already in the system), comma separated' },
+    { h: 'Group role', k: 'groupRole', a: ['Group Role Name', 'Group roles'], hint: 'Role name IDs or names in those groups, comma separated' },
     { h: 'Joined on', k: 'joinedOn', type: 'date', a: ['Date Joined'], hint: 'Default: the migration date' },
     { h: 'Status', k: 'status', map: lookup({ ACTIVE: 'INACTIVE', INACTIVE: 'INACTIVE', DORMANT: 'INACTIVE', EXITED: 'EXITED' },
       'Active, Inactive, Dormant or Exited'), hint: 'Default Active. Active and Inactive follow the member\'s accounts' },
@@ -132,6 +134,18 @@ const SHEETS = [
     { h: 'ID valid until', k: 'idValidUntil', type: 'date' },
     { h: 'Notes', k: 'notes', notes: true },
   ], custom: 'MEMBER' },
+  { key: 'groups', name: 'Groups', columns: [
+    { h: 'Group ID', k: 'groupNo', req: true, id: true },
+    { h: 'Group name', k: 'name', req: true, a: ['Name'] },
+    { h: 'Group type', k: 'type', id: true, a: ['Group Role', 'Type'], hint: 'A group type ID (Group Types sheet); blank: the default' },
+    { h: 'Branch ID', k: 'branch', id: true }, { h: 'Centre ID', k: 'centre', id: true },
+    { h: 'Credit officer', k: 'creditOfficer', a: ['Credit Officer username', 'Credit Officer'], hint: 'The staff user\'s email (Credit Officers sheet)' },
+    { h: 'Phone', k: 'phone', a: ['Mobile Phone', 'Mobile'] }, { h: 'Other phone', k: 'phone2', a: ['Home Phone'] },
+    { h: 'Email', k: 'email', a: ['Email Address'] },
+    { h: 'Address line 1', k: 'addressLine1', a: ['Address 1'] }, { h: 'Address line 2', k: 'addressLine2', a: ['Address 2'] },
+    { h: 'City', k: 'city' }, { h: 'Postcode', k: 'postcode', a: ['Zip'] }, { h: 'Region', k: 'region', a: ['State/Province/Region'] }, { h: 'Country', k: 'country' },
+    { h: 'Notes', k: 'notes', notes: true },
+  ], custom: 'GROUP' },
   { key: 'deposits', name: 'Deposit Accounts', aliases: ['Savings Accounts'], columns: [
     { h: 'Account number', k: 'accountNo', req: true, id: true, a: ['Account ID'] },
     { h: 'Member number', k: 'memberNo', req: true, id: true, a: ['Client ID'] },
@@ -156,7 +170,7 @@ const SHEETS = [
   { key: 'loans', name: 'Loan Accounts', columns: [
     { h: 'Account number', k: 'accountNo', req: true, id: true, a: ['Account ID'] },
     { h: 'Member number', k: 'memberNo', req: true, id: true, a: ['Client ID'] },
-    { h: 'Client type', k: 'clientType', map: lookup({ C: 'C', G: 'G' }, 'C (member) or G (group)'), hint: 'C; groups are not supported' },
+    { h: 'Client type', k: 'clientType', map: lookup({ C: 'C', G: 'G' }, 'C (member) or G (group)'), hint: 'C (default) or G: the Member number is then a Group ID' },
     { h: 'Product ID', k: 'productId', req: true, id: true },
     { h: 'Account state', k: 'state', map: lookup(STATE, 'Active, Pending Approval, Approved, Closed, Withdrawn, Rejected or Written Off'), hint: 'Default Active' },
     { h: 'Principal', k: 'principal', type: 'amount', req: true, a: ['Loan Amount'], hint: 'As disbursed' },
@@ -333,10 +347,6 @@ function parse(buffer, { today }) {
     if (!asOf && !errors.some((x) => x.sheet === SETTINGS)) report.error(SETTINGS, null, 'Migration date', 'Migration date is required');
     if (asOf && asOf > today) report.error(SETTINGS, null, 'Migration date', `Migration date ${asOf} is after today (${today})`);
   }
-  const groups = byName.get(norm('Groups'));
-  if (groups && groups.rows.slice(1).some((r) => r && !r.every(blank))) {
-    report.error('Groups', null, null, 'Groups are not imported; create them in the console or through /api/groups after importing their members');
-  }
 
   const data = {};
   const counts = {};
@@ -398,6 +408,18 @@ function parse(buffer, { today }) {
   dupes('branches', 'code', 'Branch ID');
   dupes('centres', 'code', 'Centre ID');
   dupes('members', 'memberNo', 'Member number');
+  dupes('groups', 'groupNo', 'Group ID');
+  // A group's ID and a member's number share one series.
+  {
+    const nos = new Set(data.members.map((r) => String(r.memberNo || '').toUpperCase()));
+    for (const r of data.groups) if (r.groupNo && nos.has(String(r.groupNo).toUpperCase())) e('groups', r, 'Group ID', `Group ID ${r.groupNo} is also a member number on the Members sheet`);
+  }
+  const listOf = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
+  for (const r of data.members) { r.groupIds = listOf(r.groupId); r.groupRoles = listOf(r.groupRole); }
+  for (const r of data.groups) {
+    if (r.branch) r.branch = String(r.branch).toUpperCase();
+    if (r.centre) r.centre = String(r.centre).toUpperCase();
+  }
   dupes('deposits', 'accountNo', 'Account number');
   dupes('shares', 'accountNo', 'Account number');
   dupes('loans', 'accountNo', 'Account number');
@@ -410,7 +432,7 @@ function parse(buffer, { today }) {
     if (rest.length) r.address = [r.address, ...rest].filter(Boolean).join(', ').slice(0, MAX_TEXT);
   }
   for (const r of data.members) {
-    if (r.groupId) e('members', r, 'Group ID', 'Groups are not imported; leave Group ID empty and add the member to its group after the import');
+    if (r.groupRoles.length && !r.groupIds.length) e('members', r, 'Group role', 'A group role needs the Group ID it is held in');
     if ((r.idNumber && !r.idType) || (r.idType && !r.idNumber)) e('members', r, r.idNumber ? 'ID type' : 'ID number', 'An ID document needs both its type and its number');
   }
   const later = (key, r, field, label) => {
@@ -458,7 +480,6 @@ function parse(buffer, { today }) {
     }
   }
   for (const r of data.loans) {
-    if (r.clientType === 'G') e('loans', r, 'Client type', 'Group loans are not imported; open them for the group after the import');
     r.state = r.state || 'ACTIVE';
     if (r.principalOutstanding === null && r.principalPaid !== null && r.principal !== null) r.principalOutstanding = round2(r.principal - r.principalPaid);
     if (r.principalOutstanding !== null && r.principalPaid !== null && r.principal !== null && round2(r.principal - r.principalPaid) !== r.principalOutstanding) {
@@ -596,8 +617,8 @@ async function prerequisites(c) {
 async function execute(c, { asOf, data, layout = {} }, { importId, createdBy, user, onProgress = null, preview = null }) {
   const errors = [];
   const warnings = [];
-  const created = { glAccounts: 0, branches: 0, centres: 0, members: 0, deposits: 0, shares: 0, loans: 0, installments: 0, transactions: 0, openingEntryLines: 0 };
-  const failed = { member: new Map(), branch: new Map(), centre: new Map() };
+  const created = { glAccounts: 0, branches: 0, centres: 0, members: 0, groups: 0, groupMembers: 0, deposits: 0, shares: 0, loans: 0, installments: 0, transactions: 0, openingEntryLines: 0 };
+  const failed = { member: new Map(), branch: new Map(), centre: new Map(), group: new Map() };
   const members = new Map();
   const total = ['glAccounts', 'chart', 'branches', 'centres', 'members', 'deposits', 'shares', 'loans'].reduce((t, k) => t + data[k].length, 0) + 1;
   let done = 0;
@@ -765,7 +786,7 @@ async function execute(c, { asOf, data, layout = {} }, { importId, createdBy, us
             postcode, region, country, credit_officer, prior_loan_cycles, notes, custom_fields, import_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13,'INACTIVE'),COALESCE($14::date,$15::date),$16,$17,$18,$19,$20,
                  $21,$22,$23,$24,COALESCE($25,0),$26,$27,$28)
-         RETURNING id, branch_id, member_no`,
+         RETURNING id, branch_id, member_no, holder_type`,
         [r.memberNo, r.firstName, r.middleName, r.lastName, r.nationalId ? String(r.nationalId).replace(/\s/g, '').toUpperCase() : null, r.kraPin, r.phone, r.phone2, r.email,
           r.dateOfBirth, r.gender, r.employer, r.status, r.joinedOn, asOf, bId || (centre ? centre.branch_id : null), centre ? centre.id : null,
           r.addressLine1, r.addressLine2, r.city, r.postcode, r.region, r.country, credit, r.priorLoanCycles, r.notes,
@@ -785,10 +806,54 @@ async function execute(c, { asOf, data, layout = {} }, { importId, createdBy, us
     tick();
     if (m) { created.members += 1; members.set(r.memberNo, m); } else failed.member.set(r.memberNo, r._row);
   }
+
+  // Groups (the reference platform's Groups sheet), through the same rules as the console:
+  // type, association, contact details, custom fields. Their members come
+  // from the Members sheet's Group ID and Group role columns.
+  for (const r of data.groups) {
+    const g = await row('groups', r, 'Group ID', async () => {
+      if (r.branch) await branchId(r.branch);
+      if (r.centre) dependsOn(failed.centre, r.centre, 'Centre');
+      const out = await CL.create(c, {
+        memberNo: r.groupNo, groupName: r.name, clientTypeId: r.type || undefined, branchId: r.branch || undefined, centreId: r.centre || undefined,
+        creditOfficer: r.creditOfficer ? await officer(r.creditOfficer) : undefined, phone: r.phone, phone2: r.phone2, email: r.email,
+        addressLine1: r.addressLine1, addressLine2: r.addressLine2, city: r.city, postcode: r.postcode, region: r.region, country: r.country,
+        notes: r.notes, joinedOn: asOf, customFields: await coerce('GROUP', r.customFields),
+      }, { user, holderType: 'GROUP', imported: true });
+      await c.query('UPDATE members SET import_id = $2 WHERE id = $1', [out.member.id, importId]);
+      push('groups', { groupNo: out.member.member_no, name: out.member.first_name, type: out.member.client_type_id, branch: r.branch, centre: r.centre });
+      return { id: out.member.id, branch_id: out.member.branch_id, member_no: out.member.member_no, holder_type: 'GROUP' };
+    });
+    tick();
+    if (g) { created.groups += 1; members.set(r.groupNo, g); } else failed.group.set(r.groupNo, r._row);
+  }
+  {
+    // Each group's members, gathered from the member rows, set once per group.
+    const byGroup = new Map();
+    for (const r of data.members) {
+      if (!r.groupIds.length || !members.has(r.memberNo)) continue;
+      for (const gno of r.groupIds) {
+        if (!byGroup.has(gno)) byGroup.set(gno, []);
+        byGroup.get(gno).push({ r, memberId: members.get(r.memberNo).id, roles: r.groupRoles });
+      }
+    }
+    for (const [gno, list] of byGroup) {
+      const ok = await row('members', list[0].r, 'Group ID', async () => {
+        dependsOn(failed.group, gno, 'Group');
+        const g = members.get(gno) || (await c.query("SELECT id FROM members WHERE member_no = $1 AND holder_type = 'GROUP'", [gno])).rows[0];
+        if (!g) throw err(`No group ${gno}, here or on the Groups sheet`);
+        const current = (await CL.groupMembers(c, g.id)).map((x) => ({ memberId: x.member_id, roles: x.roles }));
+        const out = await CL.setGroupMembers(c, g.id, [...current, ...list.map((x) => ({ memberId: x.memberId, roles: x.roles }))], { user, checkPermission: false });
+        for (const w of out.warnings) warnings.push({ sheet: layout.members?.sheet || 'Members', row: list[0].r._row, column: 'Group ID', message: `${gno}: ${w}` });
+        return list.length;
+      });
+      if (ok) created.groupMembers += ok;
+    }
+  }
   const member = async (no) => {
     if (members.has(no)) return members.get(no);
     dependsOn(failed.member, no, 'Member');
-    const { rows: [m] } = await c.query('SELECT id, branch_id FROM members WHERE member_no = $1', [no]);
+    const { rows: [m] } = await c.query('SELECT id, branch_id, holder_type FROM members WHERE member_no = $1', [no]);
     if (!m) throw err(`No member ${no}, here or on the Members sheet`);
     members.set(no, m);
     return m;
@@ -868,6 +933,9 @@ async function execute(c, { asOf, data, layout = {} }, { importId, createdBy, us
   for (const r of loans) {
     const ok = await row('loans', r, 'Account number', async () => {
       const m = await member(r.memberNo);
+      // Client type G: the loan is the group's (the reference platform's group loan).
+      if ((r.clientType || 'C') === 'G' && m.holder_type !== 'GROUP') throw err(`Client type G, but ${r.memberNo} is a member, not a group`);
+      if ((r.clientType || 'C') === 'C' && m.holder_type === 'GROUP') throw err(`${r.memberNo} is a group; give the client type G`);
       const bId = await branchId(r.branch);
       const spec = specOf(r, schedules.get(r.accountNo), transactions.get(r.accountNo));
       spec.memberId = m.id;
@@ -1020,6 +1088,8 @@ async function template(c, { today = new Date().toISOString().slice(0, 10) } = {
     "SELECT id, name, annual_rate, CASE WHEN allow_overdraft THEN 'yes' ELSE 'no' END FROM savings_products WHERE is_active ORDER BY id");
   await ref('Share Products', ['Product ID', 'Name', 'Unit price'], 'SELECT id, name, unit_price FROM share_products WHERE is_active ORDER BY id');
   await ref('GL Accounts Data', ['GL Code', 'Name', 'Type', 'Usage'], 'SELECT code, name, type, usage FROM gl_accounts WHERE is_active ORDER BY code');
+  await ref('Group Types', ['Group type', 'Name'], "SELECT id, name FROM client_types WHERE holder_type = 'GROUP' ORDER BY id");
+  await ref('Group Role Names', ['Role name ID', 'Name'], 'SELECT id, name FROM group_role_names ORDER BY name');
   await ref('ID Templates', ['ID type', 'Issuing authority', 'Format', 'Mandatory'],
     "SELECT id_type, issuing_authority, mask, CASE WHEN mandatory THEN 'yes' ELSE 'no' END FROM id_templates ORDER BY id_type");
   return XLSX.write(sheets);

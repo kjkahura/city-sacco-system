@@ -82,6 +82,11 @@ const RULES = [
   ['POST', '/members/:id/state', STATE_ACTIONS], ['POST', '/members/:id/association', ASSOC],
   ['POST', '/members/:id/anonymize', 'ANONYMIZE_CLIENT'],
   ['POST', '/members/:id/identifications', 'CREATE_DOCUMENTS'],
+  ['PUT', '/members/:id/picture', 'EDIT_CLIENT'], ['DELETE', '/members/:id/picture', 'EDIT_CLIENT'],
+  ['PUT', '/members/:id/signature', 'EDIT_CLIENT'], ['DELETE', '/members/:id/signature', 'EDIT_CLIENT'],
+  ['POST', '/members/:id/identifications/:docId/files', 'CREATE_DOCUMENTS'],
+  ['GET', '/members/:id/identifications/:docId/files/:fileId', 'VIEW_DOCUMENTS'],
+  ['DELETE', '/members/:id/identifications/:docId/files/:fileId', 'DELETE_DOCUMENTS'],
   ['DELETE', '/members/:id/identifications/:docId', 'DELETE_DOCUMENTS'],
   // The reference platform's API v2 shapes.
   ['GET', '/clients/*', V_MEMBER], ['POST', '/clients:search', V_MEMBER], ['POST', '/clients', 'CREATE_CLIENT'],

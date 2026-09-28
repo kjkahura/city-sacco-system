@@ -304,7 +304,12 @@ accountingReports.post('/', requirePermission(ACCOUNTING), async (req, res, next
 });
 accountingReports.get('/:reportKey', requirePermission(ACCOUNTING), async (req, res, next) => {
   try {
-    res.json(await withTenantRead(req.tenant.schema_name, (c) => AR.get(c, req.params.reportKey)));
+    const r = await withTenantRead(req.tenant.schema_name, (c) => AR.get(c, req.params.reportKey));
+    // A branch-limited user reads only reports of their branches (lib/ledgerScope).
+    if (Array.isArray(req.auth.branches) && !req.auth.branches.includes(r.request?.branchId)) {
+      throw Object.assign(new Error('OUTSIDE_YOUR_BRANCH_ACCESS'), { status: 403 });
+    }
+    res.json(r);
   } catch (e) { next(e); }
 });
 

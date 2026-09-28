@@ -118,6 +118,8 @@ tenantApi.use(rateLimit());
 tenantApi.use(tenantConcurrency());
 // What each route needs (lib/routePermissions), before any route runs.
 tenantApi.use(permissionGate());
+// The general ledger for a branch-limited user (lib/ledgerScope).
+tenantApi.use(require('./lib/ledgerScope').ledgerScope());
 
 tenantApi.use('/auth', require('./routes/auth'));
 
@@ -126,6 +128,7 @@ tenantApi.use('/auth', require('./routes/auth'));
 const views = require('./routes/views');
 tenantApi.get('/members', ...views.viewfilter('MEMBERS'));
 tenantApi.get('/clients', ...views.viewfilter('MEMBERS'));
+tenantApi.get('/groups', ...views.viewfilter('GROUPS'));
 tenantApi.get('/loans', ...views.viewfilter('LOANS'));
 tenantApi.get('/loans/transactions', ...views.viewfilter('LOAN_TRANSACTIONS', { required: true }));
 tenantApi.get('/savings', ...views.viewfilter('DEPOSITS'));
