@@ -16,20 +16,17 @@ const RT = require('../domain/returns');
  * API. Reading is open to auditors.
  */
 
-const READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR'];
-const ACCOUNTANT = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT'];
-const APPROVER = ['TENANT_ADMIN', 'MANAGER'];
 
-const read = (fn, roles = READER) => [
-  requireAuth(...roles),
+const read = (fn) => [
+  requireAuth(),
   async (req, res, next) => {
     try { res.json(await withTenantRead(req.tenant.schema_name, (c) => fn(c, req))); }
     catch (e) { next(e); }
   },
 ];
 
-const write = (fn, roles) => [
-  requireAuth(...roles),
+const write = (fn) => [
+  requireAuth(),
   async (req, res, next) => {
     try {
       res.json(await withTenant(req.tenant.schema_name, (c) =>
@@ -45,16 +42,16 @@ const provisioning = express.Router();
 provisioning.get('/bands', ...read((c) => PV.bands(c)));
 
 provisioning.patch('/bands/:code', ...write((c, req, { actor }) =>
-  PV.setBand(c, req.params.code, { ...req.body, createdBy: actor }), APPROVER));
+  PV.setBand(c, req.params.code, { ...req.body, createdBy: actor })));
 
 // What the allowance should be, without posting anything.
 provisioning.get('/preview', ...read((c, req) => PV.compute(c, { asAt: req.query.asAt || null })));
 
 provisioning.post('/run', ...write((c, req, { actor }) =>
-  PV.run(c, { asAt: req.body?.asAt || null, createdBy: actor }), ACCOUNTANT));
+  PV.run(c, { asAt: req.body?.asAt || null, createdBy: actor })));
 
 provisioning.post('/runs/:id/reverse', ...write((c, req, { actor }) =>
-  PV.reverseRun(c, req.params.id, { reason: req.body?.reason || '', createdBy: actor }), APPROVER));
+  PV.reverseRun(c, req.params.id, { reason: req.body?.reason || '', createdBy: actor })));
 
 provisioning.get('/runs', ...read((c, req) => PV.history(c, { limit: req.query.limit })));
 
@@ -66,18 +63,18 @@ periods.get('/', ...read((c) => CL.years(c)));
 periods.get('/settings', ...read((c) => CL.settings(c)));
 
 periods.patch('/settings', ...write((c, req, { actor }) =>
-  CL.setSettings(c, { ...req.body, createdBy: actor }), APPROVER));
+  CL.setSettings(c, { ...req.body, createdBy: actor })));
 
 periods.post('/', ...write((c, req, { actor }) =>
-  CL.openYear(c, { ...req.body, createdBy: actor }), APPROVER));
+  CL.openYear(c, { ...req.body, createdBy: actor })));
 
 periods.get('/:year/close-preview', ...read((c, req) => CL.preview(c, req.params.year)));
 
 periods.post('/:year/close', ...write((c, req, { actor }) =>
-  CL.close(c, req.params.year, { createdBy: actor }), APPROVER));
+  CL.close(c, req.params.year, { createdBy: actor })));
 
 periods.post('/:year/reopen', ...write((c, req, { actor }) =>
-  CL.reopen(c, req.params.year, { reason: req.body?.reason || '', createdBy: actor }), APPROVER));
+  CL.reopen(c, req.params.year, { reason: req.body?.reason || '', createdBy: actor })));
 
 // --- regulatory returns ---------------------------------------------------
 
@@ -92,7 +89,7 @@ returns.get('/:code', ...read((c, req) => RT.render(c, req.params.code, {
 
 // Loading a template is loading the shape of a filing, so it is an admin
 // action and it is audited.
-returns.put('/:code', requireAuth('TENANT_ADMIN', 'MANAGER'), async (req, res, next) => {
+returns.put('/:code', requireAuth(), async (req, res, next) => {
   try {
     const def = { ...(req.body || {}), code: req.params.code };
     if (!def.name) return badRequest(res, 'RETURN_TEMPLATE_NAME_REQUIRED');

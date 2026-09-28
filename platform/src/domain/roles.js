@@ -32,9 +32,25 @@ async function usage(c) {
   return new Map(rows.map((r) => [r.code, r.n]));
 }
 
+/**
+ * Who may change a role (the reference platform: only administrators create or edit
+ * administrators). Someone who is not an administrator may not touch an
+ * administrator role or the role they hold, and may not give a role a
+ * permission they do not hold themselves; otherwise EDIT_ROLE would be a way
+ * to any permission.
+ */
+function assertMayChange(actor, { baseRole, userType, code, added = [] }) {
+  if (!actor || actor.role === 'TENANT_ADMIN') return;
+  if (baseRole === 'TENANT_ADMIN' || userType === 'ADMINISTRATOR') throw err('ONLY_AN_ADMINISTRATOR_MANAGES_ADMINISTRATOR_ROLES', 403);
+  if (code && (code === actor.roleCode || code === actor.role)) throw err('YOU_CANNOT_CHANGE_THE_ROLE_YOU_HOLD', 403);
+  const missing = added.filter((p) => !PERMS.can(actor, p));
+  if (missing.length) throw err(`YOU_CANNOT_GIVE_PERMISSIONS_YOU_DO_NOT_HOLD: ${missing.join(', ')}`, 403);
+}
+
 function shape(r, users = 0) {
   return {
-    code: r.code, name: r.name, baseRole: r.base_role, userType: r.user_type, apiAccess: r.api_access,
+    code: r.code, name: r.name, baseRole: r.base_role, userType: r.user_type,
+    accessRights: { reference: r.console_access !== false, api: r.api_access !== false }, apiAccess: r.api_access, consoleAccess: r.console_access !== false,
     permissions: [...r.permissions].sort(), notes: r.notes, builtin: r.builtin, users,
     edited: Boolean(r.edited), createdAt: r.created_at || null, updatedAt: r.updated_at || null,
   };
@@ -43,7 +59,7 @@ function shape(r, users = 0) {
 function builtinRow(code, row = null) {
   return {
     code, name: row?.name || BUILTIN_NAMES[code], base_role: code, user_type: PERMS.USER_TYPES[code] || null,
-    api_access: row ? row.api_access : true,
+    api_access: row ? row.api_access : true, console_access: row ? row.console_access !== false : true,
     permissions: code === 'TENANT_ADMIN' ? PERMS.CATALOG.map((p) => p.code) : (row ? row.permissions : PERMS.DEFAULTS[code]),
     notes: row?.notes || null, builtin: true, edited: Boolean(row), created_at: row?.created_at, updated_at: row?.updated_at,
   };
@@ -82,7 +98,17 @@ function permissionsOf(list) {
   return codes;
 }
 
-async function create(c, body = {}, { createdBy } = {}) {
+// The reference platform's Access Rights on a role: { reference, api }, or the flat flags.
+function accessOf(body, before = null) {
+  const r = body.accessRights || {};
+  const pick = (v, flat, prev) => (v !== undefined ? v !== false : flat !== undefined ? flat !== false : prev);
+  return {
+    reference: pick(r.reference, body.consoleAccess, before ? before.console_access !== false : true),
+    api: pick(r.api, body.apiAccess, before ? before.api_access !== false : true),
+  };
+}
+
+async function create(c, body = {}, { createdBy, actor = null } = {}) {
   const name = String(body.name || '').trim();
   if (!name) throw err('ROLE_NAME_REQUIRED');
   if (name.length > 255) throw err('ROLE_NAME_TOO_LONG: at most 255 characters');
@@ -96,10 +122,12 @@ async function create(c, body = {}, { createdBy } = {}) {
   if (userType === 'ADMINISTRATOR' && baseRole !== 'TENANT_ADMIN') throw err('AN_ADMINISTRATOR_ROLE_IS_BASED_ON_TENANT_ADMIN');
   if (userType === 'TELLER' && baseRole === 'TENANT_ADMIN') throw err('A_ROLE_CANNOT_BE_BOTH_ADMINISTRATOR_AND_TELLER');
   const permissions = permissionsOf(body.permissions ?? PERMS.DEFAULTS[baseRole]);
+  assertMayChange(actor, { baseRole, userType, added: permissions });
+  const access = accessOf(body);
   const { rows: [r] } = await c.query(
-    `INSERT INTO roles (code, name, base_role, user_type, api_access, permissions, notes, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING *`,
-    [code, name, baseRole, userType, body.apiAccess !== false, permissions, body.notes || null, createdBy || null]);
+    `INSERT INTO roles (code, name, base_role, user_type, api_access, console_access, permissions, notes, created_by)
+     VALUES ($1,$2,$3,$4,$5,$9,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING *`,
+    [code, name, baseRole, userType, access.api, permissions, body.notes || null, createdBy || null, access.console]);
   if (!r) throw err(`ROLE_EXISTS: a role with code ${code} or name ${name} exists`, 409);
   await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'ROLE_CREATED','role',$2,$3)`,
     [createdBy || 'SYSTEM', code, JSON.stringify(r)]);
@@ -113,21 +141,25 @@ async function create(c, body = {}, { createdBy } = {}) {
  * Returns the role and the users whose access changed, for the caller to
  * forget (../tenancy/resolve) and, when the base role moved, sign out.
  */
-async function update(c, code, body = {}, { createdBy } = {}) {
+async function update(c, code, body = {}, { createdBy, actor = null } = {}) {
   const before = await find(c, code);
+  const access = accessOf(body, before);
   if (before.builtin) {
     if (before.code === 'TENANT_ADMIN' && body.permissions !== undefined) throw err('THE_ADMINISTRATOR_ROLE_HOLDS_EVERY_PERMISSION', 409);
     if (body.baseRole !== undefined || body.userType !== undefined || body.code !== undefined) throw err('A_BUILT_IN_ROLE_KEEPS_ITS_TYPE', 409);
     const permissions = body.permissions !== undefined ? permissionsOf(body.permissions) : before.permissions;
+    assertMayChange(actor, { baseRole: before.base_role, userType: before.user_type, code: before.code,
+      added: permissions.filter((p) => !before.permissions.includes(p)) });
+    if (before.code === 'TENANT_ADMIN' && !access.console) throw err('THE_ADMINISTRATOR_ROLE_KEEPS_BACK_OFFICE_ACCESS', 409);
     const name = body.name !== undefined ? String(body.name || '').trim() : before.name;
     if (!name) throw err('ROLE_NAME_REQUIRED');
     const { rows: [r] } = await c.query(
-      `INSERT INTO roles (code, name, base_role, user_type, api_access, permissions, notes, builtin, created_by)
-       VALUES ($1,$2,$1,$3,$4,$5,$6,true,$7)
-       ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, api_access = EXCLUDED.api_access,
+      `INSERT INTO roles (code, name, base_role, user_type, api_access, console_access, permissions, notes, builtin, created_by)
+       VALUES ($1,$2,$1,$3,$4,$8,$5,$6,true,$7)
+       ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, api_access = EXCLUDED.api_access, console_access = EXCLUDED.console_access,
          permissions = EXCLUDED.permissions, notes = EXCLUDED.notes RETURNING *`,
-      [before.code, name, before.user_type, body.apiAccess !== undefined ? body.apiAccess !== false : before.api_access,
-        permissions, body.notes !== undefined ? body.notes || null : before.notes, createdBy || null]);
+      [before.code, name, before.user_type, access.api,
+        permissions, body.notes !== undefined ? body.notes || null : before.notes, createdBy || null, access.console]);
     await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'ROLE_UPDATED','role',$2,$3,$4)`,
       [createdBy || 'SYSTEM', before.code, JSON.stringify(before), JSON.stringify(r)]);
     return { role: shape(builtinRow(before.code, r)), baseMoved: false };
@@ -141,13 +173,15 @@ async function update(c, code, body = {}, { createdBy } = {}) {
   if (userType === 'ADMINISTRATOR' && baseRole !== 'TENANT_ADMIN') throw err('AN_ADMINISTRATOR_ROLE_IS_BASED_ON_TENANT_ADMIN');
   if (userType === 'TELLER' && baseRole === 'TENANT_ADMIN') throw err('A_ROLE_CANNOT_BE_BOTH_ADMINISTRATOR_AND_TELLER');
   const permissions = body.permissions !== undefined ? permissionsOf(body.permissions) : before.permissions;
+  assertMayChange(actor, { baseRole: before.base_role, userType: before.user_type, code: before.code });
+  assertMayChange(actor, { baseRole, userType, added: permissions.filter((p) => !before.permissions.includes(p)) });
   const { rows: [clash] } = await c.query('SELECT 1 FROM roles WHERE lower(name) = lower($1) AND code <> $2', [name, before.code]);
   if (clash) throw err(`ROLE_NAME_TAKEN: ${name}`, 409);
   const { rows: [r] } = await c.query(
-    `UPDATE roles SET name = $2, base_role = $3, user_type = $4, api_access = $5, permissions = $6, notes = $7
+    `UPDATE roles SET name = $2, base_role = $3, user_type = $4, api_access = $5, permissions = $6, notes = $7, console_access = $8
      WHERE code = $1 RETURNING *`,
-    [before.code, name, baseRole, userType, body.apiAccess !== undefined ? body.apiAccess !== false : before.api_access,
-      permissions, body.notes !== undefined ? body.notes || null : before.notes]);
+    [before.code, name, baseRole, userType, access.api,
+      permissions, body.notes !== undefined ? body.notes || null : before.notes, access.console]);
   let moved = [];
   if (baseRole !== before.base_role) {
     const tid = await tenantId(c);
@@ -166,8 +200,9 @@ async function update(c, code, body = {}, { createdBy } = {}) {
   return { role: shape(r), baseMoved: moved.map((u) => u.id) };
 }
 
-async function remove(c, code, { createdBy } = {}) {
+async function remove(c, code, { createdBy, actor = null } = {}) {
   const r = await find(c, code);
+  assertMayChange(actor, { baseRole: r.base_role, userType: r.user_type, code: r.code });
   if (r.builtin) throw err('A_BUILT_IN_ROLE_CANNOT_BE_DELETED', 409);
   const used = (await usage(c)).get(r.code) || 0;
   if (used) throw err(`ROLE_IN_USE: ${used} user(s) hold it; give them another role first`, 409);
@@ -192,8 +227,19 @@ async function codes(c) {
   return [...PERMS.BASE_ROLES, ...rows.map((r) => r.code)];
 }
 
-function catalog() {
-  return PERMS.GROUPS.map(([group, list]) => ({ group, permissions: list }));
+/** Refuse role codes the tenant does not have (built-in or its own). */
+async function assertKnown(c, list) {
+  if (!list || !list.length) return;
+  const known = await codes(c);
+  const bad = list.filter((r) => !known.includes(r));
+  if (bad.length) throw err(`UNKNOWN_ROLES: ${bad.join(', ')}`);
 }
 
-module.exports = { list, get, find, create, update, remove, assignable, codes, catalog, USER_TYPES };
+/** Whether a role list names the user's role (their tenant role, or the built-in role it is based on). */
+const names = (list, user) => Boolean(user) && (list.includes(user.role) || (Boolean(user.roleCode) && list.includes(user.roleCode)));
+
+function catalog() {
+  return PERMS.GROUPS.map(([group]) => ({ group, permissions: PERMS.CATALOG.filter((p) => p.group === group).map(({ group: _g, ...p }) => p) }));
+}
+
+module.exports = { list, get, find, create, update, remove, assignable, codes, catalog, assertKnown, names, USER_TYPES };

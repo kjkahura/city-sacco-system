@@ -43,8 +43,8 @@ const router = express.Router();
 // handler that wants 201 sets res.status(201) and returns; it never sends
 // the body itself, or the client could hear "created" for a transaction
 // that then fails to commit, or read before the row is visible.
-const tx = (handler, roles = []) => [
-  requireAuth(...roles),
+const tx = (handler) => [
+  requireAuth(),
   async (req, res, next) => {
     try {
       const out = await withTenant(req.tenant.schema_name, (c) =>
@@ -66,8 +66,6 @@ const read = (handler) => [
   },
 ];
 
-const APPROVER = ['TENANT_ADMIN', 'MANAGER'];
-const TELLER = ['TENANT_ADMIN', 'MANAGER', 'TELLER'];
 
 // --- tenant-wide lending controls ------------------------------------------
 
@@ -86,19 +84,19 @@ router.get('/write-off-requests', requireAuth(), async (req, res, next) => {
 
 // Review every indexed or adjustable loan's rate (the end of day does this).
 router.post('/rates/review', ...tx((c, req, _res, { actor }) =>
-  RATES.reviewAll(c, { date: req.body?.asOf, createdBy: actor }), APPROVER));
+  RATES.reviewAll(c, { date: req.body?.asOf, createdBy: actor })));
 
 router.get('/controls', requireAuth(), async (req, res, next) => {
   try { res.json(await withTenantRead(req.tenant.schema_name, (c) => W.controls(c))); } catch (e) { next(e); }
 });
-router.patch('/controls', ...tx((c, req, _res, { actor }) => W.updateControls(c, req.body, { actor }), ['TENANT_ADMIN']));
-router.post('/controls/run', ...tx((c, req) => W.enforceControls(c, req.body), APPROVER));
+router.patch('/controls', ...tx((c, req, _res, { actor }) => W.updateControls(c, req.body, { actor })));
+router.post('/controls/run', ...tx((c, req) => W.enforceControls(c, req.body)));
 // Each user's approval and disbursement limits.
-router.get('/controls/users', requireAuth(...APPROVER), async (req, res, next) => {
+router.get('/controls/users', requireAuth(), async (req, res, next) => {
   try { res.json(await withTenantRead(req.tenant.schema_name, (c) => CTL.staffLimits(c, req.tenant.id))); } catch (e) { next(e); }
 });
 router.patch('/controls/users/:userId', ...tx((c, req, _res, { actor }) =>
-  CTL.setUserLimits(c, req.tenant.id, req.params.userId, req.body || {}, { actor }), ['TENANT_ADMIN']));
+  CTL.setUserLimits(c, req.tenant.id, req.params.userId, req.body || {}, { actor })));
 
 // Loans the end of day left out (./eodGuard), and bringing one back.
 router.get('/eod-exclusions', requireAuth(), async (req, res, next) => {
@@ -106,7 +104,7 @@ router.get('/eod-exclusions', requireAuth(), async (req, res, next) => {
 });
 
 // Bulk repayment collection: the sheet (JSON, or CSV to export) and batches.
-router.get('/collections/sheet', requireAuth(...TELLER), async (req, res, next) => {
+router.get('/collections/sheet', requireAuth(), async (req, res, next) => {
   try {
     const s = await withTenantRead(req.tenant.schema_name, (c) => COL.sheet(c, req.query));
     if (req.query.format === 'csv') {
@@ -117,14 +115,14 @@ router.get('/collections/sheet', requireAuth(...TELLER), async (req, res, next) 
     return res.json(s);
   } catch (e) { next(e); }
 });
-router.get('/collections/batches', requireAuth(...TELLER), async (req, res, next) => {
+router.get('/collections/batches', requireAuth(), async (req, res, next) => {
   try { res.json(await withTenantRead(req.tenant.schema_name, (c) => COL.batches(c, req.query))); } catch (e) { next(e); }
 });
 router.get('/collections/batches/:batchId', ...read((c, req) => COL.batch(c, req.params.batchId)));
 router.post('/collections/batches', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
   return COL.post(c, { ...req.body, createdBy: actor, user });
-}, TELLER));
+}));
 
 // --- list and read --------------------------------------------------------
 
@@ -158,7 +156,7 @@ router.post('/migrate', ...tx(async (c, req, res, { actor, user }) => {
   }
   res.status(201);
   return { ...out.loan, migrationDate: asOf, installments: out.installments, warnings: out.warnings };
-}, ['TENANT_ADMIN']));
+}));
 
 router.get('/', requireAuth(), async (req, res, next) => {
   try {
@@ -281,7 +279,7 @@ router.post('/eligibility', ...tx(async (c, req) =>
     productId: req.body.productId || 'NL01',
     principal: req.body.principal,
     loanId: req.body.loanId || null,
-  }), TELLER));
+  })));
 
 // The picture approval will judge a specific application by, guarantors
 // included. Read-only: nothing is decided here.
@@ -300,16 +298,16 @@ router.post('/', ...tx(async (c, req, res, { actor, user }) => {
   const loan = await L.apply(c, { ...body, createdBy: actor, user });
   res.status(201);
   return loan;
-}, TELLER));
+}));
 
 router.post('/:id/guarantors', ...tx(async (c, req, res, { actor, user }) => {
   const g = await L.addGuarantor(c, req.params.id, { ...req.body, createdBy: actor, user });
   res.status(201);
   return g;
-}, TELLER));
+}));
 // A guarantor taken off, if the loan stays covered (./eligibility).
 router.delete('/:id/guarantors/:guarantorId', ...tx((c, req, _res, { actor }) =>
-  ELIG.removeGuarantor(c, req.params.id, req.params.guarantorId, { ...(req.body || {}), createdBy: actor }), APPROVER));
+  ELIG.removeGuarantor(c, req.params.id, req.params.guarantorId, { ...(req.body || {}), createdBy: actor })));
 
 // --- state ----------------------------------------------------------------
 //
@@ -324,64 +322,63 @@ const STATE_ROUTES = {
   reject: 'REJECT', 'undo-reject': 'UNDO_REJECT', withdraw: 'WITHDRAW', 'undo-withdraw': 'UNDO_WITHDRAW',
   lock: 'LOCK', unlock: 'UNLOCK', close: 'CLOSE', 'undo-close': 'UNDO_CLOSE',
 };
-const TELLER_ACTIONS = ['REQUEST_APPROVAL', 'SET_INCOMPLETE', 'WITHDRAW'];
+// What each state change needs is in lib/routePermissions.
 for (const [path, action] of Object.entries(STATE_ROUTES)) {
-  const roles = TELLER_ACTIONS.includes(action) ? TELLER : APPROVER;
   router.post(`/:id/${path}`, ...tx((c, req, _res, { actor, user }) =>
     W.transition(c, req.params.id, action, {
       createdBy: actor, user, note: req.body?.note, reason: req.body?.reason, suspend: req.body?.suspend, valueDate: req.body?.valueDate,
-    }), roles));
+    })));
 }
 // What a lock suspends, changed while the loan stays locked.
 router.post('/:id/lock-settings', ...tx((c, req, _res, { actor }) =>
-  W.changeLock(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+  W.changeLock(c, req.params.id, { ...req.body, createdBy: actor })));
 // Delete a loan created by mistake: an application, or one rejected or
 // withdrawn, that nothing has been posted to (the reference platform's Delete).
 router.delete('/:id', ...tx((c, req, _res, { actor }) =>
-  W.deleteLoan(c, req.params.id, { note: req.body?.note || req.query?.note, createdBy: actor }), ['TENANT_ADMIN']));
+  W.deleteLoan(c, req.params.id, { note: req.body?.note || req.query?.note, createdBy: actor })));
 
 router.get('/:id/history', ...read((c, req) => W.historyOf(c, req.params.id)));
 
 // Amendments: the terms while the application is open, the narrative
 // afterwards. The domain layer decides which is which.
-router.patch('/:id', ...tx((c, req, _res, { actor, user }) => W.amend(c, req.params.id, req.body, { actor, user }), TELLER));
+router.patch('/:id', ...tx((c, req, _res, { actor, user }) => W.amend(c, req.params.id, req.body, { actor, user })));
 // Disbursement details and their audit trail (the reference platform's Set Disbursement Conditions).
 router.get('/:id/disbursement-details', ...read((c, req) => W.disbursementDetails(c, req.params.id)));
 router.put('/:id/disbursement-details', ...tx(async (c, req, _res, { actor, user }) => {
   await W.setDisbursementDetails(c, req.params.id, req.body || {}, { actor, user });
   return W.disbursementDetails(c, req.params.id);
-}, TELLER));
+}));
 
 // Pay-off (with charges written off), terminate and undo.
-router.get('/:id/pay-off', ...tx((c, req) => LC.payOffQuote(c, req.params.id, req.query), TELLER));
+router.get('/:id/pay-off', ...tx((c, req) => LC.payOffQuote(c, req.params.id, req.query)));
 router.post('/:id/pay-off', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
   return LC.payOff(c, req.params.id, { ...req.body, createdBy: actor, user });
-}, TELLER));
-router.post('/:id/terminate', ...tx((c, req, _res, { actor }) => LC.terminate(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
-router.post('/:id/undo-terminate', ...tx((c, req, _res, { actor }) => LC.undoTerminate(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+}));
+router.post('/:id/terminate', ...tx((c, req, _res, { actor }) => LC.terminate(c, req.params.id, { ...req.body, createdBy: actor })));
+router.post('/:id/undo-terminate', ...tx((c, req, _res, { actor }) => LC.undoTerminate(c, req.params.id, { ...req.body, createdBy: actor })));
 
 // The end of day's exclusion list, for one loan, and bringing it back.
 router.get('/:id/eod-exclusions', ...read((c, req) => EX.forLoan(c, req.params.id)));
-router.post('/:id/eod-include', ...tx((c, req, _res, { actor }) => EX.include(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+router.post('/:id/eod-include', ...tx((c, req, _res, { actor }) => EX.include(c, req.params.id, { ...req.body, createdBy: actor })));
 
 // A running loan's interest rate or spread, from a date (./rates).
 router.post('/:id/interest-rate', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return RATES.changeRate(c, req.params.id, { ...req.body, createdBy: actor });
-}, APPROVER));
+}));
 
 // Undo a reschedule or refinance, from the new loan.
-router.post('/:id/undo-restructure', ...tx((c, req, _res, { actor }) => R.undoRestructure(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+router.post('/:id/undo-restructure', ...tx((c, req, _res, { actor }) => R.undoRestructure(c, req.params.id, { ...req.body, createdBy: actor })));
 
 // Revolving loans: the schedule with installments added by hand.
 router.get('/:id/revolving-schedule', ...read((c, req) => RV.schedule(c, req.params.id)));
 router.post('/:id/revolving-installments', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return RV.addInstallment(c, req.params.id, { ...req.body, createdBy: actor });
-}, APPROVER));
+}));
 router.delete('/:id/revolving-installments/:billingDateId', ...tx((c, req, _res, { actor }) =>
-  RV.removeInstallment(c, req.params.id, req.params.billingDateId, { createdBy: actor }), APPROVER));
+  RV.removeInstallment(c, req.params.id, req.params.billingDateId, { createdBy: actor })));
 
 // Attachments: upload as JSON with the file base64 in `content`, or as the
 // raw request body with the name in the query (?fileName=&title=&description=).
@@ -394,7 +391,7 @@ router.post('/:id/attachments', express.raw({ type: (r) => !/json/.test(r.header
     title: meta.title, description: meta.description, fileName: meta.fileName,
     data: raw ? req.body : meta.content, createdBy: actor,
   });
-}, TELLER));
+}));
 for (const [path, disposition] of [['download', 'attachment'], ['preview', 'inline']]) {
   router.get(`/:id/attachments/:attachmentId/${path}`, requireAuth(), async (req, res, next) => {
     try {
@@ -409,22 +406,22 @@ for (const [path, disposition] of [['download', 'attachment'], ['preview', 'inli
   });
 }
 router.patch('/:id/attachments/:attachmentId', ...tx((c, req, _res, { actor }) =>
-  ATT.update(c, req.params.id, req.params.attachmentId, { ...req.body, createdBy: actor }), TELLER));
+  ATT.update(c, req.params.id, req.params.attachmentId, { ...req.body, createdBy: actor })));
 router.delete('/:id/attachments/:attachmentId', ...tx((c, req, _res, { actor }) =>
-  ATT.remove(c, req.params.id, req.params.attachmentId, { createdBy: actor }), APPROVER));
+  ATT.remove(c, req.params.id, req.params.attachmentId, { createdBy: actor })));
 
 // --- tranches, securities, funding, credit balance -------------------------
 
 router.get('/:id/tranches', ...read((c, req) => TR.forLoan(c, req.params.id)));
-router.put('/:id/tranches', ...tx((c, req, _res, { actor }) => TR.setTranches(c, req.params.id, req.body?.tranches || req.body, { createdBy: actor }), TELLER));
+router.put('/:id/tranches', ...tx((c, req, _res, { actor }) => TR.setTranches(c, req.params.id, req.body?.tranches || req.body, { createdBy: actor })));
 
 router.get('/:id/collateral', ...read((c, req) => SEC.forLoan(c, req.params.id)));
 router.post('/:id/collateral', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
   return await SEC.addCollateral(c, req.params.id, { ...req.body, createdBy: actor, user });
-}, TELLER));
+}));
 router.post('/collateral/:collateralId/release', ...tx((c, req, _res, { actor }) =>
-  SEC.releaseCollateral(c, req.params.collateralId, { ...req.body, createdBy: actor }), APPROVER));
+  SEC.releaseCollateral(c, req.params.collateralId, { ...req.body, createdBy: actor })));
 
 router.get('/:id/funding', ...read(async (c, req) => {
   const { rows: [l] } = await c.query('SELECT id FROM loan_accounts WHERE id::text = $1 OR account_no = $1', [req.params.id]);
@@ -433,34 +430,35 @@ router.get('/:id/funding', ...read(async (c, req) => {
 router.post('/:id/funding', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await FU.addFundingSource(c, req.params.id, { ...req.body, createdBy: actor });
-}, TELLER));
-router.delete('/funding/:fundingId', ...tx((c, req, _res, { actor }) => FU.removeFundingSource(c, req.params.fundingId, { createdBy: actor }), TELLER));
+}));
+router.delete('/funding/:fundingId', ...tx((c, req, _res, { actor }) => FU.removeFundingSource(c, req.params.fundingId, { createdBy: actor })));
 
 router.post('/:id/credit-balance-deposits', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await RV.depositToCreditBalance(c, req.params.id, { ...req.body, createdBy: actor });
-}, TELLER));
-router.post('/revolving/bill', ...tx((c, req) => RV.billAll(c, req.body), APPROVER));
+}));
+router.post('/revolving/bill', ...tx((c, req) => RV.billAll(c, req.body)));
 
 // --- fees -----------------------------------------------------------------
 
 router.get('/:id/fees', ...read((c, req) => F.forLoan(c, req.params.id)));
-router.post('/:id/fees', ...tx(async (c, req, res, { actor }) => {
+router.post('/:id/fees', ...tx(async (c, req, res, { actor, user }) => {
   const body = { ...req.body, createdBy: actor };
+  if (body.amount !== undefined) await CTL.assertWithinLimit(c, user, 'fee', body.amount);
   const out = body.fee ? await F.applyManualFee(c, req.params.id, body) : await F.applyArbitraryFee(c, req.params.id, body);
   res.status(201);
   return out;
-}, TELLER));
+}));
 router.post('/fees/:feeId/waive', ...tx((c, req, _res, { actor }) =>
-  F.waive(c, req.params.feeId, { ...req.body, createdBy: actor }), APPROVER));
+  F.waive(c, req.params.feeId, { ...req.body, createdBy: actor })));
 // Adjust: taken back as if never applied (a fee nothing was paid on).
 router.post('/fees/:feeId/adjust', ...tx((c, req, _res, { actor }) =>
-  F.adjust(c, req.params.feeId, { ...req.body, createdBy: actor }), APPROVER));
+  F.adjust(c, req.params.feeId, { ...req.body, createdBy: actor })));
 // Reduce Balance: the fee or penalty balance lowered, the difference written off.
 router.post('/:id/reduce-balance', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
   return WO.reduceBalance(c, req.params.id, { ...req.body, createdBy: actor, user });
-}, APPROVER));
+}));
 router.get('/:id/charge-write-offs', ...read((c, req) => WO.chargeWriteOffs(c, req.params.id)));
 
 // --- money ----------------------------------------------------------------
@@ -477,29 +475,30 @@ router.post('/:id/disbursements', ...tx(async (c, req, res, { actor, user }) => 
   }
   const t = await L.disburse(c, req.params.id, { ...req.body, createdBy: actor, user });
   return CF.applyToTransaction(c, t, req.body?.customFields, { user });
-}, APPROVER));
+}));
 
 router.post('/:id/repayments', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
   // `internal` marks a repayment the system makes under another permission
   // (a pay-off, securities collected); it is never taken from the wire.
   const { internal: _ignored, ...body } = req.body || {};
+  await CTL.assertWithinLimit(c, user, 'repayment', body.amount);
   if (body.savingsAccountId) return LT.repayFromDeposit(c, req.params.id, { ...body, createdBy: actor, user });
   const t = await L.repay(c, req.params.id, { ...body, createdBy: actor, user });
   return CF.applyToTransaction(c, t, body.customFields, { user });
-}, TELLER));
+}));
 
 router.post('/:id/accrue-interest', ...tx(async (c, req, res, { actor }) => {
   const out = await L.accrueInterest(c, req.params.id, { ...req.body, createdBy: actor });
   res.status(out ? 201 : 200).json(out || { accrued: 0 });
-}, APPROVER));
+}));
 
 // A reschedule closes the loan and opens a linked one at once: a management
 // decision, and no new money leaves.
 router.post('/:id/reschedule', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await R.restructure(c, req.params.id, { ...req.body, kind: 'RESCHEDULE', createdBy: actor });
-}, APPROVER));
+}));
 
 // A top-up (refinance) is an application like any other: recorded here,
 // approved by someone with the authority, paid out by /disbursements on the
@@ -507,7 +506,7 @@ router.post('/:id/reschedule', ...tx(async (c, req, res, { actor }) => {
 router.post('/:id/refinance', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await R.requestRefinance(c, req.params.id, { ...req.body, createdBy: actor });
-}, TELLER));
+}));
 router.get('/:id/refinance-quote', ...read((c, req) => R.quote(c, req.params.id)));
 
 // A write-off is asked for by one person and approved by another (unless
@@ -515,28 +514,28 @@ router.get('/:id/refinance-quote', ...read((c, req) => R.quote(c, req.params.id)
 router.post('/:id/write-off', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
   return await LC.requestWriteOff(c, req.params.id, { ...req.body, createdBy: actor, user });
-}, TELLER));
+}));
 router.get('/:id/write-off', ...read((c, req) => WO.requestsFor(c, req.params.id)));
 router.get('/:id/rates', ...read((c, req) => RATES.historyOf(c, req.params.id)));
 
 // Schedule editing, payment holidays and the monthly due day, as far as the
 // product allows (./scheduleEdits).
-router.put('/:id/schedule', ...tx((c, req, _res, { actor }) => SE.editSchedule(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+router.put('/:id/schedule', ...tx((c, req, _res, { actor }) => SE.editSchedule(c, req.params.id, { ...req.body, createdBy: actor })));
 router.post('/:id/payment-holiday', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return SE.paymentHoliday(c, req.params.id, { ...req.body, createdBy: actor });
-}, APPROVER));
+}));
 router.post('/:id/holiday-interest', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return SE.applyHolidayInterest(c, req.params.id, { ...req.body, createdBy: actor });
-}, APPROVER));
-router.post('/:id/due-day', ...tx((c, req, _res, { actor }) => SE.changeDueDay(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+}));
+router.post('/:id/due-day', ...tx((c, req, _res, { actor }) => SE.changeDueDay(c, req.params.id, { ...req.body, createdBy: actor })));
 router.get('/:id/schedule-edits', ...read((c, req) => SE.editsOf(c, req.params.id)));
 // The schedule an application will be drawn with: the product's, or one
 // edited on the application (PUT /:id/schedule works before disbursement too).
 router.get('/:id/application-schedule', ...read((c, req) => SE.applicationSchedule(c, req.params.id)));
 router.get('/:id/schedule/editable', ...read((c, req) => SE.editable(c, req.params.id, req.query)));
-router.delete('/:id/application-schedule', ...tx((c, req, _res, { actor }) => SE.clearApplicationSchedule(c, req.params.id, { createdBy: actor }), APPROVER));
+router.delete('/:id/application-schedule', ...tx((c, req, _res, { actor }) => SE.clearApplicationSchedule(c, req.params.id, { createdBy: actor })));
 
 // Postdated payments (fixed term): recorded now, applied by the end of day
 // on their value date (./postdated).
@@ -545,11 +544,11 @@ router.post('/:id/postdated-payments', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return req.body?.installments ? PDP.forInstallments(c, req.params.id, { ...req.body, createdBy: actor })
     : PDP.schedule(c, req.params.id, { ...req.body, createdBy: actor });
-}, TELLER));
+}));
 router.post('/postdated-payments/:paymentId/cancel', ...tx((c, req, _res, { actor }) =>
-  PDP.cancel(c, req.params.paymentId, { ...req.body, createdBy: actor }), TELLER));
+  PDP.cancel(c, req.params.paymentId, { ...req.body, createdBy: actor })));
 // Penalty rate on a running loan (the reference platform's Edit Penalty Rate), and its history.
-router.post('/:id/penalty-rate', ...tx((c, req, _res, { actor }) => P.changeRate(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+router.post('/:id/penalty-rate', ...tx((c, req, _res, { actor }) => P.changeRate(c, req.params.id, { ...req.body, createdBy: actor })));
 router.get('/:id/penalty-rate-changes', ...read((c, req) => P.rateChanges(c, req.params.id)));
 
 // Planned fees: manual fees placed on installments ahead of time (./plannedFees).
@@ -557,25 +556,25 @@ router.get('/:id/planned-fees', ...read((c, req) => PF.forLoan(c, req.params.id)
 router.post('/:id/planned-fees', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return PF.add(c, req.params.id, { ...req.body, createdBy: actor });
-}, TELLER));
-router.post('/:id/planned-fees/apply', ...tx((c, req, _res, { actor }) => PF.apply(c, req.params.id, { ...req.body, createdBy: actor }), TELLER));
-router.patch('/planned-fees/:plannedId', ...tx((c, req, _res, { actor }) => PF.edit(c, req.params.plannedId, { ...req.body, createdBy: actor }), TELLER));
-router.delete('/planned-fees/:plannedId', ...tx((c, req, _res, { actor }) => PF.remove(c, req.params.plannedId, { createdBy: actor }), TELLER));
-router.post('/planned-fees/run', ...tx((c, req) => PF.applyDue(c, { ...req.body }), APPROVER));
+}));
+router.post('/:id/planned-fees/apply', ...tx((c, req, _res, { actor }) => PF.apply(c, req.params.id, { ...req.body, createdBy: actor })));
+router.patch('/planned-fees/:plannedId', ...tx((c, req, _res, { actor }) => PF.edit(c, req.params.plannedId, { ...req.body, createdBy: actor })));
+router.delete('/planned-fees/:plannedId', ...tx((c, req, _res, { actor }) => PF.remove(c, req.params.plannedId, { createdBy: actor })));
+router.post('/planned-fees/run', ...tx((c, req) => PF.applyDue(c, { ...req.body })));
 
 // Fee amortisation plans and the recognition run.
 router.get('/:id/fee-amortization', ...read((c, req) => FA.forLoan(c, req.params.id)));
-router.post('/fee-amortization/run', ...tx((c, req) => FA.run(c, { ...req.body }), APPROVER));
+router.post('/fee-amortization/run', ...tx((c, req) => FA.run(c, { ...req.body })));
 
-router.post('/postdated-payments/run', ...tx((c, req) => PDP.applyDue(c, { ...req.body }), APPROVER));
+router.post('/postdated-payments/run', ...tx((c, req) => PDP.applyDue(c, { ...req.body })));
 router.post('/:id/rates/review', ...tx((c, req, _res, { actor }) =>
-  RATES.reviewLoan(c, req.params.id, { date: req.body?.asOf, createdBy: actor }).then((x) => x || { changed: false }), APPROVER));
+  RATES.reviewLoan(c, req.params.id, { date: req.body?.asOf, createdBy: actor }).then((x) => x || { changed: false })));
 router.post('/:id/write-off/approve', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
   return await LC.approveWriteOff(c, req.params.id, { note: req.body?.note, createdBy: actor, user });
-}, APPROVER));
+}));
 router.post('/:id/write-off/reject', ...tx((c, req, _res, { actor, user }) =>
-  WO.decide(c, req.params.id, { approve: false, note: req.body?.note, createdBy: actor, user }), APPROVER));
+  WO.decide(c, req.params.id, { approve: false, note: req.body?.note, createdBy: actor, user })));
 
 // After a write-off: money recovered through a channel (a teller receipt),
 // taken from a called guarantor's deposits, or a call forgone (management).
@@ -583,23 +582,23 @@ router.post('/:id/recoveries', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
   const t = await L.recover(c, req.params.id, { ...req.body, createdBy: actor, user });
   return CF.applyToTransaction(c, t, req.body?.customFields, { user });
-}, TELLER));
+}));
 router.post('/:id/guarantors/:guarantorId/recover', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await L.recoverFromGuarantor(c, req.params.id, req.params.guarantorId, { ...req.body, createdBy: actor });
-}, APPROVER));
+}));
 router.post('/:id/guarantors/:guarantorId/release-call', ...tx((c, req, _res, { actor }) =>
-  L.releaseCall(c, req.params.id, req.params.guarantorId, { ...req.body, createdBy: actor }), APPROVER));
+  L.releaseCall(c, req.params.id, req.params.guarantorId, { ...req.body, createdBy: actor })));
 
 // A loan's settlement account moves with it (./settlementLinks).
 router.post('/:id/branch', ...tx((c, req, _res, { actor }) =>
-  SL.moveLoan(c, req.params.id, { branchId: req.body?.branchId, createdBy: actor }), APPROVER));
+  SL.moveLoan(c, req.params.id, { branchId: req.body?.branchId, createdBy: actor })));
 
 // Settlement deposit accounts.
 router.get('/:id/settlement-account', ...read((c, req) => SL.forLoan(c, req.params.id)));
-router.put('/:id/settlement-account', ...tx((c, req, _res, { actor }) => SL.link(c, req.params.id, { ...req.body, createdBy: actor }), TELLER));
-router.delete('/:id/settlement-account', ...tx((c, req, _res, { actor }) => SL.unlink(c, req.params.id, { ...req.body, createdBy: actor }), TELLER));
-router.post('/settlement/run', ...tx((c, req) => SETTLE.run(c, { ...req.body }), APPROVER));
+router.put('/:id/settlement-account', ...tx((c, req, _res, { actor }) => SL.link(c, req.params.id, { ...req.body, createdBy: actor })));
+router.delete('/:id/settlement-account', ...tx((c, req, _res, { actor }) => SL.unlink(c, req.params.id, { ...req.body, createdBy: actor })));
+router.post('/settlement/run', ...tx((c, req) => SETTLE.run(c, { ...req.body })));
 
 // Corrections are reversals. There is no PUT or DELETE on a transaction.
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
@@ -608,7 +607,7 @@ router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { act
   const { rows: [t] } = await c.query('SELECT kind, loan_account_id FROM transactions WHERE reference = $1', [req.params.reference]);
   if (t?.kind === 'LOAN_TERMINATED' && t.loan_account_id) return LC.undoTerminate(c, t.loan_account_id, { ...req.body, createdBy: actor });
   return await L.reverseTransaction(c, req.params.reference, { ...req.body, createdBy: actor });
-}, APPROVER));
+}));
 
 router.get('/:id/penalties', requireAuth(), async (req, res, next) => {
   try {
@@ -619,18 +618,18 @@ router.get('/:id/penalties', requireAuth(), async (req, res, next) => {
 });
 
 router.post('/:id/penalties/accrue', ...tx((c, req, _res, { actor }) =>
-  P.accrueForLoan(c, req.params.id, { ...req.body, createdBy: actor }), APPROVER));
+  P.accrueForLoan(c, req.params.id, { ...req.body, createdBy: actor })));
 
 // Waiving reverses the posting rather than deleting the charge, so both the
 // penalty and the decision to waive it stay on the record.
 router.post('/penalties/:chargeId/waive', ...tx((c, req, _res, { actor }) =>
-  P.waive(c, req.params.chargeId, { ...req.body, createdBy: actor }), APPROVER));
+  P.waive(c, req.params.chargeId, { ...req.body, createdBy: actor })));
 router.post('/penalties/:chargeId/adjust', ...tx((c, req, _res, { actor }) =>
-  P.adjust(c, req.params.chargeId, { ...req.body, createdBy: actor }), APPROVER));
+  P.adjust(c, req.params.chargeId, { ...req.body, createdBy: actor })));
 
-router.post('/penalties/run', ...tx((c, req) => P.accrueAll(c, req.body), APPROVER));
+router.post('/penalties/run', ...tx((c, req) => P.accrueAll(c, req.body)));
 
-router.post('/arrears/run', ...tx((c, req) => L.markArrears(c, req.body), APPROVER));
+router.post('/arrears/run', ...tx((c, req) => L.markArrears(c, req.body)));
 router.post('/fees/run', ...tx(async (c, req) => {
   const asOf = req.body?.asOf || await orgToday(c);
   const { rows } = await c.query("SELECT id FROM loan_accounts WHERE status IN ('ACTIVE','IN_ARREARS')");
@@ -641,6 +640,6 @@ router.post('/fees/run', ...tx(async (c, req) => {
     late += await F.applyLateFees(c, l, asOf);
   }
   return { loans: rows.length, paymentDueApplied: due, lateFeesApplied: late };
-}, APPROVER));
+}));
 
 module.exports = router;

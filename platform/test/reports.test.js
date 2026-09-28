@@ -91,11 +91,15 @@ async function loan(c, m, { principal = 12000, term = 12, disbursedDaysAgo = nul
     await migrateAllTenants({});
     tokens.admin = (await call('POST', '/api/auth/login', { email: 'admin@rpt.local', password: PASSWORD })).body.accessToken;
     check('admin signed in', !!tokens.admin);
+    const home = await call('POST', '/api/branches', { code: 'HOME', name: 'Home' });
+    // The officer and the manager carry members as credit officers (the reference platform's credit officer user type).
+    const types = { manager: 'CREDIT_OFFICER', officer: 'CREDIT_OFFICER' };
     for (const [who, role] of [['manager', 'MANAGER'], ['teller', 'TELLER'], ['officer', 'TELLER'], ['auditor', 'AUDITOR']]) {
-      const u = await call('POST', '/api/users', { email: `${who}@rpt.local`, fullName: `The ${who}`, role, password: `${who} first password` });
+      const u = await call('POST', '/api/users', { email: `${who}@rpt.local`, fullName: `The ${who}`, role, password: `First password 2026 ${who.length}`,
+        branchId: home.body.id, userType: types[who] || undefined });
       if (u.status !== 201) check(`user ${who}`, false, u.text);
       await pool.query('UPDATE platform.users SET must_change_password = false WHERE lower(email) = $1', [`${who}@rpt.local`]);
-      tokens[who] = (await call('POST', '/api/auth/login', { email: `${who}@rpt.local`, password: `${who} first password` })).body?.accessToken;
+      tokens[who] = (await call('POST', '/api/auth/login', { email: `${who}@rpt.local`, password: `First password 2026 ${who.length}` })).body?.accessToken;
     }
     check('staff signed in', tokens.manager && tokens.teller && tokens.officer && tokens.auditor);
     const east = await call('POST', '/api/branches', { code: 'EAST', name: 'East' });
@@ -361,7 +365,7 @@ async function loan(c, m, { principal = 12000, term = 12, disbursedDaysAgo = nul
     check('pending approval and pending disbursement', v.LOANS_PENDING_APPROVAL === 1 && v.AMOUNT_PENDING_APPROVAL === 3000 && v.LOANS_PENDING_DISBURSEMENT === 1 && v.AMOUNT_PENDING_DISBURSEMENT === 2000,
       JSON.stringify([v.LOANS_PENDING_APPROVAL, v.AMOUNT_PENDING_APPROVAL, v.LOANS_PENDING_DISBURSEMENT, v.AMOUNT_PENDING_DISBURSEMENT]));
     check('deposits and the loan to deposit ratio', v.DEPOSIT_BALANCE === 41000 && v.LOAN_TO_DEPOSIT_RATIO === round2(v.GROSS_LOAN_PORTFOLIO / 41000 * 100), String(v.DEPOSIT_BALANCE));
-    check('branches and users', v.BRANCHES === 2 && v.USERS >= 5, `${v.BRANCHES} ${v.USERS}`);
+    check('branches and users', v.BRANCHES === 3 && v.USERS >= 5, `${v.BRANCHES} ${v.USERS}`);
     const indE = await call('GET', '/api/reports/indicators?entityType=BRANCH&entityId=EAST');
     const ve = Object.fromEntries(indE.body.indicators.map((x) => [x.code, x.value]));
     check('for a branch', ve.CLIENTS === 2 && ve.BRANCHES === 1 && ve.DEPOSIT_BALANCE === 25000 && indE.body.entity.label === 'EAST East', JSON.stringify(indE.body.entity));
@@ -522,9 +526,9 @@ async function loan(c, m, { principal = 12000, term = 12, disbursedDaysAgo = nul
     check('and lists the transactions a view matches', ltv.status === 200 && ltv.body.length === 2 && ltv.body.every((x) => x.amount > 0), ltv.text.slice(0, 200));
     const uv = await call('GET', '/api/users/me/views?for=LOANS', null, { who: 'manager' });
     check('GET /users/{user}/views?for= lists the views a user can see, of one kind', uv.status === 200 && uv.body.length === 2 && uv.body.every((x) => x.type === 'LOANS' && x.encodedKey), uv.text.slice(0, 300));
-    const uvOther = await call('GET', '/api/users/officer@rpt.local/views', null, { who: 'manager' });
+    const uvOther = await call('GET', '/api/users/officer@rpt.local/views', null, { who: 'teller' });
     const uvAdmin = await call('GET', '/api/users/officer@rpt.local/views?for=LOANS');
-    check('another user\'s views only for an administrator', uvOther.status === 403 && uvAdmin.status === 200 && uvAdmin.body.some((x) => x.name === 'Loans in arrears'));
+    check('another user\'s views only with VIEW_USER_DETAILS', uvOther.status === 403 && uvAdmin.status === 200 && uvAdmin.body.some((x) => x.name === 'Loans in arrears'));
     const del = await call('DELETE', `/api/views/${arrears.body.id}`, null, { who: 'manager' });
     const del2 = await call('DELETE', `/api/views/${arrears.body.id}`, null, { who: 'officer' });
     check('only the owner or an administrator deletes a view', del.status === 403 && del2.status === 200);

@@ -1,5 +1,7 @@
 'use strict';
 
+const PERMS = require('../lib/permissions');
+
 const acct = require('./accounting');
 const { err, round2 } = acct;
 
@@ -35,12 +37,14 @@ const CONTROL_FIELDS = {
 // Role lists where NULL means "any role that may do the underlying action".
 const NULLABLE_ROLE_LISTS = ['custom_allocation_roles', 'disbursement_conditions_roles', 'pay_off_roles', 'loan_adjustment_roles',
   'collect_securities_roles'];
-const ROLES = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'];
+const BUILTIN_ROLES = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'];
 
 async function updateControls(c, patch, { actor } = {}) {
   const before = await controls(c);
   const sets = [];
   const vals = [];
+  // Built-in roles and the tenant's own.
+  const ROLES = [...BUILTIN_ROLES, ...(await c.query('SELECT code FROM roles WHERE NOT builtin')).rows.map((r) => r.code)];
   for (const [k, col] of Object.entries(CONTROL_FIELDS)) {
     if (patch[k] === undefined) continue;
     if (col === 'max_exposure_mode' && !['UNLIMITED', 'SUM_OF_LOANS', 'SUM_MINUS_DEPOSITS'].includes(patch[k])) {
@@ -107,12 +111,31 @@ async function exposure(c, { memberId, loanId = null, refinancing = null, reques
   };
 }
 
-/** The signed-in user's limits, when the caller told us who they are. */
+/**
+ * The signed-in user's limits (the reference platform's transaction limits on a user), when
+ * the caller told us who they are. The reference platform offers them for users who are not
+ * administrators; here a limit set on an administrator holds too.
+ */
 async function userLimits(c, user) {
-  if (!user?.sub) return { approval: null, disbursement: null, email: user?.email || null };
+  const none = { approval: null, disbursement: null, fee: null, deposit: null, withdrawal: null, repayment: null, email: user?.email || null };
+  if (!user?.sub || user.apiConsumer) return none;
   const { rows: [u] } = await c.query(
-    'SELECT email, approval_limit, disbursement_limit FROM platform.users WHERE id = $1', [user.sub]);
-  return { approval: u?.approval_limit ?? null, disbursement: u?.disbursement_limit ?? null, email: u?.email || user.email };
+    `SELECT email, approval_limit, disbursement_limit, fee_limit, deposit_limit, withdrawal_limit, repayment_limit
+     FROM platform.users WHERE id = $1`, [user.sub]);
+  if (!u) return none;
+  return {
+    approval: u.approval_limit ?? null, disbursement: u.disbursement_limit ?? null, fee: u.fee_limit ?? null,
+    deposit: u.deposit_limit ?? null, withdrawal: u.withdrawal_limit ?? null, repayment: u.repayment_limit ?? null, email: u.email,
+  };
+}
+
+const LIMIT_NAMES = { fee: 'FEE_APPLICATION', deposit: 'DEPOSIT', withdrawal: 'WITHDRAWAL', repayment: 'REPAYMENT' };
+/** Refuse an amount above the user's limit for fees, deposits, withdrawals or repayments. */
+async function assertWithinLimit(c, user, kind, amount) {
+  const lim = (await userLimits(c, user))[kind];
+  if (lim !== null && lim !== undefined && Number(amount) > Number(lim)) {
+    throw err(`ABOVE_YOUR_${LIMIT_NAMES[kind]}_LIMIT: limit ${Number(lim)}, amount ${Number(amount)}`, 403);
+  }
 }
 
 async function assertMayApprove(c, l, { user }) {
@@ -141,7 +164,10 @@ async function assertMayDisburse(c, l, { actor, amount, user = null }) {
 async function assertMayPostOnLocked(c, { user = null } = {}) {
   const ctl = await controls(c);
   const roles = ctl.locked_posting_roles || [];
-  if (!user || !roles.includes(user.role)) {
+  if (user && !PERMS.can(user, 'POST_TRANSACTIONS_ON_LOCKED_LOAN_ACCOUNTS')) {
+    throw err('PERMISSION_REQUIRED: POST_TRANSACTIONS_ON_LOCKED_LOAN_ACCOUNTS', 403);
+  }
+  if (!user || !listed(roles, user)) {
     throw err(`LOAN_IS_LOCKED: posting on a locked loan needs one of ${roles.length ? roles.join(', ') : 'the roles the tenant allows (none set)'}`, 409);
   }
 }
@@ -151,21 +177,31 @@ async function assertMayPostOnLocked(c, { user = null } = {}) {
  * the tenant lists, or anyone who may post repayments when it lists none.
  */
 async function assertMayAllocateCustom(c, { user = null } = {}) {
+  if (user && !PERMS.can(user, 'PERFORM_REPAYMENTS_WITH_CUSTOM_AMOUNTS_ALLOCATION')) {
+    throw err('PERMISSION_REQUIRED: PERFORM_REPAYMENTS_WITH_CUSTOM_AMOUNTS_ALLOCATION', 403);
+  }
   const roles = (await controls(c)).custom_allocation_roles;
   if (roles === null || roles === undefined) return;
-  if (!user || !roles.includes(user.role)) {
+  if (!user || !listed(roles, user)) {
     throw err(`CUSTOM_ALLOCATION_NOT_PERMITTED: needs one of ${roles.length ? roles.join(', ') : 'the roles the tenant allows (none set)'}`, 403);
   }
 }
+
+// The reference platform permission behind each role list on the controls. The lists
+// narrow it further (a tenant's own rule); they name built-in roles or the
+// tenant's roles.
+const PERMISSION_OF = { pay_off_roles: 'PAY_OFF_LOAN', loan_adjustment_roles: 'APPLY_LOAN_ADJUSTMENTS', collect_securities_roles: 'COLLECT_GUARANTIES' };
+const listed = (roles, user) => roles.includes(user.role) || (user.roleCode && roles.includes(user.roleCode));
 
 /**
  * A permission kept as a role list on the controls: the roles listed, or
  * any role the route allows when the list is NULL.
  */
 async function assertRole(c, col, user, code) {
+  if (user && PERMISSION_OF[col] && !PERMS.can(user, PERMISSION_OF[col])) throw err(`PERMISSION_REQUIRED: ${PERMISSION_OF[col]}`, 403);
   const roles = (await controls(c))[col];
   if (roles === null || roles === undefined) return;
-  if (!user || !roles.includes(user.role)) {
+  if (!user || !listed(roles, user)) {
     throw err(`${code}_NOT_PERMITTED: needs one of ${roles.length ? roles.join(', ') : 'the roles the tenant allows (none set)'}`, 403);
   }
 }
@@ -178,36 +214,39 @@ const assertMayCollectSecurities = (c, { user = null } = {}) => assertRole(c, 'c
 
 /** The reference platform's Set Disbursement Conditions permission, the same way. */
 async function assertMaySetDisbursementConditions(c, { user = null } = {}) {
+  if (user && !PERMS.can(user, 'SET_DISBURSEMENT_CONDITIONS')) throw err('PERMISSION_REQUIRED: SET_DISBURSEMENT_CONDITIONS', 403);
   const roles = (await controls(c)).disbursement_conditions_roles;
   if (roles === null || roles === undefined) return;
-  if (!user || !roles.includes(user.role)) {
+  if (!user || !listed(roles, user)) {
     throw err(`DISBURSEMENT_CONDITIONS_NOT_PERMITTED: needs one of ${roles.length ? roles.join(', ') : 'the roles the tenant allows (none set)'}`, 403);
   }
 }
 
 /** The tenant's staff with their approval and disbursement limits (the reference platform's transaction limits on a user). */
+const LIMIT_COLS = { approvalLimit: 'approval_limit', disbursementLimit: 'disbursement_limit', feeLimit: 'fee_limit',
+  depositLimit: 'deposit_limit', withdrawalLimit: 'withdrawal_limit', repaymentLimit: 'repayment_limit' };
+const limitsOf = (u) => Object.fromEntries(Object.entries(LIMIT_COLS).map(([k, col]) => [k, u[col] === null ? null : Number(u[col])]));
+
 async function staffLimits(c, tenantId) {
   const { rows } = await c.query(
-    `SELECT id, email, full_name, role, status, approval_limit, disbursement_limit FROM platform.users
+    `SELECT id, email, full_name, role, status, ${Object.values(LIMIT_COLS).join(', ')} FROM platform.users
      WHERE tenant_id = $1 AND role <> 'MEMBER' ORDER BY role, email`, [tenantId]);
-  return rows.map((u) => ({
-    id: u.id, email: u.email, name: u.full_name, role: u.role, status: u.status,
-    approvalLimit: u.approval_limit === null ? null : Number(u.approval_limit),
-    disbursementLimit: u.disbursement_limit === null ? null : Number(u.disbursement_limit),
-  }));
+  return rows.map((u) => ({ id: u.id, email: u.email, name: u.full_name, role: u.role, status: u.status, ...limitsOf(u) }));
 }
 
 /**
- * Set a user's limits. Null lifts a limit (the user's role then decides);
- * a number is the largest loan they may approve, or disburse at once.
+ * Set a user's limits (the reference platform's six transaction limits). Null lifts a limit;
+ * a number is the most they may approve or disburse, or post at once as a
+ * fee, deposit, withdrawal or repayment. Administrators have none.
  */
-async function setUserLimits(c, tenantId, userId, { approvalLimit, disbursementLimit } = {}, { actor } = {}) {
+async function setUserLimits(c, tenantId, userId, body = {}, { actor } = {}) {
   const { rows: [u] } = await c.query(
-    'SELECT id, email, approval_limit, disbursement_limit FROM platform.users WHERE id::text = $1 AND tenant_id = $2 FOR UPDATE', [userId, tenantId]);
+    `SELECT id, email, ${Object.values(LIMIT_COLS).join(', ')} FROM platform.users WHERE id::text = $1 AND tenant_id = $2 FOR UPDATE`, [userId, tenantId]);
   if (!u) throw err('USER_NOT_FOUND', 404);
   const sets = [];
   const vals = [];
-  for (const [given, col] of [[approvalLimit, 'approval_limit'], [disbursementLimit, 'disbursement_limit']]) {
+  for (const [k, col] of Object.entries(LIMIT_COLS)) {
+    const given = body[k];
     if (given === undefined) continue;
     if (given !== null && !(Number(given) >= 0)) throw err(`${col.toUpperCase()}_MUST_BE_ZERO_OR_MORE`, 400);
     vals.push(given === null ? null : round2(given));
@@ -216,16 +255,15 @@ async function setUserLimits(c, tenantId, userId, { approvalLimit, disbursementL
   if (!sets.length) throw err('NO_UPDATABLE_FIELDS', 400);
   vals.push(u.id);
   const { rows: [after] } = await c.query(
-    `UPDATE platform.users SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING id, email, approval_limit, disbursement_limit`, vals);
+    `UPDATE platform.users SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING id, email, ${Object.values(LIMIT_COLS).join(', ')}`, vals);
   await c.query(
     `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'USER_LIMITS_CHANGED','user',$2,$3,$4)`,
-    [actor || 'SYSTEM', String(u.id), JSON.stringify({ approvalLimit: u.approval_limit, disbursementLimit: u.disbursement_limit }),
-      JSON.stringify({ approvalLimit: after.approval_limit, disbursementLimit: after.disbursement_limit })]);
+    [actor || 'SYSTEM', String(u.id), JSON.stringify(limitsOf(u)), JSON.stringify(limitsOf(after))]);
   return (await staffLimits(c, tenantId)).find((x) => x.id === u.id);
 }
 
 module.exports = {
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMayPostOnLocked, CONTROL_FIELDS,
   assertMayAllocateCustom, assertMaySetDisbursementConditions, assertMayPayOff, assertMayAdjust, assertMayCollectSecurities,
-  staffLimits, setUserLimits,
+  staffLimits, setUserLimits, assertWithinLimit,
 };

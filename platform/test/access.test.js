@@ -67,10 +67,11 @@ function pdfText(buf) {
     const br = await call('POST', '/api/branches', { code: 'HQ', name: 'Head office' });
     const users = {};
     for (const [who, role] of [['teller', 'TELLER'], ['officer', 'TELLER'], ['manager', 'MANAGER'], ['auditor', 'AUDITOR']]) {
-      const u = await call('POST', '/api/users', { email: `${who}@acc.local`, fullName: `The ${who}`, role, password: `${who} first password`, branchId: br.body.id });
+      const u = await call('POST', '/api/users', { email: `${who}@acc.local`, fullName: `The ${who}`, role, password: `First password 2026 ${who.length}`, branchId: br.body.id,
+        userType: who === 'officer' ? 'CREDIT_OFFICER' : undefined });
       users[who] = u.body;
       await pool.query('UPDATE platform.users SET must_change_password = false WHERE lower(email) = $1', [`${who}@acc.local`]);
-      tokens[who] = (await call('POST', '/api/auth/login', { email: `${who}@acc.local`, password: `${who} first password` })).body?.accessToken;
+      tokens[who] = (await call('POST', '/api/auth/login', { email: `${who}@acc.local`, password: `First password 2026 ${who.length}` })).body?.accessToken;
     }
     check('staff signed in', tokens.teller && tokens.officer && tokens.manager && tokens.auditor);
     const m1 = await T(async (c) => (await c.query(
@@ -136,7 +137,7 @@ function pdfText(buf) {
     const moved = await pool.query('SELECT role FROM platform.users WHERE id = $1', [users.officer.id]);
     const approve = await call('GET', '/api/users', null, { who: 'officer' });
     check('moving the role to another base role moves its users', move.status === 200 && moved.rows[0].role === 'MANAGER', move.text);
-    check('and the base role counts at once, without a new token', approve.status === 200, approve.text.slice(0, 200));
+    check('and its permissions, not the base role, decide what they may do', approve.status === 403 && /VIEW_USER_DETAILS/.test(approve.reason), approve.text.slice(0, 200));
     await call('PATCH', '/api/roles/LOAN_OFFICER', { baseRole: 'TELLER' });
     const back = await call('PATCH', `/api/users/${users.manager.id}`, { role: 'NOT_A_ROLE' });
     check('a user\'s role is a built-in role or one of the tenant\'s', back.status === 400 && /ROLE_MUST_BE_ONE_OF/.test(back.reason));

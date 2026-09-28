@@ -3,6 +3,7 @@
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth, invalidate } = require('../tenancy/resolve');
+const PERMS = require('../lib/permissions');
 const ORG = require('../domain/organization');
 const CAL = require('../domain/calendar');
 const B = require('../domain/branches');
@@ -20,18 +21,14 @@ const eod = require('../ops/eod');
  * documents. Each router is mounted by the server under /api.
  */
 
-const ANY = [];
-const OWNER = ['TENANT_ADMIN'];
-const ADMIN = ['TENANT_ADMIN', 'MANAGER'];
-const STAFF = ['TENANT_ADMIN', 'MANAGER', 'TELLER'];
 
-const run = (fn, roles = ANY, { write = false, status = 200 } = {}) => [requireAuth(...roles), async (req, res, next) => {
+const run = (fn, { write = false, status = 200 } = {}) => [requireAuth(), async (req, res, next) => {
   try {
     const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res));
     if (out !== undefined) res.status(status).json(out);
   } catch (e) { next(e); }
 }];
-const W = (fn, roles, status = 200) => run(fn, roles, { write: true, status });
+const W = (fn, status = 200) => run(fn, { write: true, status });
 const by = (req) => ({ createdBy: req.auth.email, user: req.auth });
 
 // --- organization details, branding, end of day ---------------------------
@@ -42,7 +39,7 @@ organization.put('/', ...W(async (c, req) => {
   const out = await ORG.update(c, req.body || {}, by(req));
   if (out.tenantChanged) invalidate(out.slug);
   return out.organization;
-}, OWNER));
+}));
 
 // The logo is shown on the login screen, before anyone signs in: the image
 // is public for the tenant named by the host or X-Tenant header.
@@ -55,19 +52,19 @@ organization.get('/branding/:kind', async (req, res, next) => {
     res.send(img.data);
   } catch (e) { next(e); }
 });
-organization.put('/branding/:kind', ...W((c, req) => ORG.setImage(c, req.params.kind, req.body || {}, by(req)), OWNER));
-organization.delete('/branding/:kind', ...W((c, req) => ORG.clearImage(c, req.params.kind, by(req)), OWNER));
+organization.put('/branding/:kind', ...W((c, req) => ORG.setImage(c, req.params.kind, req.body || {}, by(req))));
+organization.delete('/branding/:kind', ...W((c, req) => ORG.clearImage(c, req.params.kind, by(req))));
 
 organization.get('/eod', ...run(async (c) => {
   const o = await ORG.get(c);
   const { rows: completions } = await c.query('SELECT * FROM eod_completions ORDER BY finished_at DESC LIMIT 20');
   const { rows: [x] } = await c.query('SELECT count(*)::int AS n FROM loan_eod_exclusions WHERE included_at IS NULL');
   return { ...o.eod, timeZone: o.timeZone, eodHour: Number(process.env.EOD_HOUR ?? 22), excludedLoans: x.n, completions };
-}, ADMIN));
-organization.put('/eod', ...W((c, req) => ORG.setEod(c, req.body || {}, by(req)), OWNER));
+}));
+organization.put('/eod', ...W((c, req) => ORG.setEod(c, req.body || {}, by(req))));
 // Run Now, for an organization on manual end of day (the reference platform). The business
 // date is the organization's local date unless an earlier one is given.
-organization.post('/eod/run', requireAuth(...OWNER), async (req, res, next) => {
+organization.post('/eod/run', requireAuth(), async (req, res, next) => {
   try {
     const s = await withTenantRead(req.tenant.schema_name, (c) => ORG.settings(c));
     if (s.eod_mode !== 'MANUAL') return next(Object.assign(new Error('EOD_IS_AUTOMATIC: switch it to MANUAL to run it now'), { status: 409 }));
@@ -78,80 +75,80 @@ organization.post('/eod/run', requireAuth(...OWNER), async (req, res, next) => {
     res.status(201).json(out);
   } catch (e) { next(e); }
 });
-organization.post('/eod/retry-excluded', ...W((c) => require('../domain/eodExclusions').retryAll(c, { createdBy: 'EOD_RETRY' }), ADMIN));
+organization.post('/eod/retry-excluded', ...W((c) => require('../domain/eodExclusions').retryAll(c, { createdBy: 'EOD_RETRY' })));
 
 // --- centres ----------------------------------------------------------------
 
 const centres = express.Router();
 centres.get('/', ...run((c, req) => B.centres(c, { branchId: req.query.branchId || null, includeInactive: req.query.includeInactive !== 'false' })));
 centres.get('/:id', ...run((c, req) => B.findCentre(c, req.params.id)));
-centres.post('/', ...W((c, req) => B.createCentre(c, { ...req.body, ...by(req) }), ADMIN, 201));
-centres.patch('/:id', ...W((c, req) => B.updateCentre(c, req.params.id, { ...req.body, ...by(req) }), ADMIN));
+centres.post('/', ...W((c, req) => B.createCentre(c, { ...req.body, ...by(req) }), 201));
+centres.patch('/:id', ...W((c, req) => B.updateCentre(c, req.params.id, { ...req.body, ...by(req) })));
 
 // --- holidays and non-working days ------------------------------------------
 
 const holidays = express.Router();
 holidays.get('/', ...run((c, req) => CAL.list(c, { branchId: req.query.branchId || null })));
-holidays.post('/', ...W((c, req) => CAL.add(c, req.body || {}, by(req)), ADMIN, 201));
-holidays.put('/non-working-days', ...W((c, req) => CAL.setNonWorkingDays(c, req.body?.days, by(req)), ADMIN));
-holidays.post('/sync', ...W((c, req) => CAL.sync(c, { createdBy: req.auth.email, force: req.body?.force === true }), ADMIN));
-holidays.patch('/:ref', ...W((c, req) => CAL.update(c, req.params.ref, req.body || {}, by(req)), ADMIN));
-holidays.delete('/:ref', ...W((c, req) => CAL.remove(c, req.params.ref, by(req)), ADMIN));
+holidays.post('/', ...W((c, req) => CAL.add(c, req.body || {}, by(req)), 201));
+holidays.put('/non-working-days', ...W((c, req) => CAL.setNonWorkingDays(c, req.body?.days, by(req))));
+holidays.post('/sync', ...W((c, req) => CAL.sync(c, { createdBy: req.auth.email, force: req.body?.force === true })));
+holidays.patch('/:ref', ...W((c, req) => CAL.update(c, req.params.ref, req.body || {}, by(req))));
+holidays.delete('/:ref', ...W((c, req) => CAL.remove(c, req.params.ref, by(req))));
 
 // --- transaction channels ---------------------------------------------------
 
 const channels = express.Router();
 // ?usable=true: the active channels the signed-in user may post through.
 channels.get('/', ...run((c, req) => CH.list(c, req.query.usable === 'true' ? { includeInactive: false, user: req.auth } : {})));
-channels.put('/order', ...W((c, req) => CH.rearrange(c, req.body?.order, by(req)), ADMIN));
-channels.post('/', ...W((c, req) => CH.create(c, req.body || {}, by(req)), ADMIN, 201));
-channels.patch('/:id', ...W((c, req) => CH.update(c, req.params.id, req.body || {}, by(req)), ADMIN));
-channels.delete('/:id', ...W((c, req) => CH.remove(c, req.params.id, by(req)), ADMIN));
+channels.put('/order', ...W((c, req) => CH.rearrange(c, req.body?.order, by(req))));
+channels.post('/', ...W((c, req) => CH.create(c, req.body || {}, by(req)), 201));
+channels.patch('/:id', ...W((c, req) => CH.update(c, req.params.id, req.body || {}, by(req))));
+channels.delete('/:id', ...W((c, req) => CH.remove(c, req.params.id, by(req))));
 
 // --- ID templates ------------------------------------------------------------
 
 const idTemplates = express.Router();
 idTemplates.get('/', ...run((c) => IDT.list(c)));
-idTemplates.put('/other', ...W((c, req) => IDT.setAllowOther(c, req.body?.allow, by(req)), ADMIN));
-idTemplates.post('/', ...W((c, req) => IDT.create(c, req.body || {}, by(req)), ADMIN, 201));
-idTemplates.patch('/:id', ...W((c, req) => IDT.update(c, req.params.id, req.body || {}, by(req)), ADMIN));
-idTemplates.delete('/:id', ...W((c, req) => IDT.remove(c, req.params.id, by(req)), ADMIN));
+idTemplates.put('/other', ...W((c, req) => IDT.setAllowOther(c, req.body?.allow, by(req))));
+idTemplates.post('/', ...W((c, req) => IDT.create(c, req.body || {}, by(req)), 201));
+idTemplates.patch('/:id', ...W((c, req) => IDT.update(c, req.params.id, req.body || {}, by(req))));
+idTemplates.delete('/:id', ...W((c, req) => IDT.remove(c, req.params.id, by(req))));
 
 // --- currencies ----------------------------------------------------------------
 
 const currencies = express.Router();
-currencies.get('/', ...run((c) => CUR.list(c), ANY, { write: true }));
+currencies.get('/', ...run((c) => CUR.list(c), { write: true }));
 currencies.get('/presets', requireAuth(), (req, res) => res.json(CUR.presets()));
-currencies.post('/', ...W((c, req) => CUR.add(c, req.body || {}, by(req)), OWNER, 201));
-currencies.patch('/:code', ...W((c, req) => CUR.update(c, req.params.code, req.body || {}, by(req)), OWNER));
-currencies.delete('/:code', ...W((c, req) => CUR.remove(c, req.params.code, by(req)), OWNER));
+currencies.post('/', ...W((c, req) => CUR.add(c, req.body || {}, by(req)), 201));
+currencies.patch('/:code', ...W((c, req) => CUR.update(c, req.params.code, req.body || {}, by(req))));
+currencies.delete('/:code', ...W((c, req) => CUR.remove(c, req.params.code, by(req))));
 currencies.get('/:code/rates', ...run((c, req) => CUR.rates(c, req.params.code)));
-currencies.post('/:code/exchange-rates', ...W((c, req) => CUR.setExchangeRate(c, req.params.code, req.body || {}, by(req)), ADMIN, 201));
-currencies.post('/:code/accounting-rates', ...W((c, req) => CUR.setAccountingRate(c, req.params.code, req.body || {}, by(req)), ADMIN, 201));
+currencies.post('/:code/exchange-rates', ...W((c, req) => CUR.setExchangeRate(c, req.params.code, req.body || {}, by(req)), 201));
+currencies.post('/:code/accounting-rates', ...W((c, req) => CUR.setAccountingRate(c, req.params.code, req.body || {}, by(req)), 201));
 
 // --- custom fields --------------------------------------------------------------
 
 const customFields = express.Router();
 customFields.get('/entities', requireAuth(), (req, res) => res.json({ entities: Object.keys(CF.ENTITIES), types: CF.TYPES }));
 customFields.get('/sets', ...run((c, req) => CF.sets(c, req.query.entity || null)));
-customFields.post('/sets', ...W((c, req) => CF.createSet(c, req.body || {}, by(req)), ADMIN, 201));
-customFields.put('/sets/order', ...W((c, req) => CF.rearrangeSets(c, req.body?.entity, req.body?.order), ADMIN));
-customFields.patch('/sets/:id', ...W((c, req) => CF.updateSet(c, req.params.id, req.body || {}, by(req)), ADMIN));
-customFields.delete('/sets/:id', ...W((c, req) => CF.deleteSet(c, req.params.id, by(req)), ADMIN));
+customFields.post('/sets', ...W((c, req) => CF.createSet(c, req.body || {}, by(req)), 201));
+customFields.put('/sets/order', ...W((c, req) => CF.rearrangeSets(c, req.body?.entity, req.body?.order)));
+customFields.patch('/sets/:id', ...W((c, req) => CF.updateSet(c, req.params.id, req.body || {}, by(req))));
+customFields.delete('/sets/:id', ...W((c, req) => CF.deleteSet(c, req.params.id, by(req))));
 customFields.get('/definitions', ...run((c, req) => CF.definitions(c, { entity: req.query.entity || null, setId: req.query.setId || null,
   includeInactive: req.query.includeInactive !== 'false' })));
-customFields.post('/definitions', ...W((c, req) => CF.createDefinition(c, req.body || {}, by(req)), ADMIN, 201));
-customFields.put('/definitions/order', ...W((c, req) => CF.rearrangeDefinitions(c, req.body?.entity, req.body?.order), ADMIN));
+customFields.post('/definitions', ...W((c, req) => CF.createDefinition(c, req.body || {}, by(req)), 201));
+customFields.put('/definitions/order', ...W((c, req) => CF.rearrangeDefinitions(c, req.body?.entity, req.body?.order)));
 customFields.get('/definitions/:id', ...run((c, req) => CF.findDefinition(c, req.params.id)));
-customFields.patch('/definitions/:id', ...W((c, req) => CF.updateDefinition(c, req.params.id, req.body || {}, by(req)), ADMIN));
-customFields.delete('/definitions/:id', ...W((c, req) => CF.deleteDefinition(c, req.params.id, by(req)), ADMIN));
+customFields.patch('/definitions/:id', ...W((c, req) => CF.updateDefinition(c, req.params.id, req.body || {}, by(req))));
+customFields.delete('/definitions/:id', ...W((c, req) => CF.deleteDefinition(c, req.params.id, by(req))));
 // The values on any record, any state; each field's edit rights decide.
 // Values on users are for tenant admins.
 customFields.get('/values/:entity/:id', ...run((c, req) => CF.getValues(c, req.params.entity, req.params.id, { user: req.auth })));
-customFields.put('/values/:entity/:id', requireAuth(...STAFF), async (req, res, next) => {
+customFields.put('/values/:entity/:id', requireAuth(), async (req, res, next) => {
   try {
-    if (String(req.params.entity).toUpperCase() === 'USER' && req.auth.role !== 'TENANT_ADMIN') {
-      return next(Object.assign(new Error('USER_CUSTOM_FIELDS_ARE_FOR_TENANT_ADMINS'), { status: 403 }));
+    if (String(req.params.entity).toUpperCase() === 'USER' && !PERMS.can(req.auth, 'EDIT_USER')) {
+      return next(Object.assign(new Error('PERMISSION_REQUIRED: EDIT_USER'), { status: 403 }));
     }
     const out = await withTenant(req.tenant.schema_name, (c) => CF.setValues(c, req.params.entity, req.params.id, req.body || {}, by(req)));
     res.json(out);
@@ -168,10 +165,10 @@ const kindOf = (k) => {
 };
 const documents = express.Router();
 documents.get('/templates/:kind/:productId', ...run((c, req) => DOCS.list(c, kindOf(req.params.kind), req.params.productId)));
-documents.post('/templates/:kind/:productId', ...W((c, req) => DOCS.create(c, kindOf(req.params.kind), req.params.productId, req.body || {}, by(req)), ADMIN, 201));
+documents.post('/templates/:kind/:productId', ...W((c, req) => DOCS.create(c, kindOf(req.params.kind), req.params.productId, req.body || {}, by(req)), 201));
 documents.get('/templates/:id', ...run((c, req) => DOCS.find(c, req.params.id)));
-documents.patch('/templates/:id', ...W((c, req) => DOCS.update(c, req.params.id, req.body || {}, by(req)), ADMIN));
-documents.delete('/templates/:id', ...W((c, req) => DOCS.remove(c, req.params.id, by(req)), ADMIN));
+documents.patch('/templates/:id', ...W((c, req) => DOCS.update(c, req.params.id, req.body || {}, by(req))));
+documents.delete('/templates/:id', ...W((c, req) => DOCS.remove(c, req.params.id, by(req))));
 documents.get('/:kind/:accountId', ...run((c, req) => DOCS.forAccount(c, kindOf(req.params.kind), req.params.accountId)));
 // The document itself, as a page to print or save as PDF.
 documents.get('/:kind/:accountId/:docId', requireAuth(), async (req, res, next) => {

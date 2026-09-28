@@ -48,7 +48,7 @@ const ENTITIES = {
   TRANSACTION_CHANNEL: { table: 'transactions', key: 'id', item: 'channel_id', itemLabel: 'transaction channel' },
 };
 const TYPES = ['FREE_TEXT', 'SELECTION', 'NUMBER', 'CHECKBOX', 'DATE', 'DATE_TIME', 'MEMBER_LINK', 'USER_LINK'];
-const ROLES = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'];
+const ROLE = require('./roles');
 const MAX_LENGTH = 2048;
 const QUOTA = 200;
 
@@ -63,13 +63,13 @@ async function audit(c, actor, action, entity, id, before, after) {
     [actor || 'SYSTEM', action, entity, id == null ? null : String(id), before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null]);
 }
 
-const rolesOrNull = (v, label) => {
+// The reference platform's Rights on a custom field: roles, built-in or the tenant's own.
+async function rolesOrNull(c, v, label) {
   if (v === undefined || v === null) return null;
   if (!Array.isArray(v)) throw err(`${label}_IS_A_LIST_OF_ROLES_OR_NULL`, 400);
-  const bad = v.filter((r) => !ROLES.includes(r));
-  if (bad.length) throw err(`UNKNOWN_ROLES: ${bad.join(', ')}`, 400);
+  await ROLE.assertKnown(c, v);
   return [...new Set(v)];
-};
+}
 
 // --------------------------------------------------------------------------
 // Sets
@@ -252,8 +252,8 @@ async function shapeDefinition(c, body, before = null) {
   const all = out.available_for_all ?? before?.available_for_all ?? true;
   if (parent) out.usage = JSON.stringify(parent.usage);
   else if (body.usage !== undefined || body.availableForAll !== undefined || !before) out.usage = JSON.stringify(normUsage(e, all, body.usage || {}));
-  if (body.viewRoles !== undefined) out.view_roles = rolesOrNull(body.viewRoles, 'VIEW_ROLES');
-  if (body.editRoles !== undefined) out.edit_roles = rolesOrNull(body.editRoles, 'EDIT_ROLES');
+  if (body.viewRoles !== undefined) out.view_roles = await rolesOrNull(c, body.viewRoles, 'VIEW_ROLES');
+  if (body.editRoles !== undefined) out.edit_roles = await rolesOrNull(c, body.editRoles, 'EDIT_ROLES');
   const view = out.view_roles !== undefined ? out.view_roles : before?.view_roles ?? null;
   const edit = out.edit_roles !== undefined ? out.edit_roles : before?.edit_roles ?? null;
   // Edit rights carry view rights.
@@ -346,9 +346,9 @@ function usageFor(d, item) {
   return x ? { available: true, default: Boolean(x.default), required: Boolean(x.required) } : { available: false, default: false, required: false };
 }
 
-const mayEdit = (d, user) => !user || !user.role || d.edit_roles === null || d.edit_roles.includes(user.role);
-const mayView = (d, user) => !user || !user.role || d.view_roles === null || d.view_roles.includes(user.role)
-  || (d.edit_roles !== null && d.edit_roles.includes(user.role));
+const mayEdit = (d, user) => !user || !user.role || d.edit_roles === null || ROLE.names(d.edit_roles, user);
+const mayView = (d, user) => !user || !user.role || d.view_roles === null || ROLE.names(d.view_roles, user)
+  || (d.edit_roles !== null && ROLE.names(d.edit_roles, user));
 
 function maskMatches(mask, v) {
   if (v.length !== mask.length) return false;

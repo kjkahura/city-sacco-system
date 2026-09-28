@@ -13,10 +13,6 @@ const accruals = require('../domain/accruals');
  * accounting settings, and the breakdown behind an aggregated accrual.
  */
 
-const READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR', 'TELLER'];
-const LEDGER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR'];
-const ADMIN = ['TENANT_ADMIN', 'MANAGER'];
-const CLOSER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT'];
 
 const run = (fn, { write = false, status = 200 } = {}) => async (req, res, next) => {
   try {
@@ -26,21 +22,21 @@ const run = (fn, { write = false, status = 200 } = {}) => async (req, res, next)
 };
 
 const branches = express.Router();
-branches.get('/', requireAuth(...READER), run((c) => B.list(c)));
-branches.get('/:id', requireAuth(...READER), run((c, req) => B.detail(c, req.params.id)));
-branches.post('/', requireAuth(...ADMIN), run((c, req) => B.create(c, { ...req.body, createdBy: req.auth.email, user: req.auth }), { write: true, status: 201 }));
-branches.patch('/:id', requireAuth(...ADMIN), run((c, req) => B.update(c, req.params.id, { ...req.body, createdBy: req.auth.email, user: req.auth }), { write: true }));
+branches.get('/', requireAuth(), run((c) => B.list(c)));
+branches.get('/:id', requireAuth(), run((c, req) => B.detail(c, req.params.id)));
+branches.post('/', requireAuth(), run((c, req) => B.create(c, { ...req.body, createdBy: req.auth.email, user: req.auth }), { write: true, status: 201 }));
+branches.patch('/:id', requireAuth(), run((c, req) => B.update(c, req.params.id, { ...req.body, createdBy: req.auth.email, user: req.auth }), { write: true }));
 
 const accounting = express.Router();
-accounting.get('/inter-branch-rules', requireAuth(...LEDGER), run((c) => B.rules(c)));
-accounting.put('/inter-branch-rules', requireAuth(...ADMIN), run((c, req) => B.setRules(c, req.body?.rules || req.body, { createdBy: req.auth.email }), { write: true }));
-accounting.get('/closures', requireAuth(...LEDGER), run((c, req) => B.closures(c, { includeDeleted: req.query.includeDeleted === 'true' })));
-accounting.post('/closures', requireAuth(...CLOSER), run((c, req) => B.close(c, { ...req.body, createdBy: req.auth.email }), { write: true, status: 201 }));
-accounting.delete('/closures/:id', requireAuth(...ADMIN), run((c, req) => B.reopen(c, req.params.id, { reason: req.body?.reason, createdBy: req.auth.email }), { write: true }));
-accounting.get('/settings', requireAuth(...LEDGER), run((c) => B.settings(c)));
-accounting.put('/settings', requireAuth(...ADMIN), run((c, req) => B.updateSettings(c, { ...req.body, createdBy: req.auth.email }), { write: true }));
-accounting.get('/accruals/:entryId', requireAuth(...LEDGER), run((c, req) => accruals.breakdown(c, req.params.entryId)));
-accounting.post('/accruals/post', requireAuth(...ADMIN), run(async (c, req) => accruals.flush(c, {
+accounting.get('/inter-branch-rules', requireAuth(), run((c) => B.rules(c)));
+accounting.put('/inter-branch-rules', requireAuth(), run((c, req) => B.setRules(c, req.body?.rules || req.body, { createdBy: req.auth.email }), { write: true }));
+accounting.get('/closures', requireAuth(), run((c, req) => B.closures(c, { includeDeleted: req.query.includeDeleted === 'true' })));
+accounting.post('/closures', requireAuth(), run((c, req) => B.close(c, { ...req.body, createdBy: req.auth.email }), { write: true, status: 201 }));
+accounting.delete('/closures/:id', requireAuth(), run((c, req) => B.reopen(c, req.params.id, { reason: req.body?.reason, createdBy: req.auth.email }), { write: true }));
+accounting.get('/settings', requireAuth(), run((c) => B.settings(c)));
+accounting.put('/settings', requireAuth(), run((c, req) => B.updateSettings(c, { ...req.body, createdBy: req.auth.email }), { write: true }));
+accounting.get('/accruals/:entryId', requireAuth(), run((c, req) => accruals.breakdown(c, req.params.entryId)));
+accounting.post('/accruals/post', requireAuth(), run(async (c, req) => accruals.flush(c, {
   date: req.body?.date || await orgToday(c), createdBy: req.auth.email,
 }), { write: true }));
 

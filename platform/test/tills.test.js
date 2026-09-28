@@ -61,16 +61,16 @@ async function call(method, p, body, { who = 'admin' } = {}) {
     tokens.admin = (await call('POST', '/api/auth/login', { email: 'admin@till.local', password: PASSWORD })).body.accessToken;
     const br = await call('POST', '/api/branches', { code: 'HQ', name: 'Head office' });
     for (const [who, role] of [['teller', 'TELLER'], ['teller2', 'TELLER'], ['super', 'MANAGER'], ['clerk', 'ACCOUNTANT']]) {
-      const u = await call('POST', '/api/users', { email: `${who}@till.local`, fullName: `The ${who}`, role, password: `${who} first password`, branchId: br.body.id });
+      const u = await call('POST', '/api/users', { email: `${who}@till.local`, fullName: `The ${who}`, role, password: `First password 2026 ${who.length}`, branchId: br.body.id });
       if (u.status !== 201) check(`user ${who}`, false, u.text);
       await pool.query('UPDATE platform.users SET must_change_password = false WHERE lower(email) = $1', [`${who}@till.local`]);
-      tokens[who] = (await call('POST', '/api/auth/login', { email: `${who}@till.local`, password: `${who} first password` })).body?.accessToken;
+      tokens[who] = (await call('POST', '/api/auth/login', { email: `${who}@till.local`, password: `First password 2026 ${who.length}` })).body?.accessToken;
     }
     check('an administrator, two tellers, a supervisor and a clerk', tokens.admin && tokens.teller && tokens.teller2 && tokens.super && tokens.clerk);
     const north = await call('POST', '/api/branches', { code: 'NTH', name: 'North' });
-    await call('POST', '/api/users', { email: 'far@till.local', fullName: 'Far teller', role: 'TELLER', password: 'far first password', branchId: north.body.id });
+    await call('POST', '/api/users', { email: 'far@till.local', fullName: 'Far teller', role: 'TELLER', password: 'First password 2026 nth', branchId: north.body.id });
     await pool.query('UPDATE platform.users SET must_change_password = false WHERE lower(email) = $1', ['far@till.local']);
-    tokens.far = (await call('POST', '/api/auth/login', { email: 'far@till.local', password: 'far first password' })).body?.accessToken;
+    tokens.far = (await call('POST', '/api/auth/login', { email: 'far@till.local', password: 'First password 2026 nth' })).body?.accessToken;
     const prod = await call('POST', '/api/loan-products', {
       id: 'TL1', name: 'Till loan', glPortfolio: '100-100', glInterestInc: '400-100', glFeeInc: '400-200',
       method: 'FLAT', monthlyRate: 1, maxTerm: 24, enforceDepositMultiplier: false,
@@ -143,7 +143,7 @@ async function call(method, p, body, { who = 'admin' } = {}) {
     const tooMuch = await call('POST', `/api/tills/${open.body.id}/remove-cash`, { amount: 20000 }, { who: 'super' });
     check('not more than the till holds', tooMuch.status === 409);
     const tellerAdd = await call('POST', `/api/tills/${open.body.id}/add-cash`, { amount: 10 }, { who: 'teller' });
-    check('a teller does not (ADD_CASH)', tellerAdd.status === 403);
+    check('a teller does not move cash in and out of a till (a supervisor\'s OPEN_TILL)', tellerAdd.status === 403, tellerAdd.text);
     const rev = await call('POST', `/api/savings/transactions/${wd.body.reference}/reversal`, { reason: 'keyed twice' }, { who: 'super' });
     till = (await call('GET', `/api/tills/${open.body.id}`, null, { who: 'super' })).body;
     check('reversing the withdrawal puts its cash back in the till', rev.status === 201 && till.expectedCash === 16500 && till.log.some((x) => x.kind === 'REVERSAL' && x.amount === 2000), `${rev.text} ${till.expectedCash}`);
@@ -151,8 +151,10 @@ async function call(method, p, body, { who = 'admin' } = {}) {
     section('closing');
     const closeOther = await call('POST', `/api/tills/${open.body.id}/close`, { countedCash: 1 }, { who: 'teller2' });
     check('another teller cannot close it', closeOther.status === 403, closeOther.text);
-    const closed = await call('POST', `/api/tills/${open.body.id}/close`, { countedCash: 16400 }, { who: 'teller' });
-    check('the teller closes their till with the cash counted: 100 short', closed.status === 200 && closed.body.status === 'CLOSED' && closed.body.difference === -100 && closed.body.expectedCash === 16500, closed.text);
+    const closeOwn = await call('POST', `/api/tills/${open.body.id}/close`, { countedCash: 1 }, { who: 'teller' });
+    check('nor the teller: closing is a supervisor\'s CLOSE_TILL (the reference platform)', closeOwn.status === 403 && /CLOSE_TILL/.test(closeOwn.reason), closeOwn.text);
+    const closed = await call('POST', `/api/tills/${open.body.id}/close`, { countedCash: 16400 }, { who: 'super' });
+    check('the supervisor closes it with the cash counted: 100 short', closed.status === 200 && closed.body.status === 'CLOSED' && closed.body.difference === -100 && closed.body.expectedCash === 16500, closed.text);
     const os = await qa('SELECT gl_code, direction, amount FROM journal_lines WHERE entry_id = $1 ORDER BY direction', [closed.body.overShortEntryId]);
     check('the shortage is booked to cash over and short, out of the till\'s cash', os.length === 2 && os.find((l) => l.direction === 'DEBIT').gl_code === '500-330' && os.find((l) => l.direction === 'CREDIT').gl_code === '100-200' && Number(os[0].amount) === 100, JSON.stringify(os));
     const tb = await Rd((c) => acct.trialBalance(c));
@@ -171,7 +173,7 @@ async function call(method, p, body, { who = 'admin' } = {}) {
     check('undoing the close opens it again and reverses the shortage entry', undo.status === 200 && undo.body.status === 'OPEN' && reversedOs.n === 1, undo.text);
     const revNow = await call('POST', `/api/savings/transactions/${dep.body.reference}/reversal`, { reason: 'late find' }, { who: 'super' });
     check('now the correction can be made', revNow.status === 201, revNow.text);
-    const closed2 = await call('POST', `/api/tills/${open.body.id}/close`, {}, { who: 'teller' });
+    const closed2 = await call('POST', `/api/tills/${open.body.id}/close`, {}, { who: 'super' });
     check('closed again with no count: the expected cash is taken as counted, nothing booked', closed2.body.difference === 0 && closed2.body.overShortEntryId === null && closed2.body.countedCash === 11500, closed2.text);
     const reopened = await call('POST', `/api/tills/${open.body.id}/reopen`, null, { who: 'super' });
     check('reopened: a new session under the same id, opening with the cash counted', reopened.status === 201 && reopened.body.tillId === 'TIL001' && reopened.body.id !== open.body.id
@@ -193,7 +195,7 @@ async function call(method, p, body, { who = 'admin' } = {}) {
     check('a soft limit lets it through and shows it is outside', soft.expectedCash === 4000 && soft.outsideLimits === true);
     const rem2 = await call('POST', `/api/tills/${own.body.id}/remove-cash`, { amount: 1000, glAccount: '100-210' }, { who: 'super' });
     check('cash removed to the bank moves between the accounts', rem2.status === 200 && round2(await Rd((c) => acct.balance(c, '100-205'))) === 3000, rem2.text);
-    const c2 = await call('POST', `/api/tills/${own.body.id}/close`, { countedCash: 3050 }, { who: 'teller2' });
+    const c2 = await call('POST', `/api/tills/${own.body.id}/close`, { countedCash: 3050 }, { who: 'super' });
     const over = await qa('SELECT gl_code, direction FROM journal_lines WHERE entry_id = $1', [c2.body.overShortEntryId]);
     check('an overage is credited to cash over and short', c2.body.difference === 50 && over.find((l) => l.direction === 'CREDIT').gl_code === '500-330' && over.find((l) => l.direction === 'DEBIT').gl_code === '100-205');
     check('and the book still balances', (await Rd((c) => acct.trialBalance(c))).balanced);

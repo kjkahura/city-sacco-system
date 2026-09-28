@@ -8,11 +8,9 @@ const { pageQuery, sendPage, pageParams } = require('../lib/page');
 const SH = require('../domain/shares');
 
 const router = express.Router();
-const TELLER = ['TENANT_ADMIN', 'MANAGER', 'TELLER'];
-const APPROVER = ['TENANT_ADMIN', 'MANAGER'];
 
-const tx = (handler, roles = []) => [
-  requireAuth(...roles),
+const tx = (handler) => [
+  requireAuth(),
   async (req, res, next) => {
     try {
       const out = await withTenant(req.tenant.schema_name, (c) =>
@@ -48,22 +46,22 @@ router.get('/register', requireAuth(), async (req, res, next) => {
 router.post('/', ...tx(async (c, req, res) => {
   res.status(201);
   return await SH.open(c, req.body);
-}, TELLER));
+}));
 
 router.post('/:id/purchases', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await SH.purchase(c, req.params.id, { ...req.body, createdBy: actor });
-}, TELLER));
+}));
 
 router.post('/:id/transfers', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await SH.transfer(c, req.params.id, { ...req.body, createdBy: actor });
-}, APPROVER));
+}));
 
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await SH.reversePurchase(c, req.params.reference, { ...req.body, createdBy: actor });
-}, APPROVER));
+}));
 
 router.get('/:id/movements', requireAuth(), async (req, res, next) => {
   try {
@@ -113,13 +111,13 @@ dividends.get('/:year/allocations', requireAuth(), async (req, res, next) => {
 dividends.post('/', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await SH.declare(c, { ...req.body, createdBy: actor });
-}, APPROVER));
+}));
 
 dividends.post('/:year/allocate', ...tx((c, req, _res, { actor }) =>
-  SH.allocate(c, Number(req.params.year), { createdBy: actor }), APPROVER));
+  SH.allocate(c, Number(req.params.year), { createdBy: actor })));
 
 dividends.post('/:year/pay', ...tx((c, req, _res, { actor }) =>
-  SH.pay(c, Number(req.params.year), { createdBy: actor }), APPROVER));
+  SH.pay(c, Number(req.params.year), { createdBy: actor })));
 
 module.exports = router;
 module.exports.dividends = dividends;

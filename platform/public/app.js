@@ -59,10 +59,11 @@ function toast(message, bad = false) {
  * refresh, so a session that outlives the 15 minute access token does not
  * drop a teller back to the login screen in the middle of a deposit.
  */
-async function api(method, path, body, { retry = true } = {}) {
+async function api(method, path, body, { retry = true, reauth = true } = {}) {
   const headers = { 'content-type': 'application/json' };
   if (S.tenant) headers['x-tenant'] = S.tenant;
   if (S.access) headers.authorization = `Bearer ${S.access}`;
+  if (S.reauth && S.reauth.until > Date.now()) headers['x-reauth-token'] = S.reauth.token;
 
   const res = await fetch(path, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
@@ -72,7 +73,11 @@ async function api(method, path, body, { retry = true } = {}) {
 
   if (res.status === 401 && retry && S.refresh) {
     const ok = await refreshSession();
-    if (ok) return api(method, path, body, { retry: false });
+    if (ok) return api(method, path, body, { retry: false, reauth });
+  }
+  // A critical action with re-authentication on: the password, then once more.
+  if (res.status === 403 && reauth && /^REAUTHENTICATION_REQUIRED/.test(payload?.errors?.[0]?.errorReason || '')) {
+    if (await reauthenticate()) return api(method, path, body, { retry, reauth: false });
   }
 
   const out = {
@@ -82,7 +87,10 @@ async function api(method, path, body, { retry = true } = {}) {
     total: Number(res.headers.get('items-total') || 0),
     error: res.ok ? null : (payload?.errors?.[0]?.errorReason || `HTTP ${res.status}`),
   };
-  if (!res.ok && res.status === 401) signOut(true);
+  if (!res.ok && res.status === 401) {
+    signOut(true);
+    if (S.timedOut) { toast('Signed out after a time without activity', true); S.timedOut = false; }
+  }
   return out;
 }
 
@@ -121,7 +129,11 @@ async function refreshSession() {
     headers: { 'content-type': 'application/json', 'x-tenant': S.tenant },
     body: JSON.stringify({ refreshToken: S.refresh }),
   });
-  if (!r.ok) return false;
+  if (!r.ok) {
+    const b = await r.json().catch(() => null);
+    S.timedOut = /SESSION_TIMED_OUT/.test(b?.errors?.[0]?.errorReason || '');
+    return false;
+  }
   const pair = await r.json();
   S.access = pair.accessToken;
   S.refresh = pair.refreshToken;
@@ -187,7 +199,9 @@ el('login-form').addEventListener('submit', async (e) => {
   if (login.status === 403 && login.body?.passwordChangeRequired) {
     S.pwToken = login.body.passwordChangeToken;
     el('pwchange').hidden = false;
-    err.textContent = 'Choose a new password to continue.';
+    const pol = login.body.passwordPolicy;
+    if (pol) el('pw-rules').textContent = `At least ${pol.minLength} characters, with a letter and ${pol.minDigits} digit(s)${pol.minUppercase ? `, ${pol.minUppercase} capital(s)` : ''}${pol.minSpecial ? `, ${pol.minSpecial} symbol(s)` : ''}; not your username or a recent password.`;
+    err.textContent = login.error === 'PASSWORD_EXPIRED' ? 'Your password has expired. Choose a new password to continue.' : 'Choose a new password to continue.';
     return;
   }
 
@@ -238,6 +252,8 @@ function signOut(silent) {
   S.mfaTicket = null;
   if (!silent) toast('Signed out');
 }
+
+el('whoami').addEventListener('click', () => profileDialog());
 
 el('logout').addEventListener('click', async () => {
   await api('POST', '/api/auth/logout', { refreshToken: S.refresh });
@@ -3611,35 +3627,61 @@ async function showImport(id) {
 // Users (the reference platform's Users and Access Control)
 // --------------------------------------------------------------------------
 
+/** A read-only table in a dialog (sign-in history, key shown once and the like). */
+function showDialog(title, inner) {
+  const dlg = document.createElement('dialog');
+  dlg.innerHTML = `<div class="card wide"><h2>${esc(title)}</h2>${inner}<menu class="dialog-actions"><button id="dlg-close">Close</button></menu></div>`;
+  document.body.appendChild(dlg);
+  $('#dlg-close', dlg).addEventListener('click', () => { dlg.close(); dlg.remove(); });
+  dlg.showModal();
+  return dlg;
+}
+
+const LIMIT_FIELDS = [['approvalLimit', 'approval_limit', 'Loan approval'], ['disbursementLimit', 'disbursement_limit', 'Loan disbursement'],
+  ['feeLimit', 'fee_limit', 'Fee application'], ['depositLimit', 'deposit_limit', 'Deposits'], ['withdrawalLimit', 'withdrawal_limit', 'Withdrawals'],
+  ['repaymentLimit', 'repayment_limit', 'Repayments']];
+
 async function usersView() {
-  const owner = S.user.role === 'TENANT_ADMIN';
   const [users, roles, branches, rc] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/users/roles'), api('GET', '/api/branches'), rolesCard()]);
   if (!users.ok) throw new Error(users.error);
   const branchCode = new Map((branches.body || []).map((b) => [b.id, b.code]));
+  const edit = can('EDIT_USER');
   view().innerHTML = `
-    <div class="toolbar"><h1>Users</h1>${owner ? '<button id="user-add">New user</button>' : ''}</div>
+    <div class="toolbar"><h1>Users</h1>${can('CREATE_USER') ? '<button id="user-add">New user</button>' : ''}</div>
     <p class="hint">Staff who sign in to the back office. A new user, and one whose password is reset, gets a temporary password shown once
-    that must be changed at the first sign-in. Suspending a user ends their sessions at once.</p>
+    that must be changed at the first sign-in. Deactivating a user ends their sessions at once; a user locked out by failed sign-ins is unlocked here.
+    A teller or credit officer belongs to a branch; a user sees every branch or only the ones given.</p>
     <div id="users-list">${table([
     { label: 'Email', key: 'email' }, { label: 'Name', key: 'full_name' }, { label: 'Role', value: (u) => (u.role_code ? `${u.role_code} (${u.role})` : u.role) },
-    { label: 'Extra permissions', value: (u) => (u.permissions || []).join(', ') }, { label: 'Status', key: 'status' },
+    { label: 'Type', value: (u) => (u.user_type || '').toLowerCase().replace('_', ' ') },
+    { label: 'State', html: true, value: (u) => `<span class="badge ${u.state === 'ACTIVE' ? '' : 'bad'}">${esc(u.state)}</span>` },
     { label: 'Branch', value: (u) => branchCode.get(u.branch_id) || '' },
+    { label: 'Access', value: (u) => (u.all_branches ? 'all branches' : [u.branch_id, ...(u.branch_access || [])].filter(Boolean).map((id) => branchCode.get(id)).join(', ')) },
+    { label: 'Extra permissions', value: (u) => (u.permissions || []).join(', ') },
     { label: 'Second factor', value: (u) => (u.mfa_enabled ? 'on' : '') },
     { label: 'Last sign-in', value: (u) => (u.last_login_at ? String(u.last_login_at).slice(0, 16).replace('T', ' ') : '') },
-    { label: '', html: true, value: (u) => (owner ? `<button class="link" data-user="${esc(u.id)}">edit</button> <button class="link" data-reset="${esc(u.id)}">reset password</button>${u.mfa_enabled ? ` <button class="link" data-mfa="${esc(u.id)}">reset second factor</button>` : ''}` : '') },
+    { label: '', html: true, value: (u) => [
+      edit ? `<button class="link" data-user="${esc(u.id)}">edit</button> <button class="link" data-limits-u="${esc(u.id)}">limits</button>` : '',
+      edit && u.locked ? `<button class="link" data-unlock="${esc(u.id)}">unlock</button>` : '',
+      S.user.role === 'TENANT_ADMIN' ? `<button class="link" data-reset="${esc(u.id)}">reset password</button>` : '',
+      u.mfa_enabled && can('MANAGE_TWO_FACTOR_AUTHENTICATION') ? `<button class="link" data-mfa="${esc(u.id)}">reset second factor</button>` : '',
+      `<button class="link" data-logins="${esc(u.id)}">sign-ins</button>`].filter(Boolean).join(' ') },
   ], users.body)}</div>
     ${rc.html}`;
   rc.wire(usersView);
   const roleList = [...new Set([...(roles.body || []), ...(rc.roles || []).map((r) => r.code)])];
   const branchList = ['', ...(branches.body || []).filter((b) => b.status === 'ACTIVE').map((b) => b.code)];
   const shown = (title, secret) => ask([{ name: 'p', label: 'Temporary password (shown once; give it to the user)', value: secret }], title);
+  const codes = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
   el('user-add')?.addEventListener('click', async () => {
     const d = await ask([
       { name: 'email', label: 'Email', type: 'email' }, { name: 'fullName', label: 'Name', required: false },
-      { name: 'role', label: 'Role', options: roleList, value: 'TELLER' }, { name: 'branchId', label: 'Branch', options: branchList, value: '' },
+      { name: 'role', label: 'Role', options: roleList, value: 'TELLER' },
+      { name: 'userType', label: 'User type', options: ['', 'TELLER', 'CREDIT_OFFICER'], value: '', hint: 'Blank: the role\'s. A teller or credit officer needs a branch.' },
+      { name: 'branchId', label: 'Branch', options: branchList, value: '' },
     ], 'New user');
     if (!d) return;
-    const r = await api('POST', '/api/users', { ...d, branchId: d.branchId || null });
+    const r = await api('POST', '/api/users', { ...d, branchId: d.branchId || null, userType: d.userType || undefined });
     if (!r.ok) return toast(r.error, true);
     await shown(`${r.body.email} created`, r.body.temporaryPassword);
     render();
@@ -3648,21 +3690,49 @@ async function usersView() {
     const u = users.body.find((x) => x.id === b.dataset.user);
     const d = await ask([
       { name: 'fullName', label: 'Name', value: u.full_name || '', required: false },
+      { name: 'title', label: 'Title', value: u.title || '', required: false },
       { name: 'role', label: 'Role', options: roleList, value: u.role_code || u.role },
+      { name: 'userType', label: 'User type', options: ['', 'TELLER', 'CREDIT_OFFICER'], value: u.user_type === 'ADMINISTRATOR' ? '' : u.user_type || '' },
       { name: 'permissions', label: 'Extra permissions (codes, comma separated)', value: (u.permissions || []).join(', '), required: false },
       { name: 'status', label: 'Status', options: ['ACTIVE', 'SUSPENDED'], value: u.status },
       { name: 'branchId', label: 'Branch', options: branchList, value: branchCode.get(u.branch_id) || '' },
-      { name: 'approvalLimit', label: 'Approval limit (blank: none)', type: 'number', step: '0.01', value: u.approval_limit ?? '', required: false },
-      { name: 'disbursementLimit', label: 'Disbursement limit (blank: none)', type: 'number', step: '0.01', value: u.disbursement_limit ?? '', required: false },
+      { name: 'allBranches', label: 'Can access every branch', options: ['yes', 'no'], value: u.all_branches ? 'yes' : 'no' },
+      { name: 'branches', label: 'Other branches (codes, comma separated)', value: (u.branch_access || []).map((id) => branchCode.get(id)).filter(Boolean).join(', '), required: false },
+      { name: 'others', label: 'A credit officer sees other credit officers\' members', options: ['yes', 'no'], value: u.other_officers_clients ? 'yes' : 'no' },
     ], `Edit ${u.email}`);
     if (!d) return;
-    const r = await api('PATCH', `/api/users/${u.id}`, {
-      ...d, branchId: d.branchId || null, permissions: d.permissions.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
-      approvalLimit: d.approvalLimit === '' ? null : Number(d.approvalLimit),
-      disbursementLimit: d.disbursementLimit === '' ? null : Number(d.disbursementLimit),
-    });
+    const body = {
+      fullName: d.fullName, title: d.title, role: d.role, status: d.status, branchId: d.branchId || null,
+      permissions: codes(d.permissions).map((x) => x.toUpperCase()),
+      accessRights: { allBranches: d.allBranches === 'yes', branches: codes(d.branches), otherCreditOfficersClients: d.others === 'yes' },
+    };
+    if ((d.userType || null) !== (u.user_type === 'ADMINISTRATOR' ? null : u.user_type || null)) body.userType = d.userType || null;
+    let r = await api('PATCH', `/api/users/${u.id}`, body);
+    if (!r.ok && /CREDIT_OFFICER_HAS_MEMBERS/.test(r.error) && window.confirm(`${r.error}\n\nDeactivate anyway?`)) {
+      r = await api('PATCH', `/api/users/${u.id}`, { ...body, confirmCreditOfficerMembers: true });
+    }
     toast(r.ok ? 'Saved' : r.error, !r.ok);
     if (r.ok) render();
+  }));
+  view().querySelectorAll('[data-limits-u]').forEach((b) => b.addEventListener('click', async () => {
+    const u = users.body.find((x) => x.id === b.dataset.limitsU);
+    const d = await ask(LIMIT_FIELDS.map(([k, col, label]) => ({ name: k, label: `${label} limit (blank: none)`, type: 'number', step: '0.01', value: u[col] ?? '', required: false })),
+      `Transaction limits of ${u.email}`);
+    if (!d) return;
+    const r = await api('PATCH', `/api/users/${u.id}`, Object.fromEntries(Object.entries(d).map(([k, v]) => [k, v === '' ? null : Number(v)])));
+    toast(r.ok ? 'Limits saved' : r.error, !r.ok);
+    if (r.ok) render();
+  }));
+  view().querySelectorAll('[data-unlock]').forEach((b) => b.addEventListener('click', async () => {
+    const r = await api('POST', `/api/users/${b.dataset.unlock}/unlock`);
+    toast(r.ok ? `${r.body.email} unlocked` : r.error, !r.ok);
+    if (r.ok) render();
+  }));
+  view().querySelectorAll('[data-logins]').forEach((b) => b.addEventListener('click', async () => {
+    const r = await api('GET', `/api/users/${b.dataset.logins}/logins?limit=50`);
+    if (!r.ok) return toast(r.error, true);
+    showDialog('Sign-in history', loginsTable(r.body));
+    return null;
   }));
   view().querySelectorAll('[data-reset]').forEach((b) => b.addEventListener('click', async () => {
     const r = await api('POST', `/api/users/${b.dataset.reset}/reset-password`);
@@ -3676,6 +3746,10 @@ async function usersView() {
     if (r.ok) render();
   }));
 }
+
+const loginsTable = (rows) => table([{ label: 'When', value: (x) => String(x.created_at).replace('T', ' ').slice(0, 19) },
+  { label: 'Result', value: (x) => (x.succeeded ? 'signed in' : (x.reason || 'refused').toLowerCase().replace(/_/g, ' ')) },
+  { label: 'From', key: 'ip' }, { label: 'Browser', value: (x) => String(x.user_agent || '').slice(0, 60) }], rows, { empty: 'No sign-ins recorded' });
 
 // --------------------------------------------------------------------------
 // Access: what the signed-in user may do, from GET /api/auth/me
@@ -4074,10 +4148,12 @@ async function roleEditor(role, catalog) {
       ${role.code ? '' : '<label>Code<input name="code" required pattern="[A-Z][A-Z0-9_]{1,31}" placeholder="LOAN_OFFICER"></label>'}
       <label>Name<input name="name" value="${esc(role.name || '')}" required></label>
       <label>Base role<select name="baseRole" ${role.builtin ? 'disabled' : ''}>${['MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR', 'TENANT_ADMIN'].map((b) => `<option ${b === (role.baseRole || 'TELLER') ? 'selected' : ''}>${b}</option>`).join('')}</select>
-        <span class="hint">The pages and actions not yet on permissions follow the base role.</span></label>
+        <span class="hint">Its starting permissions, and the role lists that name built-in roles.</span></label>
       <label>User type<select name="userType" ${role.builtin ? 'disabled' : ''}>${['', 'ADMINISTRATOR', 'TELLER', 'CREDIT_OFFICER'].map((u) => `<option value="${u}" ${u === (role.userType || '') ? 'selected' : ''}>${u || '(none)'}</option>`).join('')}</select></label>
+      <label class="check"><input type="checkbox" name="reference" ${role.accessRights?.reference === false ? '' : 'checked'} ${role.code === 'TENANT_ADMIN' ? 'disabled' : ''}> Back office access (sign in with a password)</label>
+      <label class="check"><input type="checkbox" name="api" ${role.accessRights?.api === false ? '' : 'checked'}> API access (may be given to an API consumer)</label>
       <div class="perm-groups">${catalog.map((g) => `<fieldset><legend>${esc(g.group)}</legend>${g.permissions.map((p) => `<label class="check" title="${esc(p.code)}">
-        <input type="checkbox" name="perm" value="${esc(p.code)}" ${has.has(p.code) ? 'checked' : ''} ${role.code === 'TENANT_ADMIN' ? 'disabled' : ''}> ${esc(p.label)}${p.enforced ? '' : ' <span class="hint">(not yet enforced)</span>'}</label>`).join('')}</fieldset>`).join('')}</div>
+        <input type="checkbox" name="perm" value="${esc(p.code)}" ${has.has(p.code) ? 'checked' : ''} ${role.code === 'TENANT_ADMIN' ? 'disabled' : ''}> ${esc(p.label)}${p.platform ? ' <span class="hint">(this platform)</span>' : ''}</label>`).join('')}</fieldset>`).join('')}</div>
       <label>Notes<input name="notes" value="${esc(role.notes || '')}"></label>
       <menu class="dialog-actions"><button value="cancel" class="secondary">Cancel</button><button value="ok">Save role</button></menu></form>`;
     document.body.appendChild(dlg);
@@ -4087,6 +4163,7 @@ async function roleEditor(role, catalog) {
         ...(role.code ? {} : { code: f.code.value.trim().toUpperCase() }), name: f.name.value, notes: f.notes.value || null,
         ...(role.builtin ? {} : { baseRole: f.baseRole.value, userType: f.userType.value || null }),
         ...(role.code === 'TENANT_ADMIN' ? {} : { permissions: [...f.querySelectorAll('input[name=perm]:checked')].map((i) => i.value) }),
+        accessRights: { reference: role.code === 'TENANT_ADMIN' ? true : f.reference.checked, api: f.api.checked },
       };
       dlg.remove();
       resolve(dlg.returnValue === 'ok' ? out : null);
@@ -4258,7 +4335,189 @@ async function entityReports(type, recordId) {
   box.querySelectorAll('[data-er]').forEach((b) => b.addEventListener('click', () => runTemplate(r.body.find((t) => t.id === b.dataset.er), recordId)));
 }
 
+// --------------------------------------------------------------------------
+// Access administration (the reference platform's Administration > Access)
+// --------------------------------------------------------------------------
+
+const auditState = { username: '', resource: '', code: '', offset: 0, limit: 50 };
+
+async function accessView() {
+  const parts = await Promise.all([
+    can('MANAGE_ACCESS_PREFERENCES') ? api('GET', '/api/access-preferences') : Promise.resolve(null),
+    can('MANAGE_ACCESS_PREFERENCES') ? api('GET', '/api/access-preferences/blocked-ips') : Promise.resolve(null),
+    can('VIEW_API_CONSUMERS_AND_KEYS') ? api('GET', '/api/consumers') : Promise.resolve(null),
+    can('VIEW_ROLE') ? roleCodes() : Promise.resolve([]),
+  ]);
+  const [prefs, ips, consumers, codes] = parts;
+  const p = prefs?.ok ? prefs.body : null;
+  view().innerHTML = `<h1>Access</h1>
+    ${p ? card('Preferences', `<form id="ap-form" class="grid">
+      <label>Sign out after minutes without activity<input name="sessionTimeoutMinutes" type="number" min="5" max="1440" value="${p.sessionTimeoutMinutes}"></label>
+      <label>Password length at least<input name="minLength" type="number" min="8" value="${p.password.minLength}"></label>
+      <label>Digits at least<input name="minDigits" type="number" min="1" value="${p.password.minDigits}"></label>
+      <label>Capital letters at least<input name="minUppercase" type="number" min="0" value="${p.password.minUppercase}"></label>
+      <label>Symbols at least<input name="minSpecial" type="number" min="0" value="${p.password.minSpecial}"></label>
+      <label>Previous passwords refused<input name="history" type="number" min="1" max="10" value="${p.password.history}"></label>
+      <label>Passwords expire after days (blank: never)<input name="expiryDays" type="number" min="1" value="${p.password.expiryDays ?? ''}"></label>
+      <label>Lock after failed sign-ins (3 to 6)<input name="maxFailedLogins" type="number" min="3" max="6" value="${p.lockout.maxFailedLogins}"></label>
+      <label>Locked for minutes (blank: until unlocked)<input name="lockMinutes" type="number" min="15" value="${p.lockout.lockMinutes ?? ''}"></label>
+      <label class="check"><input type="checkbox" name="reauthenticate" ${p.reauthenticate ? 'checked' : ''}> Ask for the password again on critical actions</label>
+      <label class="check"><input type="checkbox" name="ipEnabled" ${p.ipAllowlist.enabled ? 'checked' : ''}> Only let in from these addresses</label>
+      <label>Addresses (one per line: 10.0.0.5, 10.0.0.*, 10.0.0.1-25, 10.0.0.0/24)<textarea name="ipEntries" rows="3">${esc(p.ipAllowlist.entries.join('\n'))}</textarea></label>
+      <label>For<select name="applyTo" multiple size="3">${['ADMINS', 'USERS', 'API'].map((x) => `<option ${p.ipAllowlist.applyTo.includes(x) ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
+      <label>Roles that need a second factor<select name="mfaRoles" multiple size="5">${codes.map((x) => `<option ${p.mfaRequiredRoles.includes(x) ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
+      <label>Grace period for rotated API keys, seconds<input name="grace" type="number" min="0" value="${p.apiKeys.rotationGraceSeconds}"></label>
+      <label>Keep the audit trail for days<input name="retention" type="number" min="30" value="${p.auditRetentionDays}"></label>
+      <div class="toolbar"><button type="submit">Save preferences</button></div></form>`) : ''}
+    ${ips?.ok ? card('Blocked addresses', `<p class="hint">An address that sends ten requests with a bad API key is blocked for API keys until it is reset here.</p>
+      <div id="ap-ips">${table([{ label: 'Address', key: 'ip' }, { label: 'Bad keys', num: true, key: 'failures' },
+    { label: 'Blocked', value: (x) => (x.blocked_at ? String(x.blocked_at).slice(0, 16).replace('T', ' ') : '') },
+    { label: '', html: true, value: (x) => `<button class="link" data-ip="${esc(x.ip)}">reset</button>` }], ips.body, { empty: 'No blocked addresses' })}</div>`) : ''}
+    ${consumers?.ok ? card('API consumers', `<p class="hint">An API consumer makes API keys, sent in the apiKey header. A key has the consumer's access and is shown once.</p>
+      <div id="ac-list">${table([{ label: 'Name', key: 'name' },
+    { label: 'Access', value: (c) => (c.access.administrator ? 'administrator' : [c.access.role, ...c.access.permissions].filter(Boolean).join(', ')) },
+    { label: 'Status', key: 'status' },
+    { label: 'Keys', value: (c) => c.keys.map((k) => `${k.prefix}… ${k.state.toLowerCase().replace(/_/g, ' ')}`).join('; ') },
+    { label: '', html: true, value: (c) => [can('CREATE_API_CONSUMERS_AND_KEYS') ? `<button class="link" data-ac-key="${esc(c.id)}">new key</button> <button class="link" data-ac-secret="${esc(c.id)}">secret key</button>` : '',
+      can('DELETE_API_CONSUMERS_AND_KEYS') ? c.keys.map((k) => `<button class="link" data-ac-delkey="${esc(c.id)}:${esc(k.id)}">delete ${esc(k.prefix)}…</button>`).join(' ') : '',
+      can('EDIT_API_CONSUMERS_AND_KEYS') ? `<button class="link" data-ac-status="${esc(c.id)}">${c.status === 'ACTIVE' ? 'deactivate' : 'activate'}</button>` : '',
+      can('DELETE_API_CONSUMERS_AND_KEYS') ? `<button class="link" data-ac-del="${esc(c.id)}">delete</button>` : ''].filter(Boolean).join(' ') }], consumers.body, { empty: 'No API consumers' })}</div>
+      ${can('CREATE_API_CONSUMERS_AND_KEYS') ? '<button class="secondary" id="ac-new">New API consumer</button>' : ''}`) : ''}
+    ${can('MANAGE_AUDIT_TRAIL') ? card('Audit trail', `<p class="hint">Every request by staff and API consumers, with personal details and secrets taken out.</p>
+      <div class="toolbar"><label>User<input id="at-user" value="${esc(auditState.username)}" placeholder="email"></label>
+        <label>Resource<input id="at-res" value="${esc(auditState.resource)}" placeholder="members, loans, auth"></label>
+        <label>Status<input id="at-code" value="${esc(auditState.code)}" placeholder="403"></label><button id="at-run">Search</button></div>
+      <div id="at-out"><p class="hint">Loading…</p></div>`) : ''}`;
+  if (!view().querySelector('.card')) view().innerHTML += '<p class="hint">Your role has no access administration.</p>';
+  const reload = () => accessView();
+  $('#ap-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const n = (v) => (v === '' ? null : Number(v));
+    const r = await api('PATCH', '/api/access-preferences', {
+      sessionTimeoutMinutes: Number(f.sessionTimeoutMinutes.value),
+      password: { minLength: Number(f.minLength.value), minDigits: Number(f.minDigits.value), minUppercase: Number(f.minUppercase.value),
+        minSpecial: Number(f.minSpecial.value), history: Number(f.history.value), expiryDays: n(f.expiryDays.value) },
+      lockout: { maxFailedLogins: Number(f.maxFailedLogins.value), lockMinutes: n(f.lockMinutes.value) },
+      reauthenticate: f.reauthenticate.checked,
+      ipAllowlist: { enabled: f.ipEnabled.checked, entries: f.ipEntries.value.split(/\s+/).filter(Boolean), applyTo: [...f.applyTo.selectedOptions].map((o) => o.value) },
+      mfaRequiredRoles: [...f.mfaRoles.selectedOptions].map((o) => o.value),
+      apiKeys: { rotationGraceSeconds: Number(f.grace.value) }, auditRetentionDays: Number(f.retention.value),
+    });
+    toast(r.ok ? 'Access preferences saved' : r.error, !r.ok);
+    if (r.ok) reload();
+  });
+  view().querySelectorAll('[data-ip]').forEach((b) => b.addEventListener('click', async () => {
+    const r = await api('POST', '/api/access-preferences/blocked-ips/reset', { ips: [b.dataset.ip] });
+    toast(r.ok ? 'Address reset' : r.error, !r.ok);
+    if (r.ok) reload();
+  }));
+  $('#ac-new')?.addEventListener('click', async () => {
+    const d = await ask([{ name: 'name', label: 'Name' }, { name: 'role', label: 'Role', options: ['', ...codes], value: '' },
+      { name: 'permissions', label: 'Or permissions (codes, comma separated)', required: false },
+      ...(S.user.role === 'TENANT_ADMIN' ? [{ name: 'administrator', label: 'Administrator', options: ['no', 'yes'], value: 'no' }] : [])], 'New API consumer');
+    if (!d) return;
+    const r = await api('POST', '/api/consumers', { name: d.name, access: { role: d.role || null, administrator: d.administrator === 'yes',
+      permissions: String(d.permissions || '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean) } });
+    toast(r.ok ? `API consumer ${r.body.name} added` : r.error, !r.ok);
+    if (r.ok) reload();
+  });
+  const on = (attr, fn) => view().querySelectorAll(`[${attr}]`).forEach((b) => b.addEventListener('click', () => fn(b.getAttribute(attr))));
+  on('data-ac-key', async (id) => {
+    const d = await ask([{ name: 'ttl', label: 'Expires after seconds (blank: never)', type: 'number', required: false }], 'New API key');
+    if (!d) return;
+    const r = await api('POST', `/api/consumers/${id}/keys`, { expirationTime: d.ttl === '' ? undefined : Number(d.ttl) });
+    if (!r.ok) return toast(r.error, true);
+    showDialog('API key (shown once)', `<p class="hint">Store it now; it cannot be shown again.</p><p class="mono" id="ac-key-value">${esc(r.body.apiKey)}</p>`);
+    reload();
+  });
+  on('data-ac-secret', async (id) => {
+    if (!window.confirm('Make a new secret key? The old one stops working.')) return;
+    const r = await api('POST', `/api/consumers/${id}/secret-key`);
+    if (!r.ok) return toast(r.error, true);
+    showDialog('Secret key (shown once)', `<p class="hint">Used only to rotate keys (POST /api/consumers/keys/rotation, secretKey header).</p><p class="mono">${esc(r.body.secretKey)}</p>`);
+  });
+  on('data-ac-delkey', async (v) => {
+    const [cid, kid] = v.split(':');
+    if (!window.confirm('Delete this key? It stops working at once.')) return;
+    const r = await api('DELETE', `/api/consumers/${cid}/keys/${kid}`);
+    toast(r.ok ? 'Key deleted' : r.error, !r.ok);
+    if (r.ok) reload();
+  });
+  on('data-ac-status', async (id) => {
+    const c = consumers.body.find((x) => x.id === id);
+    const r = await api('PATCH', `/api/consumers/${id}`, { status: c.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE' });
+    toast(r.ok ? 'Saved' : r.error, !r.ok);
+    if (r.ok) reload();
+  });
+  on('data-ac-del', async (id) => {
+    if (!window.confirm('Delete this API consumer and its keys?')) return;
+    const r = await api('DELETE', `/api/consumers/${id}`);
+    toast(r.ok ? 'API consumer deleted' : r.error, !r.ok);
+    if (r.ok) reload();
+  });
+  const runAudit = async () => {
+    const A = auditState;
+    const qs = new URLSearchParams({ from: A.offset, size: A.limit });
+    if (A.username) qs.set('username[contains]', A.username);
+    if (A.resource) qs.set('resource[eq]', A.resource);
+    if (A.code) qs.set('response_code[eq]', A.code);
+    const r = await api('GET', `/api/audit-trail/events?${qs}`);
+    const out = el('at-out');
+    if (!out) return;
+    if (!r.ok) { out.innerHTML = `<p class="error">${esc(r.error)}</p>`; return; }
+    out.innerHTML = table([{ label: 'When', value: (x) => String(x.occurred_at).replace('T', ' ').slice(0, 19) }, { label: 'Source', key: 'event_source' },
+      { label: 'User', key: 'username' }, { label: 'Request', value: (x) => `${x.request_method} ${x.request_uri}` }, { label: 'Status', num: true, key: 'response_code' },
+      { label: 'From', key: 'client_ip' }, { label: 'Body', value: (x) => String(x.request_payload || '').slice(0, 80) }], r.body.events, { empty: 'Nothing matches' })
+      + `<p class="hint">${r.body.totalItemsCount} event(s)</p>`;
+  };
+  $('#at-run')?.addEventListener('click', () => {
+    auditState.username = $('#at-user').value.trim(); auditState.resource = $('#at-res').value.trim(); auditState.code = $('#at-code').value.trim();
+    runAudit();
+  });
+  if (can('MANAGE_AUDIT_TRAIL')) runAudit();
+}
+
+/** Your own profile (the reference platform's Edit Your Profile) and sign-in history. */
+async function profileDialog() {
+  const [me, logins] = await Promise.all([api('GET', '/api/profile'), api('GET', '/api/auth/logins?limit=20')]);
+  if (!me.ok) return toast(me.error, true);
+  const u = me.body;
+  const d = await ask([{ name: 'fullName', label: 'Name', value: u.full_name || '', required: false },
+    { name: 'title', label: 'Title', value: u.title || '', required: false },
+    { name: 'phone', label: 'Phone', value: u.phone || '', required: false },
+    { name: 'language', label: 'Language', options: ['en', 'sw'], value: u.language || 'en' },
+    { name: 'currentPassword', label: 'To change your password: the current one', type: 'password', required: false },
+    { name: 'newPassword', label: 'and the new one', type: 'password', required: false }],
+  `Your profile: ${u.email} (${u.role_code || u.role}${u.user_type ? `, ${u.user_type.toLowerCase().replace('_', ' ')}` : ''})`);
+  if (d) {
+    const { currentPassword, newPassword, ...profile } = d;
+    const r = await api('PATCH', '/api/profile', profile);
+    toast(r.ok ? 'Profile saved' : r.error, !r.ok);
+    if (r.ok) S.user.name = r.body.full_name || S.user.name;
+    if (newPassword) {
+      const c = await api('POST', '/api/auth/password', { currentPassword, newPassword });
+      if (!c.ok) return toast(c.error, true);
+      toast('Password changed; sign in again');
+      return signOut(true);
+    }
+  }
+  if (logins.ok) showDialog('Your recent sign-ins', loginsTable(logins.body));
+  return null;
+}
+
+/** Critical actions (access preferences): the password again, for five minutes. */
+async function reauthenticate() {
+  const d = await ask([{ name: 'password', label: 'Your password', type: 'password' }], 'Confirm it is you');
+  if (!d) return false;
+  const r = await api('POST', '/api/auth/reauth', { password: d.password }, { retry: false, reauth: false });
+  if (!r.ok) { toast(r.error, true); return false; }
+  S.reauth = { token: r.body.reauthToken, until: Date.now() + (r.body.expiresIn - 10) * 1000 };
+  return true;
+}
+
 const VIEWS = {
+  access: accessView,
   menu: menuView,
   tasks: tasksView,
   tills: tillsView,

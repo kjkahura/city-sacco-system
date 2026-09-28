@@ -128,7 +128,7 @@ async function teller(c, { tellerId = null, tellerEmail = null }) {
   const key = tellerId || tellerEmail;
   if (!key) throw err('TELLER_REQUIRED');
   const { rows: [u] } = await c.query(
-    `SELECT u.id, u.email, u.role, u.role_code, u.status, u.branch_id, r.user_type
+    `SELECT u.id, u.email, u.role, u.role_code, u.status, u.branch_id, COALESCE(u.user_type, r.user_type) AS user_type
      FROM platform.users u
      LEFT JOIN roles r ON r.code = u.role_code
      WHERE u.tenant_id = (SELECT id FROM platform.tenants WHERE schema_name = current_schema())
@@ -136,7 +136,7 @@ async function teller(c, { tellerId = null, tellerEmail = null }) {
   if (!u) throw err(`TELLER_NOT_FOUND: ${key}`, 404);
   if (u.status !== 'ACTIVE') throw err('TELLER_NOT_ACTIVE', 409);
   // The reference platform: tills go to teller users, and a user cannot be both administrator and teller.
-  const isTeller = u.role_code ? u.user_type === 'TELLER' : u.role === 'TELLER';
+  const isTeller = u.user_type ? u.user_type === 'TELLER' : u.role === 'TELLER';
   if (!isTeller) throw err('ONLY_A_TELLER_USER_HOLDS_A_TILL: give the user a teller role', 409);
   return u;
 }

@@ -18,13 +18,9 @@ const { filePart } = require('../lib/multipart');
  * Excel data import. Mounted by the server under /api.
  */
 
-const OWNER = ['TENANT_ADMIN'];
-const DATA = ['TENANT_ADMIN', 'ACCOUNTANT', 'AUDITOR'];
-const IMPORTERS = ['TENANT_ADMIN', 'MANAGER'];
-const IMPORT_READERS = ['TENANT_ADMIN', 'MANAGER', 'AUDITOR'];
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-const run = (fn, roles = [], { write = false, status = 200 } = {}) => [requireAuth(...roles), async (req, res, next) => {
+const run = (fn, { write = false, status = 200 } = {}) => [requireAuth(), async (req, res, next) => {
   try {
     const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res));
     if (out !== undefined) res.status(status).json(out);
@@ -53,20 +49,20 @@ dictionary.get('/', requireAuth(), async (req, res, next) => {
 });
 dictionary.get('/:table', ...run((c, req) => DD.table(c, req.params.table)));
 // Write the words into the schema's catalog as comments (also done by every migration).
-dictionary.post('/apply-comments', ...run((c) => DD.applyComments(c), OWNER, { write: true }));
+dictionary.post('/apply-comments', ...run((c) => DD.applyComments(c), { write: true }));
 
 // --- incremental extract -------------------------------------------------------
 
 const extract = express.Router();
-extract.get('/', ...run((c) => EX.streams(c), DATA));
+extract.get('/', ...run((c) => EX.streams(c)));
 extract.get('/:stream', ...run((c, req) => EX.read(c, req.params.stream, {
   cursor: req.query.cursor || null, since: req.query.since || null, limit: req.query.limit,
-}), DATA));
+})));
 
 // --- database backup (the reference platform: POST /database/backup, GET /database/backup/LATEST) ---
 
 const database = express.Router();
-database.post('/backup', requireAuth(...OWNER), async (req, res, next) => {
+database.post('/backup', requireAuth(), async (req, res, next) => {
   try {
     const b = req.body || {};
     const row = await backup.request(req.tenant, {
@@ -75,7 +71,7 @@ database.post('/backup', requireAuth(...OWNER), async (req, res, next) => {
     res.status(202).json({ ...row, state: row.status });
   } catch (e) { next(e); }
 });
-database.get('/backup', ...run((c, req) => backup.list(c, { limit: req.query.limit }), OWNER, { write: true }));
+database.get('/backup', ...run((c, req) => backup.list(c, { limit: req.query.limit }), { write: true }));
 async function download(req, res, next) {
   try {
     const f = await withTenant(req.tenant.schema_name, (c) => backup.file(c, req.params.id || 'latest'));
@@ -85,15 +81,15 @@ async function download(req, res, next) {
   } catch (e) { next(e); }
 }
 // LATEST is the file itself, as in the reference platform; the others are the record and its file.
-database.get('/backup/latest', requireAuth(...OWNER), download);
-database.get('/backup/LATEST', requireAuth(...OWNER), download);
-database.get('/backup/:id', ...run((c, req) => backup.get(c, req.params.id), OWNER, { write: true }));
-database.get('/backup/:id/file', requireAuth(...OWNER), download);
+database.get('/backup/latest', requireAuth(), download);
+database.get('/backup/LATEST', requireAuth(), download);
+database.get('/backup/:id', ...run((c, req) => backup.get(c, req.params.id), { write: true }));
+database.get('/backup/:id/file', requireAuth(), download);
 
 // --- Excel data import ---------------------------------------------------------
 
 const imports = express.Router();
-imports.get('/template', requireAuth(...IMPORTERS), async (req, res, next) => {
+imports.get('/template', requireAuth(), async (req, res, next) => {
   try {
     const today = ORG.localClock(req.tenant.timezone || 'Africa/Nairobi').date;
     const data = await withTenantRead(req.tenant.schema_name, (c) => IMP.template(c, { today }));
@@ -101,8 +97,8 @@ imports.get('/template', requireAuth(...IMPORTERS), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 // What should be set up before an import (the reference platform's prerequisites).
-imports.get('/prerequisites', ...run((c) => IMP.prerequisites(c), IMPORT_READERS));
-imports.get('/', ...run(async (c, req) => { await IMP.markStale(c); return IMP.list(c, { limit: req.query.limit }); }, IMPORT_READERS, { write: true }));
+imports.get('/prerequisites', ...run((c) => IMP.prerequisites(c)));
+imports.get('/', ...run(async (c, req) => { await IMP.markStale(c); return IMP.list(c, { limit: req.query.limit }); }, { write: true }));
 
 /**
  * Store the workbook and start its validation in the background. Returns
@@ -134,25 +130,25 @@ function workbookFrom(req) {
   if (!Buffer.isBuffer(req.body) || !req.body.length) throw Object.assign(new Error('SEND_THE_WORKBOOK_AS_THE_REQUEST_BODY'), { status: 400 });
   return { buffer: req.body, fileName: req.get('x-file-name') || req.query.fileName };
 }
-imports.post('/', requireAuth(...IMPORTERS), (req, res, next) => rawBody(req, res, (e) => (e ? tooLarge(e, next) : next())),
+imports.post('/', requireAuth(), (req, res, next) => rawBody(req, res, (e) => (e ? tooLarge(e, next) : next())),
   async (req, res, next) => {
     try {
       const out = await acceptUpload(req, workbookFrom(req));
       res.status(out.status).json(out.body);
     } catch (e) { next(e); }
   });
-imports.get('/:id', ...run(async (c, req) => { await IMP.markStale(c); return IMP.get(c, req.params.id); }, IMPORT_READERS, { write: true }));
+imports.get('/:id', ...run(async (c, req) => { await IMP.markStale(c); return IMP.get(c, req.params.id); }, { write: true }));
 // The records approval would create, by kind: ?kind=loans&offset=&limit=.
 imports.get('/:id/preview', ...run((c, req) => IMP.previewOf(c, req.params.id, {
   kind: req.query.kind || null, offset: req.query.offset, limit: req.query.limit,
-}), IMPORT_READERS));
-imports.get('/:id/file', requireAuth(...IMPORT_READERS), async (req, res, next) => {
+})));
+imports.get('/:id/file', requireAuth(), async (req, res, next) => {
   try {
     const f = await withTenantRead(req.tenant.schema_name, (c) => IMP.fileOf(c, req.params.id, 'file'));
     sendFile(res, { ...f, type: XLSX_TYPE });
   } catch (e) { next(e); }
 });
-imports.get('/:id/errors', requireAuth(...IMPORT_READERS), async (req, res, next) => {
+imports.get('/:id/errors', requireAuth(), async (req, res, next) => {
   try {
     const f = await withTenantRead(req.tenant.schema_name, (c) => IMP.fileOf(c, req.params.id, 'errors'));
     sendFile(res, { ...f, type: XLSX_TYPE });
@@ -167,13 +163,13 @@ async function decide(c, req, id, action) {
   if (out.failed) return { status: 409, body: { errors: [{ errorCode: 409, errorReason: 'IMPORT_FAILED' }], importErrors: out.errors, import: out.import } };
   return { status: 200, body: out };
 }
-imports.post('/:id/approve', requireAuth(...OWNER), async (req, res, next) => {
+imports.post('/:id/approve', requireAuth(), async (req, res, next) => {
   try {
     const out = await withTenant(req.tenant.schema_name, (c) => once(c, req, `approve:${req.params.id}`, () => decide(c, req, req.params.id, 'APPROVE')));
     res.status(out.status).json(out.body);
   } catch (e) { next(e); }
 });
-imports.post('/:id/reject', requireAuth(...OWNER), async (req, res, next) => {
+imports.post('/:id/reject', requireAuth(), async (req, res, next) => {
   try {
     const out = await withTenant(req.tenant.schema_name, (c) => once(c, req, `reject:${req.params.id}`, () => decide(c, req, req.params.id, 'REJECT')));
     res.status(out.status).json(out.body);
@@ -189,7 +185,7 @@ imports.post('/:id/reject', requireAuth(...OWNER), async (req, res, next) => {
 // The same imports as /data-imports, in the reference platform's shapes and names.
 
 const reference = express.Router();
-reference.post('/import', requireAuth(...IMPORTERS), (req, res, next) => rawBody(req, res, (e) => (e ? tooLarge(e, next) : next())),
+reference.post('/import', requireAuth(), (req, res, next) => rawBody(req, res, (e) => (e ? tooLarge(e, next) : next())),
   async (req, res, next) => {
     try {
       const out = await acceptUpload(req, workbookFrom(req));
@@ -200,9 +196,9 @@ reference.post('/import', requireAuth(...IMPORTERS), (req, res, next) => rawBody
 reference.get('/import/:importKey', ...run(async (c, req) => {
   await IMP.markStale(c);
   return IMP.apiStatus(await IMP.get(c, req.params.importKey));
-}, IMPORT_READERS, { write: true }));
+}, { write: true }));
 // Express 5 does not match a colon suffix in a path string, so the route is a RegExp.
-reference.post(/^\/import\/events\/([^/:]+):action$/, requireAuth(...OWNER), async (req, res, next) => {
+reference.post(/^\/import\/events\/([^/:]+):action$/, requireAuth(), async (req, res, next) => {
   try {
     const eventKey = req.params[0];
     const action = String(req.body?.action || '').toUpperCase();

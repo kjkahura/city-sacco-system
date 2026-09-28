@@ -104,7 +104,7 @@ router.get('/:id/loan-history', requireAuth(), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/', requireAuth('TENANT_ADMIN', 'MANAGER', 'TELLER'), async (req, res, next) => {
+router.post('/', requireAuth(), async (req, res, next) => {
   try {
     const b = req.body || {};
     if (!b.firstName || !b.lastName) return badRequest(res, 'FIRST_AND_LAST_NAME_REQUIRED');
@@ -157,7 +157,7 @@ router.post('/', requireAuth('TENANT_ADMIN', 'MANAGER', 'TELLER'), async (req, r
   }
 });
 
-router.patch('/:id', requireAuth('TENANT_ADMIN', 'MANAGER'), async (req, res, next) => {
+router.patch('/:id', requireAuth(), async (req, res, next) => {
   try {
     const allowed = ['first_name', 'last_name', 'phone', 'email', 'employer', 'status', 'kra_pin', ...Object.values(EXTRA)];
     const map = { firstName: 'first_name', lastName: 'last_name', kraPin: 'kra_pin', ...EXTRA };
@@ -203,17 +203,15 @@ router.patch('/:id', requireAuth('TENANT_ADMIN', 'MANAGER'), async (req, res, ne
 });
 
 // Identification documents (./idTemplates).
-const txn = (fn, roles, { write = true, status = 200 } = {}) => [requireAuth(...roles), async (req, res, next) => {
+const txn = (fn, { write = true, status = 200 } = {}) => [requireAuth(), async (req, res, next) => {
   try {
     const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res));
     if (out !== undefined) res.status(status).json(out);
   } catch (e) { next(e); }
 }];
 router.get('/:id/identifications', ...txn((c, req) => IDT.documents(c, req.params.id), [], { write: false }));
-router.post('/:id/identifications', ...txn((c, req) => IDT.addDocument(c, req.params.id, req.body || {}, { createdBy: req.auth.email }),
-  ['TENANT_ADMIN', 'MANAGER', 'TELLER'], { status: 201 }));
-router.delete('/:id/identifications/:docId', ...txn((c, req) => IDT.removeDocument(c, req.params.id, req.params.docId, { createdBy: req.auth.email }),
-  ['TENANT_ADMIN', 'MANAGER']));
+router.post('/:id/identifications', ...txn((c, req) => IDT.addDocument(c, req.params.id, req.body || {}, { createdBy: req.auth.email }), { status: 201 }));
+router.delete('/:id/identifications/:docId', ...txn((c, req) => IDT.removeDocument(c, req.params.id, req.params.docId, { createdBy: req.auth.email })));
 router.get('/:id/identifications/:docId/attachment', requireAuth(), async (req, res, next) => {
   try {
     const a = await withTenantRead(req.tenant.schema_name, (c) => IDT.attachment(c, req.params.id, req.params.docId));

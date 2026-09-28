@@ -25,8 +25,6 @@ const B = require('../domain/branches');
  */
 
 const router = express.Router();
-const READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR', 'TELLER'];
-const ADMIN = ['TENANT_ADMIN', 'MANAGER'];
 
 const ENUMS = {
   product_type: ['FIXED_TERM', 'DYNAMIC_TERM', 'INTEREST_FREE', 'TRANCHED', 'REVOLVING'],
@@ -445,7 +443,7 @@ async function withFees(c, p) {
   return { ...p, fees: rows };
 }
 
-router.get('/', requireAuth(...READER), async (req, res, next) => {
+router.get('/', requireAuth(), async (req, res, next) => {
   try {
     const rows = await withTenantRead(req.tenant.schema_name, async (c) => (await c.query(
       `SELECT p.*, (SELECT count(*)::int FROM loan_accounts l WHERE l.product_id = p.id) AS loans,
@@ -455,7 +453,7 @@ router.get('/', requireAuth(...READER), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.get('/:id', requireAuth(...READER), async (req, res, next) => {
+router.get('/:id', requireAuth(), async (req, res, next) => {
   try {
     const row = await withTenantRead(req.tenant.schema_name, async (c) => {
       const p = (await c.query('SELECT * FROM loan_products WHERE id = $1', [req.params.id])).rows[0];
@@ -465,7 +463,7 @@ router.get('/:id', requireAuth(...READER), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/', requireAuth(...ADMIN), async (req, res, next) => {
+router.post('/', requireAuth(), async (req, res, next) => {
   try {
     const id = String(req.body?.id || '').trim().toUpperCase();
     if (!/^[A-Z0-9_]{2,16}$/.test(id)) return badRequest(res, 'PRODUCT_ID_MUST_BE_2_TO_16_UPPERCASE_ALPHANUMERIC');
@@ -496,7 +494,7 @@ router.post('/', requireAuth(...ADMIN), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
+router.patch('/:id', requireAuth(), async (req, res, next) => {
   try {
     const cols = toColumns(req.body);
     if (!Object.keys(cols).length) return badRequest(res, 'NO_UPDATABLE_FIELDS');
@@ -529,7 +527,7 @@ router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
 
 // --- accounting method change and history ----------------------------------
 
-router.post('/:id/accounting-method', requireAuth(...ADMIN), async (req, res, next) => {
+router.post('/:id/accounting-method', requireAuth(), async (req, res, next) => {
   try {
     const b = req.body || {};
     const mappings = toColumns(b.mappings || {});
@@ -541,13 +539,13 @@ router.post('/:id/accounting-method', requireAuth(...ADMIN), async (req, res, ne
   } catch (e) { next(e); }
 });
 
-router.get('/:id/accounting-changes', requireAuth(...READER), async (req, res, next) => {
+router.get('/:id/accounting-changes', requireAuth(), async (req, res, next) => {
   try {
     res.json(await withTenantRead(req.tenant.schema_name, (c) => require('../domain/accountingChanges').history(c, 'LOAN', req.params.id)));
   } catch (e) { next(e); }
 });
 
-router.get('/:id/gl-mapping-history', requireAuth(...READER), async (req, res, next) => {
+router.get('/:id/gl-mapping-history', requireAuth(), async (req, res, next) => {
   try {
     res.json(await withTenantRead(req.tenant.schema_name, (c) => PA.mappingHistory(c, 'LOAN', req.params.id)));
   } catch (e) { next(e); }
@@ -647,7 +645,7 @@ async function validateFee(c, cols, before, product = null) {
 
 const feeCols = (body) => Object.fromEntries(Object.entries(body || {}).filter(([k]) => FEE_FIELDS[k]).map(([k, v]) => [FEE_FIELDS[k], v]));
 
-router.get('/:id/fees', requireAuth(...READER), async (req, res, next) => {
+router.get('/:id/fees', requireAuth(), async (req, res, next) => {
   try {
     const rows = await withTenantRead(req.tenant.schema_name, async (c) => (await c.query(
       'SELECT * FROM loan_product_fees WHERE product_id = $1 ORDER BY fee_type, code', [req.params.id])).rows);
@@ -655,7 +653,7 @@ router.get('/:id/fees', requireAuth(...READER), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/:id/fees', requireAuth(...ADMIN), async (req, res, next) => {
+router.post('/:id/fees', requireAuth(), async (req, res, next) => {
   try {
     const cols = feeCols(req.body);
     if (cols.code) cols.code = String(cols.code).toUpperCase();
@@ -685,7 +683,7 @@ router.post('/:id/fees', requireAuth(...ADMIN), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.patch('/:id/fees/:feeId', requireAuth(...ADMIN), async (req, res, next) => {
+router.patch('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
   try {
     const cols = feeCols(req.body);
     delete cols.code;
@@ -721,7 +719,7 @@ router.patch('/:id/fees/:feeId', requireAuth(...ADMIN), async (req, res, next) =
   } catch (e) { next(e); }
 });
 
-router.delete('/:id/fees/:feeId', requireAuth(...ADMIN), async (req, res, next) => {
+router.delete('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
   try {
     const out = await withTenant(req.tenant.schema_name, async (c) => {
       const { rows: [f] } = await c.query(
@@ -743,7 +741,7 @@ router.delete('/:id/fees/:feeId', requireAuth(...ADMIN), async (req, res, next) 
 
 // --- schedule preview -----------------------------------------------------
 
-router.post('/:id/schedule-preview', requireAuth(...READER), async (req, res, next) => {
+router.post('/:id/schedule-preview', requireAuth(), async (req, res, next) => {
   try {
     const out = await withTenantRead(req.tenant.schema_name, (c) =>
       require('../domain/loans').previewSchedule(c, { ...req.body, productId: req.params.id }));

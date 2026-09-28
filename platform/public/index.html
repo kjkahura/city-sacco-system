@@ -27,8 +27,9 @@
       <label>Code<input name="enrolCode" inputmode="numeric" placeholder="123456"></label>
     </div>
     <div id="pwchange" hidden>
-      <p class="hint">This is a temporary password. Choose your own (at least 12 characters) to continue.</p>
-      <label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="12"></label>
+      <p class="hint">Choose your own password to continue.</p>
+      <p class="hint" id="pw-rules">At least 12 characters, with a letter and a digit; not your username or a recent password.</p>
+      <label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="8"></label>
     </div>
     <button type="submit">Sign in</button>
     <p id="login-error" class="error" role="alert"></p>
@@ -55,10 +56,11 @@
       <button data-view="accounting">Accounting</button>
       <button data-view="organization">Organization</button>
       <button data-view="data">Data</button>
-      <button data-view="users">Users</button>
+      <button data-view="users" data-perm="VIEW_USER_DETAILS VIEW_ROLE">Users</button>
+      <button data-view="access" data-perm="MANAGE_ACCESS_PREFERENCES VIEW_API_CONSUMERS_AND_KEYS MANAGE_AUDIT_TRAIL">Access</button>
     </nav>
     <span class="spacer"></span>
-    <span id="whoami" class="hint"></span>
+    <button id="whoami" class="link" title="Your profile"></button>
     <button id="logout" class="link">Sign out</button>
   </header>
   <nav id="menu-nav" class="menu-nav" aria-label="Menu items"></nav>

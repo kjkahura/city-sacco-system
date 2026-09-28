@@ -148,7 +148,8 @@ async function record(c, row) {
         channel_id, amount, value_date, entry_id, allocation, narration, created_by, branch_id)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9::date, current_date),$10,$11,$12,$13,
              COALESCE($14::uuid, (SELECT branch_id FROM loan_accounts WHERE id = $5::uuid),
-                      (SELECT branch_id FROM savings_accounts WHERE id = $4::uuid)))
+                      (SELECT branch_id FROM savings_accounts WHERE id = $4::uuid),
+                      (SELECT branch_id FROM members WHERE id = $3::uuid)))
      RETURNING *`,
     [row.reference, row.kind, row.memberId || null, row.savingsAccountId || null,
      row.loanAccountId || null, row.shareAccountId || null, row.channelId || null,

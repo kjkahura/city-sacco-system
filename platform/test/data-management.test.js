@@ -185,7 +185,9 @@ const hooks = [];
 
     // ---------------------------------------------------------------------
     section('users (Users and Access Control)');
-    const tellerNew = await call('POST', '/api/users', { email: 'Teller.One@datamgmt.local', fullName: 'Teller One', role: 'TELLER' });
+    // A teller belongs to a branch (the reference platform).
+    const br = await call('POST', '/api/branches', { code: 'MAIN', name: 'Main branch' });
+    const tellerNew = await call('POST', '/api/users', { email: 'Teller.One@datamgmt.local', fullName: 'Teller One', role: 'TELLER', branchId: 'MAIN' });
     check('an administrator creates a user and is shown a temporary password once',
       tellerNew.status === 201 && /^[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$/.test(tellerNew.body.temporaryPassword) && tellerNew.body.must_change_password === true,
       tellerNew.text);
@@ -197,12 +199,11 @@ const hooks = [];
     const first = await call('POST', '/api/auth/login', { email: 'teller.one@datamgmt.local', password: temp }, { auth: null });
     check('the temporary password signs in only to change it', first.status === 403 && first.reason === 'PASSWORD_CHANGE_REQUIRED' && !!first.body.passwordChangeToken);
     check('that token opens nothing else', (await call('GET', '/api/members', null, { auth: first.body.passwordChangeToken })).status === 403);
-    const changed = await call('POST', '/api/auth/password', { currentPassword: temp, newPassword: 'teller one chose this' }, { auth: first.body.passwordChangeToken });
+    const changed = await call('POST', '/api/auth/password', { currentPassword: temp, newPassword: 'Chosen by the new one 2026' }, { auth: first.body.passwordChangeToken });
     check('it changes the password', changed.status === 200 && changed.body.changed === true, changed.text);
-    const tl = await call('POST', '/api/auth/login', { email: 'teller.one@datamgmt.local', password: 'teller one chose this' }, { auth: null });
+    const tl = await call('POST', '/api/auth/login', { email: 'teller.one@datamgmt.local', password: 'Chosen by the new one 2026' }, { auth: null });
     check('and then the user signs in', tl.status === 200 && !!tl.body.accessToken, tl.text);
     const tellerToken = tl.body.accessToken;
-    const br = await call('POST', '/api/branches', { code: 'MAIN', name: 'Main branch' });
     const assigned = await call('PATCH', `/api/users/${tellerNew.body.id}`, { branchId: 'MAIN', approvalLimit: 50000 });
     check('a user is given a branch and a limit', assigned.status === 200 && assigned.body.branch_id === br.body.id && assigned.body.approval_limit === 50000, assigned.text);
     check('an unknown branch is refused', (await call('PATCH', `/api/users/${tellerNew.body.id}`, { branchId: 'NOPE' })).status === 404);
@@ -220,7 +221,7 @@ const hooks = [];
     await call('PATCH', `/api/users/${tellerNew.body.id}`, { status: 'ACTIVE' });
     const reset = await call('POST', `/api/users/${tellerNew.body.id}/reset-password`);
     check('a password reset gives a new temporary password', reset.status === 200 && !!reset.body.temporaryPassword);
-    check('the old password no longer works', (await call('POST', '/api/auth/login', { email: 'teller.one@datamgmt.local', password: 'teller one chose this' }, { auth: null })).status === 401);
+    check('the old password no longer works', (await call('POST', '/api/auth/login', { email: 'teller.one@datamgmt.local', password: 'Chosen by the new one 2026' }, { auth: null })).status === 401);
     const again = await call('POST', '/api/auth/login', { email: 'teller.one@datamgmt.local', password: reset.body.temporaryPassword }, { auth: null });
     check('the new one must be changed', again.reason === 'PASSWORD_CHANGE_REQUIRED');
     await pool.query("UPDATE platform.users SET mfa_enabled = true, mfa_secret = 'x' WHERE id = $1", [tellerNew.body.id]);
@@ -488,13 +489,13 @@ const hooks = [];
       new Date((await q1("SELECT updated_at FROM loan_installments WHERE loan_id = $1 AND number = 1", [la.id])).updated_at) > new Date(touched.updated_at));
 
     section('Singer tap (Stitch)');
-    const aud = await call('POST', '/api/users', { email: 'warehouse@datamgmt.local', role: 'AUDITOR', password: 'first temporary pass' });
-    const al = await call('POST', '/api/auth/login', { email: 'warehouse@datamgmt.local', password: 'first temporary pass' }, { auth: null });
-    await call('POST', '/api/auth/password', { currentPassword: 'first temporary pass', newPassword: 'warehouse extract user' }, { auth: al.body.passwordChangeToken });
+    const aud = await call('POST', '/api/users', { email: 'warehouse@datamgmt.local', role: 'AUDITOR', password: 'First temporary 2026' });
+    const al = await call('POST', '/api/auth/login', { email: 'warehouse@datamgmt.local', password: 'First temporary 2026' }, { auth: null });
+    await call('POST', '/api/auth/password', { currentPassword: 'First temporary 2026', newPassword: 'Extract user pass 2026' }, { auth: al.body.passwordChangeToken });
     check('a read-only AUDITOR user for the tap', aud.status === 201);
     const fs = require('fs');
     const dir = fs.mkdtempSync(require('path').join(require('os').tmpdir(), 'tap-'));
-    fs.writeFileSync(`${dir}/config.json`, JSON.stringify({ api_url: `http://localhost:${PORT}`, tenant: SLUG, email: 'warehouse@datamgmt.local', password: 'warehouse extract user', page_size: 3 }));
+    fs.writeFileSync(`${dir}/config.json`, JSON.stringify({ api_url: `http://localhost:${PORT}`, tenant: SLUG, email: 'warehouse@datamgmt.local', password: 'Extract user pass 2026', page_size: 3 }));
     const cap = () => { const o = { buf: '', write(s) { o.buf += s; return true; } }; return o; };
     const out1 = cap();
     await tap(['--config', `${dir}/config.json`, '--discover'], { stdout: out1, stderr: cap() });

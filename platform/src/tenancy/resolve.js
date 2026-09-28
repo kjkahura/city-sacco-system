@@ -5,6 +5,9 @@ const { pool } = require('../db/pool');
 const { TenantError } = require('../db/tenantContext');
 const PERMS = require('../lib/permissions');
 const requestContext = require('../lib/requestContext');
+const AP = require('../lib/accessPreferences');
+const RP = require('../lib/routePermissions');
+const apiKeys = require('../auth/apiKeys');
 
 const SECRET = process.env.JWT_SECRET;
 if (!SECRET && process.env.NODE_ENV === 'production') {
@@ -107,36 +110,50 @@ const userCache = new Map();
 const USER_TTL_MS = 10_000;
 const SCHEMA_RE = /^tenant_[a-z][a-z0-9_]{2,40}$/;
 
+async function roleRow(schema, code) {
+  if (!schema || !SCHEMA_RE.test(schema) || !code) return null;
+  const { rows } = await pool.query(
+    `SELECT code, name, base_role, user_type, permissions, console_access, api_access FROM "${schema}".roles WHERE code = $1`,
+    [code]).catch(() => ({ rows: [] }));
+  return rows[0] || null;
+}
+
 /**
- * The user's status and access: their role (a tenant role code, or the
- * built-in role), the role's permissions (the tenant's edits, or the
- * platform's defaults) and any given to the user directly. A tenant
- * administrator holds every permission.
+ * The user's status and access in one tenant: their role (a tenant role
+ * code, or the built-in role), the role's permissions (the tenant's edits,
+ * or the platform's defaults) and any given to the user directly, their user
+ * type and their branch access. A tenant administrator holds every
+ * permission. A user who is not the tenant's is null: a token for another
+ * tenant, or one with no tenant, is not a way in.
  */
-async function userState(id, schema) {
+async function userState(id, schema, tenantId = null) {
   const key = `${schema || ''}:${id}`;
   const hit = userCache.get(key);
   if (hit && hit.expires > Date.now()) return hit.state;
   let state = null;
   if (/^[0-9a-f-]{36}$/i.test(String(id))) {
     const { rows: [u] } = await pool.query(
-      'SELECT status, role, role_code, permissions, branch_id FROM platform.users WHERE id = $1', [id]);
-    if (u) {
-      let row = null;
-      if (schema && SCHEMA_RE.test(schema)) {
-        const { rows } = await pool.query(
-          `SELECT code, name, base_role, user_type, permissions FROM "${schema}".roles WHERE code = $1`,
-          [u.role_code || u.role]).catch(() => ({ rows: [] }));
-        row = rows[0] || null;
-      }
+      `SELECT u.tenant_id, u.status, u.role, u.role_code, u.permissions, u.branch_id, u.user_type, u.all_branches, u.branch_access,
+              u.other_officers_clients, u.locked_at, u.locked_until, u.email
+       FROM platform.users u WHERE u.id = $1`, [id]);
+    const tid = tenantId || (schema ? (await pool.query('SELECT id FROM platform.tenants WHERE schema_name = $1', [schema])).rows[0]?.id : null);
+    if (u && (!schema || (tid && u.tenant_id === tid))) {
+      const row = await roleRow(schema, u.role_code || u.role);
       const base = row ? row.permissions : (PERMS.DEFAULTS[u.role] || []);
-      const held = u.role === 'TENANT_ADMIN' ? PERMS.CATALOG.map((p) => p.code) : [...new Set([...base, ...(u.permissions || [])])];
+      const admin = u.role === 'TENANT_ADMIN';
+      const held = admin ? PERMS.CATALOG.map((p) => p.code) : [...new Set([...base, ...(u.permissions || [])])];
+      const userType = admin ? 'ADMINISTRATOR' : (u.user_type || (row ? row.user_type : null) || PERMS.USER_TYPES[u.role] || null);
+      const branches = admin || u.all_branches ? null : [...new Set([u.branch_id, ...(u.branch_access || [])].filter(Boolean))];
       state = {
         status: u.status,
+        locked: Boolean(u.locked_at) && (!u.locked_until || new Date(u.locked_until) > new Date()),
         role: u.role,
         roleCode: u.role_code || u.role,
-        userType: row ? row.user_type : (PERMS.USER_TYPES[u.role] || null),
+        userType,
         branchId: u.branch_id,
+        branches,
+        officer: userType === 'CREDIT_OFFICER' && !u.other_officers_clients ? String(u.email).toLowerCase() : null,
+        consoleAccess: row ? row.console_access !== false : true,
         permissions: new Set(held),
       };
     }
@@ -144,56 +161,109 @@ async function userState(id, schema) {
   userCache.set(key, { state, expires: Date.now() + USER_TTL_MS });
   return state;
 }
+
 /** Forget a user's cached access (every tenant); with no id, forget everyone's. */
 function forgetUser(id = null) {
   if (id === null) { userCache.clear(); return; }
   for (const k of userCache.keys()) if (k.endsWith(`:${id}`)) userCache.delete(k);
 }
 
-/** Require a signed-in user, optionally with one of the given roles. */
+// Session activity, for the inactivity timeout: the last request of each
+// signed-in session, written at most once a minute per session.
+const seen = new Map();
+function touchSession(sid) {
+  if (!sid) return;
+  const last = seen.get(sid) || 0;
+  if (Date.now() - last < 60_000) return;
+  seen.set(sid, Date.now());
+  if (seen.size > 50_000) seen.clear();
+  pool.query('UPDATE platform.refresh_tokens SET last_seen_at = now() WHERE family_id = $1 AND revoked_at IS NULL AND used_at IS NULL', [sid])
+    .catch(() => {});
+}
+
+/** The API key on a request (the reference platform's apiKey header), as the principal it stands for. */
+async function apiKeyPrincipal(req) {
+  const key = req.get('apikey');
+  if (!key || !req.tenant) return null;
+  const out = await apiKeys.authenticate(req.tenant, key, req.ip);
+  const row = out.consumer.role_code ? await roleRow(req.tenant.schema_name, out.consumer.role_code) : null;
+  if (out.consumer.role_code && (!row || row.api_access === false)) {
+    throw new TenantError(`API_ACCESS_NOT_ALLOWED: role ${out.consumer.role_code} has no API access`, 403);
+  }
+  const admin = out.consumer.administrator || (row && row.base_role === 'TENANT_ADMIN');
+  const held = admin ? PERMS.CATALOG.map((p) => p.code) : [...new Set([...(row ? row.permissions : []), ...(out.consumer.permissions || [])])];
+  return {
+    sub: out.consumer.id, email: `api:${out.consumer.name}`, name: out.consumer.name, tid: req.tenant.slug,
+    role: admin ? 'TENANT_ADMIN' : (row ? row.base_role : 'API_CONSUMER'), roleCode: row ? row.code : null,
+    userType: admin ? 'ADMINISTRATOR' : null, permissions: new Set(held), branches: null, officer: null,
+    apiConsumer: true, consumerId: out.consumer.id, keyId: out.keyId,
+  };
+}
+
+/**
+ * Require a signed-in user. `roles` is honoured only for PLATFORM_ADMIN (the
+ * control plane) and MEMBER (the portal): what a tenant's staff may do is
+ * decided by permissions (requirePermission, and the route table in
+ * lib/routePermissions), not by the built-in role.
+ */
 function requireAuth(...roles) {
   return async (req, res, next) => {
+    try {
+      if (!req.auth && req.get('apikey') && !roles.includes('PLATFORM_ADMIN') && !roles.includes('MEMBER')) {
+        req.auth = await apiKeyPrincipal(req);
+      }
+    } catch (e) { return next(e); }
     if (!req.auth) return next(new TenantError('authentication required', 401));
-    // A scoped token (currently only mfa_enrolment) is not a session. It
-    // exists so a user who must enrol can reach the enrolment endpoints and
-    // nothing else.
+    // A scoped token (mfa_enrolment, password_change, reauth) is not a session.
     if (req.auth.scope) {
       return next(new TenantError(`token is scoped to ${req.auth.scope} and cannot be used here`, 403));
     }
-    if (req.tenant && req.auth.tid && req.auth.tid !== req.tenant.slug) {
+    if (roles.includes('PLATFORM_ADMIN')) {
+      if (req.auth.role !== 'PLATFORM_ADMIN') return next(new TenantError(`role ${req.auth.role} is not permitted here`, 403));
+      return next();
+    }
+    if (req.tenant && req.auth.tid !== req.tenant.slug) {
       return next(new TenantError('token tenant mismatch', 403));
     }
-    // A member token never satisfies a staff route. Many staff routes call
-    // requireAuth() with no role list, meaning "any signed-in staff"; if
-    // MEMBER slipped through that, a member could list every other member.
-    // Members reach the portal through requireMember and nothing else.
+    // A member token never satisfies a staff route. Members reach the portal
+    // through requireMember and nothing else.
     if (req.auth.role === 'MEMBER' && !roles.includes('MEMBER')) {
       return next(new TenantError('member tokens cannot use staff endpoints', 403));
     }
-    if (req.auth.role === 'MEMBER') {
-      if (roles.length && !roles.includes('MEMBER')) return next(new TenantError('role MEMBER is not permitted here', 403));
-      return next();
-    }
+    if (req.auth.role === 'MEMBER') return next();
+    if (!req.tenant) return next(new TenantError('tenant not specified', 400));
     let state;
     try {
-      state = await userState(req.auth.sub, req.tenant?.schema_name);
+      state = req.auth.apiConsumer ? req.auth : await userState(req.auth.sub, req.tenant.schema_name, req.tenant.id);
     } catch (e) { return next(e); }
     if (state === null) return next(new TenantError('USER_NOT_FOUND', 401));
-    if (state.status !== 'ACTIVE') return next(new TenantError(`USER_${state.status}`, 401));
-    // The role as it stands, not as the token was issued with: a role an
-    // administrator changed takes effect within seconds, like a suspension.
-    req.auth.role = state.role;
-    if (roles.length && !roles.includes(req.auth.role)) {
-      return next(new TenantError(`role ${req.auth.role} is not permitted here`, 403));
+    if (!req.auth.apiConsumer) {
+      if (state.status !== 'ACTIVE') return next(new TenantError(`USER_${state.status}`, 401));
+      if (state.locked) return next(new TenantError('USER_LOCKED', 401));
+      if (!state.consoleAccess) return next(new TenantError('ROLE_HAS_NO_BACK_OFFICE_ACCESS', 403));
+      // The role as it stands, not as the token was issued with.
+      req.auth.role = state.role;
+      req.auth.permissions = state.permissions;
+      req.auth.roleCode = state.roleCode;
+      req.auth.userType = state.userType;
+      req.auth.branchId = state.branchId;
+      req.auth.branches = state.branches;
+      req.auth.officer = state.officer;
     }
-    req.auth.permissions = state.permissions;
-    req.auth.roleCode = state.roleCode;
-    req.auth.userType = state.userType;
-    req.auth.branchId = state.branchId;
+    try {
+      const prefs = await AP.of(req.tenant.id);
+      if (!AP.allowlistPasses(prefs, req.ip, { admin: req.auth.role === 'TENANT_ADMIN', api: Boolean(req.auth.apiConsumer) })) {
+        return next(new TenantError('IP_ADDRESS_NOT_ALLOWED', 403));
+      }
+    } catch (e) { return next(e); }
+    touchSession(req.auth.sid);
     // The rest of the request knows who it serves (lib/requestContext).
+    const limited = req.auth.branches ? (req.auth.branches.length ? req.auth.branches.join(',') : 'none') : '';
     return requestContext.run({
       userId: req.auth.sub, email: req.auth.email, role: req.auth.role,
       tillRequired: !PERMS.can(req.auth, 'POST_TRANSACTIONS_WITHOUT_OPENED_TILL'),
+      tillAdd: PERMS.can(req.auth, 'ADD_CASH'), tillRemove: PERMS.can(req.auth, 'REMOVE_CASH'),
+      branches: limited, officer: req.auth.officer || '',
     }, () => next());
   };
 }
@@ -211,6 +281,52 @@ function requirePermission(...codes) {
     }
     return next();
   });
+}
+
+/**
+ * The route table (lib/routePermissions) applied to every tenant API request
+ * before its route: the permission it needs, administrators only, any staff,
+ * or none (sign-in, the portal). A route the table does not list is refused
+ * to all but administrators. A user limited to some branches may not run
+ * what works on the whole organization. With re-authentication on, a
+ * critical action needs a fresh password (POST /auth/reauth).
+ */
+function permissionGate() {
+  const auth = requireAuth();
+  return (req, res, next) => {
+    const t = RP.ruleFor(req.method, req.path);
+    if (t && t.rule === RP.NONE) return next();
+    return auth(req, res, async (e) => {
+      if (e) return next(e);
+      try {
+        const rule = t ? t.rule : RP.ADMIN;
+        const u = req.auth;
+        if (rule === RP.ADMIN) {
+          if (u.role !== 'TENANT_ADMIN') throw new TenantError(t ? 'ADMINISTRATOR_ONLY' : `ADMINISTRATOR_ONLY: ${req.method} ${req.path} has no permission rule`, 403);
+        } else if (rule !== RP.OPEN) {
+          const need = typeof rule === 'string' ? [rule] : Array.isArray(rule) ? rule : rule.all;
+          const ok = rule.all ? need.every((c) => PERMS.can(u, c)) : need.some((c) => PERMS.can(u, c));
+          if (!ok) throw new TenantError(`PERMISSION_REQUIRED: ${need.join(rule.all ? ' and ' : ' or ')}`, 403);
+          if (u.branches && need.some((c) => RP.ORG_WIDE.has(c))) throw new TenantError('ALL_BRANCH_ACCESS_REQUIRED: this works on the whole organization', 403);
+        }
+        if (!u.apiConsumer && RP.isCritical(req.method, req.path)) {
+          const prefs = await AP.of(req.tenant.id);
+          if (prefs.reauthenticate) {
+            const tok = req.get('x-reauth-token');
+            let ok = false;
+            if (tok) {
+              try {
+                const p = jwt.verify(tok, signingKey, { algorithms: ['HS256'] });
+                ok = p.scope === 'reauth' && p.sub === u.sub && p.tid === req.tenant.slug;
+              } catch { ok = false; }
+            }
+            if (!ok) throw new TenantError('REAUTHENTICATION_REQUIRED: enter your password again (POST /api/auth/reauth)', 403);
+          }
+        }
+        return next();
+      } catch (err) { return next(err); }
+    });
+  };
 }
 
 /** Require a signed-in member. Populates req.member = { id, memberNo }. */
@@ -232,4 +348,4 @@ function requireMember() {
 const signToken = (payload, expiresIn = '12h') =>
   jwt.sign(payload, signingKey, { algorithm: 'HS256', expiresIn });
 
-module.exports = { userState, resolveTenant, requireAuth, requirePermission, requireMember, signToken, tenantFromRequest, lookupTenant, invalidate, forgetUser, signingKey };
+module.exports = { userState, resolveTenant, requireAuth, requirePermission, permissionGate, requireMember, signToken, tenantFromRequest, lookupTenant, invalidate, forgetUser, signingKey };

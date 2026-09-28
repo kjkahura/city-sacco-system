@@ -129,7 +129,8 @@ function templateWorkbook() {
     await migrateAllTenants({});
     token = (await call('POST', '/api/auth/login', { email: 'admin@dataimp.local', password: PASSWORD }, { auth: null })).body.accessToken;
     check('admin signed in', !!token);
-    const officer = await call('POST', '/api/users', { email: 'officer@dataimp.local', fullName: 'Loan Officer', role: 'TELLER', password: 'officer first pass' });
+    const obr = await call('POST', '/api/branches', { code: 'OFC', name: 'Officers' });
+    const officer = await call('POST', '/api/users', { email: 'officer@dataimp.local', fullName: 'Loan Officer', role: 'TELLER', password: 'Imports pass 2026', userType: 'CREDIT_OFFICER', branchId: obr.body.id });
     check('a credit officer to assign members to', officer.status === 201, officer.text);
     const base = { glPortfolio: '100-100', glInterestInc: '400-100', glFeeInc: '400-200', glInterestRec: '100-300', glFeeRec: '100-310',
       glPenaltyInc: '400-200', glPenaltyRec: '100-320', accountingMethod: 'ACCRUAL', interestAccruedAccounting: 'DAILY', enforceDepositMultiplier: false, maxTerm: 36, monthlyRate: 1 };

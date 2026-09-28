@@ -3,7 +3,8 @@
 const path = require('path');
 const express = require('express');
 const { pool } = require('./db/pool');
-const { resolveTenant, requireAuth } = require('./tenancy/resolve');
+const { resolveTenant, requireAuth, permissionGate } = require('./tenancy/resolve');
+const auditTrail = require('./ops/auditTrail');
 const { apiError } = require('./lib/http');
 const { rateLimit, tenantConcurrency, stats, store } = require('./lib/limits');
 const provision = require('./tenancy/provision');
@@ -112,8 +113,11 @@ const tenantApi = express.Router();
 // The reference platform's null handling, on request (./lib/apiStandards).
 tenantApi.use(nullHandling());
 tenantApi.use(resolveTenant({ required: true }));
+tenantApi.use(auditTrail.recorder());
 tenantApi.use(rateLimit());
 tenantApi.use(tenantConcurrency());
+// What each route needs (lib/routePermissions), before any route runs.
+tenantApi.use(permissionGate());
 
 tenantApi.use('/auth', require('./routes/auth'));
 
@@ -163,6 +167,11 @@ tenantApi.use('/currencies', org.currencies);
 tenantApi.use('/custom-fields', org.customFields);
 tenantApi.use('/documents', org.documents);
 tenantApi.use('/users', require('./routes/users'));
+const access = require('./routes/access');
+tenantApi.use('/access-preferences', access.prefs);
+tenantApi.use('/consumers', access.consumers);
+tenantApi.use('/audit-trail', access.trail);
+tenantApi.use('/profile', access.profile);
 
 const data = require('./routes/dataManagement');
 tenantApi.use('/data-dictionary', data.dictionary);
@@ -198,7 +207,9 @@ app.use((err, _req, res, _next) => {
   // The ledger's own locks (closed year, accounting closure, savings floor)
   // raise from triggers; they are refusals, not server faults.
   const dbRefusal = err.code === '23001' || err.code === '23514';
-  const status = err.status || (dbRefusal ? 409 : 500);
+  // Row security (branch access) and the till's permission checks.
+  if (err.code === '42501' && /row-level security/.test(err.message || '')) err.message = 'OUTSIDE_YOUR_BRANCH_ACCESS';
+  const status = err.status || (err.code === '42501' ? 403 : err.code === '22023' ? 400 : dbRefusal ? 409 : 500);
   if (status >= 500) console.error('[error]', err);
   apiError(res, status, status, err.message || 'INTERNAL_ERROR');
 });

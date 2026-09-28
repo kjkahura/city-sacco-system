@@ -97,7 +97,7 @@ async function disable(userId, token) {
 async function isRequired(user, tenant) {
   if (user.mfa_enabled) return true;
   const roles = tenant?.mfa_required_roles || [];
-  return roles.includes(user.role);
+  return roles.includes(user.role) || (Boolean(user.role_code) && roles.includes(user.role_code));
 }
 
 async function issueChallenge(user, { ip = null } = {}) {

@@ -23,7 +23,7 @@ const read = (perms, fn) => [requirePermission(...perms), async (req, res, next)
 const write = (perm, fn, status = 200) => [requirePermission(perm), async (req, res, next) => {
   try { res.status(status).json(await withTenant(req.tenant.schema_name, (c) => fn(c, req))); } catch (e) { next(e); }
 }];
-const SEE = ['OPEN_TILL', 'CLOSE_TILL', 'ADD_CASH', 'REMOVE_CASH'];
+const SEE = ['OPEN_TILL', 'CLOSE_TILL'];
 const by = (req) => ({ createdBy: req.auth.email });
 
 // The Tellering widget: the teller's own open till, with its log.
@@ -53,10 +53,12 @@ router.get('/:id', ...read([...SEE, 'VIEW_SAVINGS_ACCOUNT_DETAILS'], async (c, r
   return t;
 }));
 router.delete('/:id', ...write('OPEN_TILL', (c, req) => TL.undoOpen(c, req.params.id, by(req))));
-router.post('/:id/add-cash', ...write('ADD_CASH', (c, req) => TL.moveCash(c, req.params.id, req.body || {}, { ...by(req), direction: 'IN' })));
-router.post('/:id/remove-cash', ...write('REMOVE_CASH', (c, req) => TL.moveCash(c, req.params.id, req.body || {}, { ...by(req), direction: 'OUT' })));
+// A supervisor moves cash in and out of a till (OPEN_TILL); ADD_CASH and
+// REMOVE_CASH are the teller's permissions to post through it (the reference platform).
+router.post('/:id/add-cash', ...write('OPEN_TILL', (c, req) => TL.moveCash(c, req.params.id, req.body || {}, { ...by(req), direction: 'IN' })));
+router.post('/:id/remove-cash', ...write('OPEN_TILL', (c, req) => TL.moveCash(c, req.params.id, req.body || {}, { ...by(req), direction: 'OUT' })));
 router.post('/:id/close', ...write('CLOSE_TILL', (c, req) => TL.close(c, req.params.id, req.body || {}, {
-  ...by(req), user: { email: req.auth.email, canCloseOthers: PERMS.can(req.auth, 'OPEN_TILL') },
+  ...by(req), user: { email: req.auth.email, canCloseOthers: PERMS.can(req.auth, 'CLOSE_TILL') },
 })));
 router.post('/:id/undo-close', ...write('CLOSE_TILL', (c, req) => TL.undoClose(c, req.params.id, by(req))));
 router.post('/:id/reopen', ...write('OPEN_TILL', (c, req) => TL.reopen(c, req.params.id, by(req)), 201));

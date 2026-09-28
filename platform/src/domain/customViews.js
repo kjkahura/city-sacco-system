@@ -299,7 +299,7 @@ async function fieldsFor(c, e, user) {
      WHERE d.entity = $1 AND s.set_type IN ('STANDARD', 'GROUPED') AND d.is_active ORDER BY s.sort_order, d.sort_order, d.id`, [e.cf.entity]);
   for (const d of rows) {
     if (!IDENT.test(d.id) || !IDENT.test(d.set_id)) continue;
-    if (user && d.view_roles && !d.view_roles.includes(user.role)) continue;
+    if (user && d.view_roles && !ROLES.names(d.view_roles, user)) continue;
     const type = CF_TYPES[d.field_type] || 'TEXT';
     const values = type === 'SELECTION' && Array.isArray(d.options) ? d.options.map((o) => (typeof o === 'object' ? o.value ?? o.id ?? o.name : o)) : undefined;
     const key = `cf:${d.set_id}.${d.id}`;

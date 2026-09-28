@@ -16,8 +16,6 @@ const AC = require('../domain/accountingChanges');
  */
 
 const router = express.Router();
-const READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR', 'TELLER'];
-const ADMIN = ['TENANT_ADMIN', 'MANAGER'];
 
 const FIELDS = {
   name: 'name', description: 'description', isActive: 'is_active',
@@ -126,7 +124,7 @@ async function withFees(c, p) {
   return { ...p, fees: rows };
 }
 
-router.get('/', requireAuth(...READER), async (req, res, next) => {
+router.get('/', requireAuth(), async (req, res, next) => {
   try {
     const rows = await withTenantRead(req.tenant.schema_name, async (c) => (await c.query(
       `SELECT p.*, (SELECT count(*)::int FROM savings_accounts a WHERE a.product_id = p.id) AS accounts
@@ -137,14 +135,14 @@ router.get('/', requireAuth(...READER), async (req, res, next) => {
 
 // The mappings a product would need for a method and features, before it is
 // saved: what the console shows as the form changes.
-router.post('/accounting-rules', requireAuth(...READER), async (req, res, next) => {
+router.post('/accounting-rules', requireAuth(), async (req, res, next) => {
   try {
     const p = { accounting_method: 'CASH', interest_accrued_accounting: 'NONE', ...toColumns(req.body) };
     res.json(PA.resources('DEPOSIT', p).map((r) => ({ resource: r.resource, column: r.column, types: r.types, used: r.used, glCode: r.glCode })));
   } catch (e) { next(e); }
 });
 
-router.get('/:id', requireAuth(...READER), async (req, res, next) => {
+router.get('/:id', requireAuth(), async (req, res, next) => {
   try {
     const row = await withTenantRead(req.tenant.schema_name, async (c) => {
       const p = (await c.query(
@@ -179,7 +177,7 @@ async function resolveExtras(c, cols, body, { user, before = null } = {}) {
   }
 }
 
-router.post('/', requireAuth(...ADMIN), async (req, res, next) => {
+router.post('/', requireAuth(), async (req, res, next) => {
   try {
     const id = String(req.body?.id || '').trim().toUpperCase();
     if (!/^[A-Z0-9_]{2,16}$/.test(id)) return badRequest(res, 'PRODUCT_ID_MUST_BE_2_TO_16_UPPERCASE_ALPHANUMERIC');
@@ -204,7 +202,7 @@ router.post('/', requireAuth(...ADMIN), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
+router.patch('/:id', requireAuth(), async (req, res, next) => {
   try {
     const cols = toColumns(req.body);
     if (!Object.keys(cols).length && req.body?.customFields === undefined) return badRequest(res, 'NO_UPDATABLE_FIELDS');
@@ -232,7 +230,7 @@ router.patch('/:id', requireAuth(...ADMIN), async (req, res, next) => {
 
 // --- accounting method change and history ----------------------------------
 
-router.post('/:id/accounting-method', requireAuth(...ADMIN), async (req, res, next) => {
+router.post('/:id/accounting-method', requireAuth(), async (req, res, next) => {
   try {
     const b = req.body || {};
     const mappings = toColumns(b.mappings || {});
@@ -244,13 +242,13 @@ router.post('/:id/accounting-method', requireAuth(...ADMIN), async (req, res, ne
   } catch (e) { next(e); }
 });
 
-router.get('/:id/accounting-changes', requireAuth(...READER), async (req, res, next) => {
+router.get('/:id/accounting-changes', requireAuth(), async (req, res, next) => {
   try {
     res.json(await withTenantRead(req.tenant.schema_name, (c) => AC.history(c, 'DEPOSIT', req.params.id)));
   } catch (e) { next(e); }
 });
 
-router.get('/:id/gl-mapping-history', requireAuth(...READER), async (req, res, next) => {
+router.get('/:id/gl-mapping-history', requireAuth(), async (req, res, next) => {
   try {
     res.json(await withTenantRead(req.tenant.schema_name, (c) => PA.mappingHistory(c, 'DEPOSIT', req.params.id)));
   } catch (e) { next(e); }
@@ -273,7 +271,7 @@ async function validateFee(c, cols, before) {
   return problems;
 }
 
-router.post('/:id/fees', requireAuth(...ADMIN), async (req, res, next) => {
+router.post('/:id/fees', requireAuth(), async (req, res, next) => {
   try {
     const cols = feeCols(req.body);
     const out = await withTenant(req.tenant.schema_name, async (c) => {
@@ -298,7 +296,7 @@ router.post('/:id/fees', requireAuth(...ADMIN), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.patch('/:id/fees/:feeId', requireAuth(...ADMIN), async (req, res, next) => {
+router.patch('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
   try {
     const cols = feeCols(req.body);
     delete cols.code;

@@ -29,9 +29,9 @@ const write = (perm, fn, status = 200) => [requirePermission(perm), async (req, 
 router.get('/permissions', ...read('VIEW_ROLE', () => ROLE.catalog()));
 router.get('/', ...read('VIEW_ROLE', (c) => ROLE.list(c)));
 router.get('/:code', ...read('VIEW_ROLE', (c, req) => ROLE.get(c, req.params.code)));
-router.post('/', ...write('CREATE_ROLE', (c, req) => ROLE.create(c, req.body, { createdBy: req.auth.email }), 201));
-router.patch('/:code', ...write('EDIT_ROLE', (c, req) => ROLE.update(c, req.params.code, req.body, { createdBy: req.auth.email })));
-router.put('/:code', ...write('EDIT_ROLE', (c, req) => ROLE.update(c, req.params.code, req.body, { createdBy: req.auth.email })));
-router.delete('/:code', ...write('DELETE_ROLE', (c, req) => ROLE.remove(c, req.params.code, { createdBy: req.auth.email })));
+router.post('/', ...write('CREATE_ROLE', (c, req) => ROLE.create(c, req.body, { createdBy: req.auth.email, actor: req.auth }), 201));
+router.patch('/:code', ...write('EDIT_ROLE', (c, req) => ROLE.update(c, req.params.code, req.body, { createdBy: req.auth.email, actor: req.auth })));
+router.put('/:code', ...write('EDIT_ROLE', (c, req) => ROLE.update(c, req.params.code, req.body, { createdBy: req.auth.email, actor: req.auth })));
+router.delete('/:code', ...write('DELETE_ROLE', (c, req) => ROLE.remove(c, req.params.code, { createdBy: req.auth.email, actor: req.auth })));
 
 module.exports = router;

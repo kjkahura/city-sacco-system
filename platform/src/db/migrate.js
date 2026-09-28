@@ -124,6 +124,12 @@ async function migrateTenant(schemaName, { lockTimeoutMs = 5_000 } = {}) {
         throw new Error(`tenant migration ${m.version} failed on ${schemaName}: ${e.message}`);
       }
     }
+    // The branch-scoped role (row security for branch access) gets this
+    // tenant's tables, new ones included. Idempotent; a database without the
+    // role skips it.
+    await client.query(
+      "SELECT platform.grant_branch_scoped($1) WHERE to_regproc('platform.grant_branch_scoped') IS NOT NULL", [schemaName]
+    ).catch((e) => console.warn(`[migrate] ${schemaName}: branch-scoped grants not made: ${e.message}`));
     // The data dictionary's words, written into the catalog as comments
     // whenever the schema has moved. A failure here is not a failed
     // migration: the schema is right, only its comments are behind.

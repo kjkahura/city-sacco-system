@@ -1913,32 +1913,92 @@ reads the installment's.
 
 ## Staff users
 
-After the reference platform's Users and Access Control. Every user has a base role
-(`TENANT_ADMIN`, `MANAGER`, `ACCOUNTANT`, `TELLER`, `AUDITOR`), may hold one
-of the tenant's own roles, and may have extra permissions of their own. The
-console's Users page covers users and roles.
+After the reference platform's Users and Access Control. Every user has a role (one of the
+five built-in roles, `TENANT_ADMIN`, `MANAGER`, `ACCOUNTANT`, `TELLER`,
+`AUDITOR`, or one of the tenant's own), may have extra permissions of their
+own, an optional user type, a branch and branch access, and transaction
+limits. The console's Users page covers users and roles; its Access page
+covers the access preferences, API consumers and the audit trail.
 
-- `/api/users`: tenant admins create users and change their name, role,
-  branch, status and approval and disbursement limits; managers and
-  auditors may look. `POST /:id/reset-password` and `POST /:id/reset-mfa`.
-  Custom field values on users are set through
-  `/api/custom-fields/values/USER/:id`.
+```
+GET  /api/users              GET /api/users/{id}          POST /api/users
+PATCH /api/users/{id}        POST /api/users/{id}/unlock  GET /api/users/{id}/logins
+POST /api/users/{id}/reset-password                       POST /api/users/{id}/reset-mfa
+GET|PATCH /api/profile       GET /api/auth/logins         POST /api/auth/reauth
+```
+
+- `VIEW_USER_DETAILS` lists and reads users, `CREATE_USER` creates them,
+  `EDIT_USER` changes them (and unlocks them). Only an administrator resets
+  someone else's password, as in the reference platform; `MANAGE_TWO_FACTOR_AUTHENTICATION`
+  resets a second factor. Custom field values on users need `EDIT_USER`.
+- Only an administrator creates or edits an administrator. Someone who is
+  not an administrator may give a user only a role, and extra permissions,
+  that they hold themselves.
+- User types, as in the reference platform: administrator (it goes with the administrator
+  role), teller (a teller role, or the type set on the user) and credit
+  officer. An administrator is never also a teller. A teller and a credit
+  officer belong to a branch (checked when the user is created, and when
+  their type, role or branch changes).
 - A new user, and a user whose password is reset, is given a temporary
   password, shown once. Signing in with it returns 403
   `PASSWORD_CHANGE_REQUIRED` with a token scoped to `POST /auth/password`
-  and nothing else; the user chooses their own password (at least 12
-  characters) and then signs in.
-- Nobody changes their own role or status, and the tenant's last active
-  administrator can be neither demoted nor suspended (changes to one
-  tenant's users are serialised, so two administrators cannot demote each
-  other at once).
+  and nothing else; the user chooses their own password under the tenant's
+  policy and then signs in.
+- Nobody changes their own role, permissions or status, and the tenant's
+  last active administrator can be neither demoted nor suspended (changes to
+  one tenant's users are serialised).
+- A user is ACTIVE, INACTIVE (suspended; the reference platform's deactivated) or LOCKED
+  (too many failed sign-ins). Deactivating a credit officer who still has
+  members needs `confirmCreditOfficerMembers: true` (the reference platform asks the same).
+  Users are not deleted; deactivating keeps the history, which is what
+  The reference platform recommends when deletion is refused.
 - Suspending a user, changing their role, and resetting their password or
-  second factor revoke their refresh tokens. Every staff request also
-  checks the user is still active (cached per user for ten seconds, cleared
-  at once when this process changes the user), so a suspended user's
-  15 minute access token stops working immediately.
+  second factor end their sessions. Every staff request reads the user's
+  state, role and permissions (cached for ten seconds, cleared at once when
+  this process changes them), not the token, so a change takes effect on
+  the next request.
+- A user edits their own name, title, phone and language, and changes their
+  own password (`PATCH /api/profile`, `POST /api/auth/password`), and sees
+  their own sign-in history, failures and why (`GET /api/auth/logins`).
 - Every change is written to `platform.audit_log`; `GET /api/users/audit`
   shows the tenant's.
+
+### Credit officers
+
+A member's or loan's credit officer is a staff user of the tenant of the
+credit officer type, or an administrator (who holds the credit officer's
+rights in the reference platform). The database checks it whenever a credit officer is set or
+changed, on members and loans alike; a loan that takes its member's credit
+officer unchanged is not checked again. A credit officer who is not given
+"other credit officers' clients" sees only their own members and those with
+no credit officer (the reference platform's default for a new credit officer).
+
+### Branch access
+
+A user sees every branch, or their own branch and the ones given to them
+(The reference platform's "Can access clients and accounts data for all branches"). Branch
+access is row security in the database, on members, loan accounts, deposit
+accounts and transactions: a request by a user limited to some branches runs
+under the `sacco_branch_scoped` role, so every list, record, custom view,
+report and export shows only those branches, and a record cannot be put into
+a branch outside them (403 `OUTSIDE_YOUR_BRANCH_ACCESS`). The owner the app
+normally runs as is not subject to it, and background jobs see everything.
+Work on the whole organization (end of day and batch runs, provisioning, the
+year-end close, dividends, imports, backups, extracts, accounting closures)
+needs every branch (403 `ALL_BRANCH_ACCESS_REQUIRED`). A database where the
+app may not create roles has no `sacco_branch_scoped` role; there a
+branch-limited user is refused (503 `BRANCH_ACCESS_UNAVAILABLE`) rather than
+shown every branch. The general ledger is not split by branch access.
+
+### Transaction limits
+
+The reference platform's six: loan approval, loan disbursement, fee application, deposits,
+withdrawals and repayments (`approvalLimit`, `disbursementLimit`,
+`feeLimit`, `depositLimit`, `withdrawalLimit`, `repaymentLimit` on the
+user, or `PATCH /api/loans/controls/users/{id}`). An amount above a limit is
+refused (403 `ABOVE_YOUR_DEPOSIT_LIMIT` and so on). The reference platform offers limits for
+users who are not administrators; here a limit set on an administrator holds
+too. API consumers have none.
 
 ### Roles and permissions
 
@@ -1950,36 +2010,149 @@ PATCH /api/users/{id}  { role: "LOAN_OFFICER", permissions: ["VIEW_ACCOUNTING_RE
 GET  /api/auth/me                     the signed-in user's permissions
 ```
 
-A role is a set of permissions named with the reference platform's codes (`VIEW_REPORTS`,
-`EXPORT_TO_EXCEL`, `OPEN_TILL`, `VIEW_TASK` and the rest). The five built-in
+A role is a set of permissions named with the reference platform's codes. The five built-in
 roles come with default sets and can be edited but not deleted; the
 administrator role always holds every permission. A tenant adds its own
-roles, each with a code, a name, a user type (administrator, teller, credit
-officer) and a base role. Assigning a user a tenant role sets their base role
-to that role's; moving a role to another base role moves its users and ends
-their sessions.
+roles, each with a code, a name, a user type, a base role (its starting
+permissions, and what role lists naming built-in roles match) and the reference platform's
+access rights: back office (signing in with a password) and API (the role
+may be given to an API consumer). A user whose role has no back-office
+access cannot sign in (403 `ROLE_HAS_NO_BACK_OFFICE_ACCESS`).
+
+Every tenant API route needs a permission, set in one table
+(`src/lib/routePermissions.js`): a code, one of several, all of several,
+administrators only (the settings the reference platform keeps to the administrator type:
+general setup, branding, the end of day schedule, lending controls,
+approving imports, data dictionary comments, loan migration, resetting
+passwords), or any signed-in staff user (views, menu items, your own
+profile). A route the table does not list is refused to everyone but an
+administrator. The catalogue holds only permissions that are checked,
+136 of them: the reference platform's codes for what the platform has, and eleven of the platform's
+own for what the reference platform does not have (shares and dividends, provisioning, the
+year-end close, regulatory returns, data extracts, data imports read-only,
+ID templates, approving write-off requests). A few permissions are checked
+where the request does something: `ADD_CASH` and `REMOVE_CASH` when a
+transaction goes through a till, `POST_TRANSACTIONS_ON_LOCKED_LOAN_ACCOUNTS`,
+`PERFORM_REPAYMENTS_WITH_CUSTOM_AMOUNTS_ALLOCATION` and
+`SET_DISBURSEMENT_CONDITIONS`. The lending controls' role lists (who may post
+on a locked loan, pay off, adjust, collect securities, set disbursement
+conditions) still narrow those permissions further, and name tenant roles as
+well as built-in ones; so do custom field rights and transaction channel
+usage rights, which the reference platform also manages by role.
+
+The built-in roles' defaults were set so that each route lets in who the old
+built-in role checks let in, with these changes: an auditor now reads user
+details, staff transaction limits and the user audit log; a manager now runs
+the end of day positions snapshot; and the till permissions take the reference platform's
+meaning (below). Roles a tenant saved before this build were given, by
+migration 032, the permissions their base role now needs, so their users
+keep what they could do.
 
 A user's access is their role's permissions plus any extra permissions set on
-the user. The extras are a deviation from the reference platform, which has permissions on
-roles only; they cover the one person who needs one more report without a
-role of their own. Nobody changes their own role or permissions. Changes take
-effect on the next request, because each request reads the user's role and
-permissions (cached for ten seconds and cleared when this process changes
-them), not the token.
+the user. The extras are a deviation from the reference platform, where a user has either a
+role or permissions of their own, not both. Nobody changes their own role or
+permissions.
 
-The permission model is platform-wide, but not every route uses it yet. The
-catalogue marks each permission as enforced or not. Enforced now: reports and
-indicators (`VIEW_REPORTS`, `VIEW_ACCOUNTING_REPORTS`, `VIEW_INTELLIGENCE`,
-`CREATE_REPORTS`, `EDIT_REPORTS`, `DELETE_REPORTS`, `MANAGE_EOD_PROCESSING`
-for positions, `AUDIT_TRANSACTIONS` for the audit log), exports
-(`EXPORT_TO_EXCEL`), custom views and menu items by the entity's view
-permission, report templates, tills, tasks and roles. Members, loans,
-deposits and administration still check the base role; they move over one
-area at a time.
+Only an administrator creates or edits an administrator role. Someone who is
+not an administrator, with `CREATE_ROLE` or `EDIT_ROLE`, cannot change the
+role they hold, cannot give a role a permission they do not hold, and cannot
+put a role on the administrator base; otherwise role editing would be a way
+to any permission.
 
 The built-in `TELLER` role keeps `POST_TRANSACTIONS_WITHOUT_OPENED_TILL` by
 default so that tellers are not blocked on the day tills arrive. Remove it
 from the role to make every teller post cash through an open till.
+
+### Access preferences
+
+```
+GET|PUT|PATCH /api/access-preferences     (MANAGE_ACCESS_PREFERENCES)
+GET  /api/access-preferences/blocked-ips  POST /api/access-preferences/blocked-ips/reset { ips }
+```
+
+The reference platform's Administration > Access > Preferences, per tenant:
+
+| Setting | Default | Allowed |
+|---|---|---|
+| `sessionTimeoutMinutes`: signed out after this long without a request | 30 | 5 to 1440 |
+| `password.minLength` | 12 | 8 to 128 |
+| `password.minDigits`, `minUppercase`, `minSpecial` | 1, 0, 0 | digits at least 1 |
+| `password.history`: previous passwords refused | 4 | 1 to 10 |
+| `password.expiryDays` | none | 1 to 3650 |
+| `lockout.maxFailedLogins` | 5 | 3 to 6 |
+| `lockout.lockMinutes`: none means until an administrator unlocks | 60 | 15 to 10080, or none |
+| `ipAllowlist`: `enabled`, `entries`, `applyTo` (ADMINS, USERS, API) | off | IPv4, `10.0.0.*`, `10.0.0.1-25`, CIDR |
+| `reauthenticate`: the password again for critical actions | off | |
+| `mfaRequiredRoles`: roles that must use a second factor | none | built-in or tenant roles |
+| `apiKeys.rotationGraceSeconds`, `rotatedKeyExpirySeconds` | 1800, none | |
+| `auditRetentionDays` | 365 | 30 to 3650 |
+
+- A password always has a letter and a digit and never contains the
+  username (the reference platform's fixed rules). The policy applies when a password is
+  chosen; a temporary password is replaced at the first sign-in.
+- An expired password signs in only to be changed (403 `PASSWORD_EXPIRED`).
+- A wrong password counts against the user; at the limit the user is locked
+  for the cooldown or until unlocked. Only someone who gives the right
+  password is told the account is locked; everyone else gets
+  `INVALID_CREDENTIALS`. A locked user's open sessions stop too, and an
+  administrator's password reset also unlocks. This sits beside the
+  platform's sign-in rate limit.
+- Inactivity: an access token lives 15 minutes or the timeout, whichever is
+  shorter, and a session whose last request is older than the timeout is
+  not renewed (401 `SESSION_TIMED_OUT`; the console signs out and says so).
+- The IP allowlist applies to administrators, back-office users and API
+  keys as chosen, at sign-in and on every request. An allowlist that would
+  shut out the person saving it is refused. IPv6 is not supported, as in
+  The reference platform.
+- Critical actions (the reference platform's list, where the platform has them: users, roles,
+  access preferences, API consumers and keys, loan and deposit products,
+  accounting and organization settings, branch changes, database backups,
+  product document templates, lending controls): with `reauthenticate` on, a
+  signed-in user sends `X-Reauth-Token`, which `POST /api/auth/reauth
+  { password }` gives for five minutes. The console asks for the password
+  when it is needed. API keys are not asked.
+
+### API consumers and keys
+
+```
+GET|POST /api/consumers        GET|PATCH|DELETE /api/consumers/{id}
+POST /api/consumers/{id}/keys { expirationTime }    DELETE /api/consumers/{id}/keys/{keyId}
+POST /api/consumers/{id}/secret-key
+POST /api/consumers/keys/rotation { apiKey, expirationTime }   (secretKey header)
+```
+
+After the reference platform's API Consumers. A consumer has a role (one with API access),
+permissions of its own, or the administrator type; only an administrator
+gives administrator access, and nobody gives more than they hold. It makes
+keys, sent in the `apiKey` header with the tenant (`X-Tenant` or the
+subdomain). A key is shown once; afterwards only its id and a six-character
+prefix. A key may have a time to live. A secret key (one per consumer, shown
+once) authenticates rotating a key: the replacement comes back with a new
+secret key, the old key keeps working for the grace period, and a
+`rotatedKeyExpirySeconds` in the preferences overrides the replacement's
+expiry. An address that sends ten requests with a bad key is blocked for API
+keys until an administrator resets it, whether or not it is on the
+allowlist. A consumer whose keys have been used cannot be deleted (set it
+INACTIVE); its activity stays in the audit trail. Transactions an API
+consumer posts carry `api:` and its name.
+
+### Audit trail
+
+```
+GET /api/audit-trail/events?username[eq]=teller@x&resource[eq]=members&occurred_at[gte]=2026-09-01T00:00:00Z
+                            &from=0&size=100&sort_by=occurred_at&sort_order=desc     (MANAGE_AUDIT_TRAIL)
+```
+
+After the reference platform's Audit Trail: every request to the tenant's API by its staff
+(`event_source` UI) and its API consumers (API), including refused ones and
+sign-in attempts, with the method, path, resource, user, address, user agent
+and response code. The request body is kept with passwords, secrets, keys
+and personal details (names, phones, emails, addresses, dates of birth,
+notes and the like) replaced by `***`; files are not kept. The filters are
+The reference platform's: `FIELD[operator]=value` with `eq`, `ne`, `gt`, `gte`, `lt`, `lte`,
+`startsWith`, `in` and `contains`; `from` plus `size` at most 10,000.
+Events older than `auditRetentionDays` are removed at the end of day. The
+member portal is not in it.
 
 ## Tills
 
@@ -1994,7 +2167,7 @@ POST /api/tills/{id}/reopen           DELETE /api/tills/{id}   (undo open)
 ```
 
 After the reference platform's tills. A supervisor with `OPEN_TILL` opens a till for a
-teller (a user whose role is `TELLER` or has the teller user type), with an
+teller (a user of the teller user type), with an
 ID of three letters and three digits, the opening cash and optional balance
 limits. A teller has one open till at a time. Each till has a GL cash
 account: by default the cash channel's, or an account of its own.
@@ -2008,16 +2181,20 @@ its limits; a soft limit lets it through and flags the till. A till never
 goes below zero. When the till has an account of its own, the ledger entry
 posts to that account in place of the channel's.
 
-A teller whose role lacks `POST_TRANSACTIONS_WITHOUT_OPENED_TILL` cannot post
-cash without an open till (409 `NO_OPEN_TILL`). Adding or removing cash posts
+The permissions take the reference platform's meaning. `ADD_CASH` lets a teller post
+deposits and repayments through their till and `REMOVE_CASH` withdrawals and
+disbursements (403 `PERMISSION_REQUIRED: ADD_CASH` without it). `OPEN_TILL`
+and `CLOSE_TILL` are a supervisor's: opening a till, moving cash in and out
+of it, and closing it. A teller whose role lacks
+`POST_TRANSACTIONS_WITHOUT_OPENED_TILL` cannot post cash without an open till
+(409 `NO_OPEN_TILL`). Adding or removing cash posts
 an entry between the till's account and the account it came from or went to,
 when the two differ. Closing takes the cash counted (the expected cash when
 none is given); the difference is posted to Cash Over and Short (500-330,
 settable in the accounting settings) against the till's account. Undoing a
 close reverses that entry and opens the same till again; reopening starts a
 new session of the till with the counted cash as its opening cash. Opening a
-till by mistake can be undone while nothing has gone through it. Only the teller, or a supervisor with
-`OPEN_TILL`, closes a till.
+till by mistake can be undone while nothing has gone through it.
 
 ## Tasks
 

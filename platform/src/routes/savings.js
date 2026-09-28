@@ -1,5 +1,7 @@
 'use strict';
 
+const CTL = require('../domain/controls');
+
 const reportRoutes = require('./reports');
 const { orgToday } = require('../lib/orgDate');
 const express = require('express');
@@ -14,11 +16,9 @@ const LOANS = require('../domain/loans');
 const LT = require('../domain/loanTransfers');
 
 const router = express.Router();
-const TELLER = ['TENANT_ADMIN', 'MANAGER', 'TELLER'];
-const APPROVER = ['TENANT_ADMIN', 'MANAGER'];
 
-const tx = (handler, roles = []) => [
-  requireAuth(...roles),
+const tx = (handler) => [
+  requireAuth(),
   async (req, res, next) => {
     try {
       const out = await withTenant(req.tenant.schema_name, (c) =>
@@ -48,7 +48,7 @@ router.get('/', requireAuth(), async (req, res, next) => {
 router.post('/', ...tx(async (c, req, res, { user }) => {
   res.status(201);
   return await S.open(c, { ...req.body, user });
-}, TELLER));
+}));
 
 router.get('/:id/balance', ...tx((c, req) => S.summary(c, req.params.id)));
 
@@ -69,35 +69,38 @@ router.get('/:id/transactions', requireAuth(), async (req, res, next) => {
 
 router.post('/:id/deposits', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
+  await CTL.assertWithinLimit(c, user, 'deposit', req.body?.amount);
   const t = await S.deposit(c, req.params.id, { ...req.body, createdBy: actor, user });
   return CF.applyToTransaction(c, t, req.body?.customFields, { user });
-}, TELLER));
+}));
 
 router.post('/:id/withdrawals', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
   // offsetPledge is for collecting a guarantor's pledge (./loanClosures), never from the wire.
   const { offsetPledge: _ignored, ...body } = req.body || {};
+  await CTL.assertWithinLimit(c, user, 'withdrawal', body.amount);
   const t = await S.withdraw(c, req.params.id, { ...body, createdBy: actor, user });
   return CF.applyToTransaction(c, t, body.customFields, { user });
-}, TELLER));
+}));
 
 router.post('/:id/transfers', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await S.transfer(c, req.params.id, { ...req.body, createdBy: actor });
-}, TELLER));
+}));
 
-router.post('/:id/fees', ...tx(async (c, req, res, { actor }) => {
+router.post('/:id/fees', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
+  if (req.body?.amount !== undefined) await CTL.assertWithinLimit(c, user, 'fee', req.body.amount);
   return await S.applyFee(c, req.params.id, { ...req.body, createdBy: actor });
-}, TELLER));
+}));
 
 router.put('/:id/overdraft', ...tx((c, req, _res, { actor }) =>
-  S.setOverdraftLimit(c, req.params.id, { limit: req.body?.limit, createdBy: actor }), APPROVER));
+  S.setOverdraftLimit(c, req.params.id, { limit: req.body?.limit, createdBy: actor })));
 
 router.post('/:id/overdraft/write-off', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await S.writeOffOverdraft(c, req.params.id, { ...req.body, createdBy: actor });
-}, APPROVER));
+}));
 
 // Bring interest up to a date, and apply it when that date is an
 // application date (or when told to). The end of day does both for every
@@ -107,18 +110,19 @@ router.post('/:id/interest', ...tx(async (c, req, _res, { actor }) => {
   const accrued = await S.accrueInterest(c, req.params.id, { date, createdBy: actor });
   const applied = req.body?.apply ? await S.applyInterest(c, req.params.id, { date, createdBy: actor }) : [];
   return { accrued, applied };
-}, APPROVER));
+}));
 
 router.post('/:id/branch', ...tx((c, req, _res, { actor }) =>
-  require('../domain/branches').moveAccount(c, { kind: 'SAVINGS', accountId: req.params.id, branchId: req.body?.branchId, createdBy: actor }), APPROVER));
+  require('../domain/branches').moveAccount(c, { kind: 'SAVINGS', accountId: req.params.id, branchId: req.body?.branchId, createdBy: actor })));
 
 // A repayment of a loan made from this account (any member's loan), as
 // The reference platform's Transfer from a deposit account to a loan.
 router.post('/:id/loan-repayments', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   if (!req.body?.loanAccountId) throw acct.err('LOAN_ACCOUNT_REQUIRED', 400);
+  await CTL.assertWithinLimit(c, req.auth, 'repayment', req.body.amount);
   return await LT.repayFromDeposit(c, req.body.loanAccountId, { ...req.body, savingsAccountId: req.params.id, createdBy: actor, user: req.auth });
-}, TELLER));
+}));
 
 // Reversing one half of a transfer with a loan (a repayment made from this
 // account, or a disbursement into it) reverses the loan transaction, which
@@ -130,19 +134,18 @@ router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { act
     return await LOANS.reverseTransaction(c, t.allocation.loanTransfer.reference, { ...req.body, createdBy: actor });
   }
   return await S.reverseTransaction(c, req.params.reference, { ...req.body, createdBy: actor });
-}, APPROVER));
+}));
 
 // --- accounting -----------------------------------------------------------
 
 const accounting = express.Router();
 
-const LEDGER_READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR'];
 
 // Trial balance: opening balance, debits, credits, net change and closing
 // balance per account; ?zeroBalances=true, ?glTypes=, ?branchId=, ?format=.
 accounting.get('/trial-balance', requirePermission('VIEW_ACCOUNTING_REPORTS'), reportRoutes.trialBalance);
 
-accounting.get('/journal', requireAuth(...LEDGER_READER), async (req, res, next) => {
+accounting.get('/journal', requireAuth(), async (req, res, next) => {
   try {
     const page = await withTenantRead(req.tenant.schema_name, (c) => pageQuery(
       c,
@@ -164,7 +167,7 @@ accounting.get('/journal', requireAuth(...LEDGER_READER), async (req, res, next)
 
 // The rollup checked against the lines. An auditor's endpoint: it answers
 // "can I trust the numbers on the other reports" with a recomputation.
-accounting.get('/verify', requireAuth(...LEDGER_READER), async (req, res, next) => {
+accounting.get('/verify', requireAuth(), async (req, res, next) => {
   try {
     res.json(await withTenantRead(req.tenant.schema_name, (c) => acct.verifyRollup(c, {
       from: req.query.from || null, to: req.query.to || null,
@@ -172,7 +175,7 @@ accounting.get('/verify', requireAuth(...LEDGER_READER), async (req, res, next) 
   } catch (e) { next(e); }
 });
 
-accounting.get('/gl', requireAuth(...LEDGER_READER), async (req, res, next) => {
+accounting.get('/gl', requireAuth(), async (req, res, next) => {
   try {
     // One query for every balance. This used to be a query per account.
     res.json(await withTenantRead(req.tenant.schema_name, (c) => acct.balances(c, {

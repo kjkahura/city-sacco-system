@@ -206,9 +206,12 @@ const JOBS = {
     });
   },
 
-  /** Remove accounting reports past their 24 hours. */
+  /** Remove accounting reports past their 24 hours, and audit trail events past the tenant's retention. */
   async pruneReports(tenant) {
-    return withTenant(tenant.schema_name, async (c) => ({ accountingReports: await AREP.prune(c) }));
+    const days = (await require('../lib/accessPreferences').of(tenant.id)).auditRetentionDays;
+    return withTenant(tenant.schema_name, async (c) => ({
+      accountingReports: await AREP.prune(c), auditEvents: (await require('./auditTrail').prune(c, days)).pruned,
+    }));
   },
 
   /**

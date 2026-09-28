@@ -24,7 +24,7 @@ const { err, round2 } = acct;
  */
 
 const TYPES = ['CASH', 'MOBILE', 'TRANSFER', 'CHEQUE', 'INTERNAL', 'PAYROLL'];
-const ROLES = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'];
+const ROLE = require('./roles');
 const TRANSACTION_TYPES = {
   LOAN: ['DISBURSEMENT', 'REPAYMENT', 'RECOVERY'],
   SAVINGS: ['DEPOSIT', 'WITHDRAWAL'],
@@ -70,7 +70,7 @@ async function list(c, { includeInactive = true, user = null } = {}) {
   const { rows } = await c.query(
     `SELECT ch.*, (SELECT count(*)::int FROM transactions t WHERE t.channel_id = ch.id) AS used
      FROM transaction_channels ch WHERE ($1::boolean OR ch.is_active) ORDER BY ch.sort_order, ch.id`, [includeInactive]);
-  return rows.filter((ch) => !user || !user.role || ch.usage_roles === null || ch.usage_roles.includes(user.role));
+  return rows.filter((ch) => !user || !user.role || ch.usage_roles === null || ROLE.names(ch.usage_roles, user));
 }
 
 async function find(c, id) {
@@ -105,8 +105,6 @@ function shape(body, creating) {
   if (body.glAccount !== undefined) out.gl_account_code = body.glAccount || null;
   if (body.usageRoles !== undefined) {
     if (body.usageRoles !== null && !Array.isArray(body.usageRoles)) throw err('USAGE_ROLES_IS_A_LIST_OR_NULL', 400);
-    const bad = (body.usageRoles || []).filter((r) => !ROLES.includes(r));
-    if (bad.length) throw err(`UNKNOWN_ROLES: ${bad.join(', ')}`, 400);
     out.usage_roles = body.usageRoles === null ? null : [...new Set(body.usageRoles)];
   }
   const lc = normConstraints('LOAN', body.loanConstraints);
@@ -119,6 +117,7 @@ function shape(body, creating) {
 
 async function create(c, body = {}, { createdBy } = {}) {
   const cols = shape(body, true);
+  await ROLE.assertKnown(c, cols.usage_roles);
   if (!cols.gl_account_code) throw err('A_CHANNEL_NEEDS_A_GL_ACCOUNT', 400);
   await assertGl(c, cols.gl_account_code);
   const { rows: [n] } = await c.query('SELECT COALESCE(max(sort_order), 0) + 1 AS n FROM transaction_channels');
@@ -135,6 +134,7 @@ async function create(c, body = {}, { createdBy } = {}) {
 async function update(c, id, body = {}, { createdBy } = {}) {
   const before = await find(c, id);
   const cols = shape(body, false);
+  await ROLE.assertKnown(c, cols.usage_roles);
   if (cols.gl_account_code !== undefined) {
     if (!cols.gl_account_code) throw err('A_CHANNEL_NEEDS_A_GL_ACCOUNT', 400);
     await assertGl(c, cols.gl_account_code);
@@ -195,7 +195,7 @@ function passes(con, { type, amount, productId }) {
 async function assertUsable(c, id, { side = null, type = null, amount = 0, productId = null, user = null } = {}) {
   const { rows: [ch] } = await c.query('SELECT * FROM transaction_channels WHERE id = $1 AND is_active', [id]);
   if (!ch) throw err(`UNKNOWN_TRANSACTION_CHANNEL: ${id}`);
-  if (user && user.role && ch.usage_roles !== null && !ch.usage_roles.includes(user.role)) {
+  if (user && user.role && ch.usage_roles !== null && !ROLE.names(ch.usage_roles, user)) {
     throw err(`CHANNEL_NOT_AVAILABLE_TO_YOUR_ROLE: ${id}`, 403);
   }
   if (side) {
