@@ -632,6 +632,10 @@ async function memberDetail(m0) {
     api('GET', '/api/client-types'), api('GET', '/api/branches'), api('GET', '/api/centres'),
     isGroup ? api('GET', '/api/group-role-names') : Promise.resolve({ body: [] }),
   ]);
+  const [arrangements, solidarity] = await Promise.all([
+    can('VIEW_LINE_OF_CREDIT_DETAILS') ? api('GET', `/api/${isGroup ? 'groups' : 'clients'}/${m.id}/creditarrangements`) : Promise.resolve({ ok: false }),
+    isGroup ? api('GET', `/api/groups/${m.id}/solidarity-loans`) : Promise.resolve({ ok: false }),
+  ]);
   const h = history.body || {};
   const myShares = (shares.body || []).filter((s) => s.member_id === m.id);
   const type = (types.body || []).find((t) => t.id === m.client_type_id);
@@ -691,6 +695,18 @@ async function memberDetail(m0) {
     { label: '', html: true, value: (x) => (can('EDIT_GROUP') ? `<button class="link" data-gm-drop="${esc(x.member_id)}">remove</button>` : '') },
   ], m.groupMembers || [], { empty: 'No members yet' })}
       ${can('EDIT_GROUP') ? '<button class="secondary" id="gm-add">Add member</button>' : ''}`)}</div>` : ''}
+    ${solidarity.ok ? `<div id="solidarity-loans">${card('Solidarity loans', `${table([
+    { label: 'Loan', key: 'id' }, { label: 'Member', value: (x) => `${x.memberName} (${x.memberId})` }, { label: 'State', key: 'accountState' },
+    { label: 'Amount', num: true, value: (x) => money(x.loanAmount) }, { label: 'Outstanding', num: true, value: (x) => money(x.principalBalance) },
+  ], solidarity.body.loans, { onRow: 'sol', empty: 'No solidarity loans' })}
+      <p class="hint">${solidarity.body.totals.running} running of ${solidarity.body.totals.loans}; principal outstanding ${money(solidarity.body.totals.principalBalance)}.</p>
+      ${can('CREATE_LOAN_ACCOUNT') && (m.groupMembers || []).length ? '<button class="secondary" id="sol-open">Open solidarity loans</button>' : ''}`)}</div>` : ''}
+    ${arrangements.ok ? `<div id="credit-arrangements">${card('Credit arrangements', `${table([
+    { label: 'ID', key: 'id' }, { label: 'State', key: 'state' }, { label: 'Amount', num: true, value: (x) => money(x.amount) },
+    { label: 'Consumed', num: true, value: (x) => money(x.consumedCreditAmount) }, { label: 'Available', num: true, value: (x) => money(x.availableCreditAmount) },
+    { label: 'Expires', value: (x) => day(x.expireDate) },
+  ], arrangements.body || [], { onRow: 'ca', empty: 'No credit arrangements' })}
+      ${can('CREATE_LINES_OF_CREDIT') ? '<button class="secondary" id="ca-new">New credit arrangement</button>' : ''}`)}</div>` : ''}
     ${card('Loans', table([
     { label: 'Account', key: 'account_no' },
     { label: 'Status', key: 'status' },
@@ -722,6 +738,8 @@ async function memberDetail(m0) {
   entityReports('MEMBER', m.member_no);
   wireRows(loans.body || [], loanDetail);
   wireRows(savings.body || [], (a) => depositDetail(a, m), 'dep');
+  if (solidarity.ok) wireRows(solidarity.body.loans, (x) => loanDetail({ id: x.encodedKey }), 'sol');
+  if (arrangements.ok) wireRows(arrangements.body || [], (x) => creditArrangementDetail(x.encodedKey, m), 'ca');
   view().querySelectorAll('tr[data-tbl="dep"] button').forEach((b) => b.addEventListener('click', (e) => e.stopPropagation()));
   const reload = () => memberDetail(m);
   const on = (sel, fn) => { const b = $(sel); if (b) b.addEventListener('click', fn); };
@@ -786,6 +804,34 @@ async function memberDetail(m0) {
     toast(res.ok ? 'Account closed' : res.error, !res.ok);
     if (res.ok) reload();
   }));
+  on('#ca-new', async () => {
+    const d = await ask([{ label: 'Amount', name: 'amount', type: 'number', step: '0.01' },
+      opt({ label: 'Start date (blank: today)', name: 'startDate', type: 'date' }), { label: 'Expire date', name: 'expireDate', type: 'date' },
+      { label: 'Exposure counted as', name: 'exposureLimitType', options: ['APPROVED_AMOUNT', 'OUTSTANDING_AMOUNT'],
+        hint: 'APPROVED_AMOUNT: loan amounts and overdraft limits. OUTSTANDING_AMOUNT: what is owed.' },
+      opt({ label: 'Notes', name: 'notes', type: 'textarea', rows: 2 })], `New credit arrangement for ${m.member_no}`);
+    if (!d) return;
+    const res = await api('POST', '/api/creditarrangements', { holderKey: m.id, holderType: isGroup ? 'GROUP' : 'CLIENT', amount: Number(d.amount),
+      startDate: d.startDate || undefined, expireDate: d.expireDate, exposureLimitType: d.exposureLimitType, notes: d.notes || undefined });
+    toast(res.ok ? `Created ${res.body.id} (${res.body.state.replace(/_/g, ' ').toLowerCase()})` : res.error, !res.ok);
+    if (res.ok) reload();
+  });
+  on('#sol-open', async () => {
+    const lp = await api('GET', '/api/loan-products');
+    const products = (lp.body || []).filter((p) => (p.availableFor || []).includes('SOLIDARITY_GROUPS'));
+    if (!products.length) return toast('No loan product is available for solidarity groups', true);
+    const members = m.groupMembers || [];
+    const d = await ask([{ label: 'Product', name: 'productId', options: products.map((p) => p.id) },
+      opt({ label: 'Installments (blank: the product default)', name: 'termMonths', type: 'number' }),
+      ...members.map((x) => opt({ label: `Amount for ${x.first_name} ${x.last_name} (${x.member_no}); blank: none`, name: `amt_${x.member_id}`, type: 'number', step: '0.01' }))],
+    `Solidarity loans for ${m.member_no}`);
+    if (!d) return;
+    const lines = members.filter((x) => d[`amt_${x.member_id}`]).map((x) => ({ memberId: x.member_id, principal: Number(d[`amt_${x.member_id}`]) }));
+    if (!lines.length) return toast('Give at least one member an amount', true);
+    const res = await api('POST', `/api/groups/${m.id}/solidarity-loans`, { productId: d.productId, termMonths: d.termMonths ? Number(d.termMonths) : undefined, members: lines });
+    toast(res.ok ? `Opened ${lines.length} loan(s)` : res.error, !res.ok);
+    if (res.ok) reload();
+  });
   on('#gm-add', async () => {
     const d = await ask([{ label: 'Member number', name: 'memberId' },
       opt({ label: 'Role names (IDs, comma separated)', name: 'roles', hint: (roleNames.body || []).map((r) => `${r.id}: ${r.name}`).join('; ') || 'No role names are set up' })], `Add a member to ${m.member_no}`);
@@ -878,6 +924,95 @@ async function idFiles(m, docId, reload) {
   });
 }
 
+const CA_ACTIONS = [
+  ['APPROVE', 'Approve', ['PENDING_APPROVAL'], 'APPROVE_LINE_OF_CREDIT'], ['REJECT', 'Reject', ['PENDING_APPROVAL'], 'REJECT_LINE_OF_CREDIT'],
+  ['WITHDRAW', 'Withdraw', ['PENDING_APPROVAL'], 'WITHDRAW_LINE_OF_CREDIT'], ['UNDO_APPROVE', 'Undo approval', ['APPROVED'], 'UNDO_APPROVE_LINE_OF_CREDIT'],
+  ['UNDO_REJECT', 'Undo reject', ['REJECTED'], 'UNDO_REJECT_LINE_OF_CREDIT'], ['UNDO_WITHDRAW', 'Undo withdraw', ['WITHDRAWN'], 'UNDO_WITHDRAW_LINE_OF_CREDIT'],
+  ['CLOSE', 'Close', ['APPROVED', 'ACTIVE'], 'CLOSE_LINES_OF_CREDIT'], ['UNDO_CLOSE', 'Reopen', ['CLOSED'], 'CLOSE_LINES_OF_CREDIT'],
+];
+
+/** A credit arrangement (the reference platform's line of credit): its limit on both bases, its states and its accounts. */
+async function creditArrangementDetail(id, holder = null) {
+  const [r, acc] = await Promise.all([api('GET', `/api/creditarrangements/${id}`), api('GET', `/api/creditarrangements/${id}/accounts`)]);
+  if (!r.ok) throw new Error(r.error);
+  const ca = r.body;
+  const a = acc.body || { loanAccounts: [], depositAccounts: [] };
+  const open = ['APPROVED', 'ACTIVE'].includes(ca.state);
+  const drop = (type) => (x) => (can('REMOTE_ACCOUNTS_FROM_LINE_OF_CREDIT') && !String(x.accountState).startsWith('CLOSED')
+    ? `<button class="link" data-ca-drop="${esc(x.encodedKey)}" data-ca-type="${type}">remove</button>` : '');
+  view().innerHTML = `
+    <button class="secondary" id="back">← ${holder ? esc(holder.member_no) : 'Back'}</button>
+    <h1>Credit arrangement <span class="badge">${esc(ca.id)}</span> ${stateBadge(ca.state)}</h1>
+    <div class="toolbar" id="ca-actions">
+      ${CA_ACTIONS.filter(([, , from, perm]) => from.includes(ca.state) && can(perm)).map(([x, label]) => `<button class="secondary" data-ca-action="${x}">${esc(label)}</button>`).join('')}
+      ${can('EDIT_LINES_OF_CREDIT') && !['CLOSED', 'WITHDRAWN', 'REJECTED'].includes(ca.state) ? '<button class="secondary" id="ca-edit">Edit</button>' : ''}
+      ${can('DELETE_LINES_OF_CREDIT') && !a.loanAccounts.length && !a.depositAccounts.length ? '<button class="secondary" id="ca-delete">Delete</button>' : ''}
+    </div>
+    <div class="grid" id="credit-arrangement">${card('Limit', `<dl class="kv">
+      <dt>Holder</dt><dd>${esc(`${ca.holderName} (${ca.holderId})`)}</dd><dt>Amount</dt><dd>${money(ca.amount)}</dd>
+      <dt>Counted as</dt><dd>${esc(ca.exposureLimitType.replace(/_/g, ' ').toLowerCase())}</dd>
+      <dt>Consumed</dt><dd>${money(ca.consumedCreditAmount)}</dd><dt>Available</dt><dd>${money(ca.availableCreditAmount)}</dd>
+      <dt>Loan amounts and overdraft limits</dt><dd>${money(ca.exposure.approvedAmount)}</dd><dt>Owed</dt><dd>${money(ca.exposure.outstandingAmount)}</dd>
+      <dt>Dates</dt><dd>${day(ca.startDate)} to ${day(ca.expireDate)}</dd>${ca.notes ? `<dt>Notes</dt><dd>${esc(ca.notes)}</dd>` : ''}</dl>`)}</div>
+    ${card('Loan accounts', table([
+    { label: 'Account', key: 'id' }, { label: 'Product', key: 'productId' }, { label: 'State', key: 'accountState' },
+    { label: 'Amount', num: true, value: (x) => money(x.loanAmount) }, { label: 'Owed', num: true, value: (x) => money(x.principalBalance) },
+    { label: 'Matures', value: (x) => day(x.maturityDate) }, { label: '', html: true, value: drop('LOAN') },
+  ], a.loanAccounts, { empty: 'No loan accounts' }))}
+    ${card('Deposit accounts', table([
+    { label: 'Account', key: 'id' }, { label: 'Product', key: 'productId' }, { label: 'State', key: 'accountState' },
+    { label: 'Overdraft limit', num: true, value: (x) => money(x.overdraftLimit) }, { label: 'Balance', num: true, value: (x) => money(x.balance) },
+    { label: 'Overdraft expires', value: (x) => day(x.overdraftExpiryDate) }, { label: '', html: true, value: drop('DEPOSIT') },
+  ], a.depositAccounts, { empty: 'No deposit accounts' }))}
+    ${open && can('ADD_ACCOUNTS_TO_LINE_OF_CREDIT') ? '<button class="secondary" id="ca-add">Add an account</button>' : ''}`;
+  const reload = () => creditArrangementDetail(ca.encodedKey, holder);
+  $('#back').addEventListener('click', () => (holder ? memberDetail(holder) : membersView()));
+  view().querySelectorAll('[data-ca-action]').forEach((b) => b.addEventListener('click', async () => {
+    const d = await ask([opt({ label: 'Notes', name: 'notes' })], `${b.textContent} ${ca.id}?`);
+    if (!d) return;
+    const res = await api('POST', `/api/creditarrangements/${ca.encodedKey}:changeState`, { action: b.dataset.caAction, notes: d.notes || undefined });
+    toast(res.ok ? `Now ${res.body.state.replace(/_/g, ' ').toLowerCase()}` : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
+  view().querySelectorAll('[data-ca-drop]').forEach((b) => b.addEventListener('click', async () => {
+    const res = await api('POST', `/api/creditarrangements/${ca.encodedKey}:removeAccount`, { accountId: b.dataset.caDrop, accountType: b.dataset.caType });
+    toast(res.ok ? 'Removed' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
+  const on = (sel, fn) => { const b = $(sel); if (b) b.addEventListener('click', fn); };
+  on('#ca-edit', async () => {
+    const d = await ask([{ label: 'Amount', name: 'amount', type: 'number', step: '0.01', value: ca.amount },
+      { label: 'Start date', name: 'startDate', type: 'date', value: ca.startDate }, { label: 'Expire date', name: 'expireDate', type: 'date', value: ca.expireDate },
+      { label: 'Exposure counted as', name: 'exposureLimitType', options: ['APPROVED_AMOUNT', 'OUTSTANDING_AMOUNT'], value: ca.exposureLimitType },
+      opt({ label: 'Notes', name: 'notes', type: 'textarea', rows: 2, value: ca.notes || '' })], `Edit ${ca.id}`);
+    if (!d) return;
+    const res = await api('PATCH', `/api/creditarrangements/${ca.encodedKey}`, { ...d, amount: Number(d.amount), notes: d.notes || null });
+    toast(res.ok ? 'Saved' : res.error, !res.ok);
+    if (res.ok) reload();
+  });
+  on('#ca-delete', async () => {
+    if (!(await ask([], `Delete ${ca.id}? It cannot be undone.`))) return;
+    const res = await api('DELETE', `/api/creditarrangements/${ca.encodedKey}`);
+    toast(res.ok ? `Deleted ${ca.id}` : res.error, !res.ok);
+    if (res.ok) (holder ? memberDetail(holder) : membersView());
+  });
+  on('#ca-add', async () => {
+    const [ls, ds] = await Promise.all([api('GET', `/api/loans?memberId=${ca.holderKey}&limit=100`), api('GET', `/api/savings?memberId=${ca.holderKey}&limit=100`)]);
+    const choices = [
+      ...(ls.body || []).filter((l) => !l.credit_arrangement_id && !String(l.status).startsWith('CLOSED')).map((l) => `LOAN ${l.account_no}`),
+      ...(ds.body || []).filter((x) => !x.credit_arrangement_id && x.status !== 'CLOSED').map((x) => `DEPOSIT ${x.account_no}`),
+    ];
+    if (!choices.length) return toast('The holder has no account to add', true);
+    const d = await ask([{ label: 'Account', name: 'account', options: choices,
+      hint: 'A deposit account needs an overdraft with an expiry date; the product must take credit arrangements.' }], `Add an account to ${ca.id}`);
+    if (!d) return;
+    const [type, no] = d.account.split(' ');
+    const res = await api('POST', `/api/creditarrangements/${ca.encodedKey}:addAccount`, { accountId: no, accountType: type });
+    toast(res.ok ? `Added ${no}` : res.error, !res.ok);
+    if (res.ok) reload();
+  });
+}
+
 /** A deposit account: its balance, its transactions, closing it, and its report templates. */
 async function depositDetail(a, holder = null) {
   const [bal, tx] = await Promise.all([api('GET', `/api/savings/${a.id}/balance`), api('GET', `/api/savings/${a.id}/transactions?limit=50`)]);
@@ -888,7 +1023,7 @@ async function depositDetail(a, holder = null) {
     <h1>Deposit account <span class="badge">${esc(b.accountNo)}</span> ${stateBadge(b.status)}</h1>
     <div class="grid" id="deposit-detail">${card('Balances', `<dl class="kv">
       <dt>Product</dt><dd>${esc(b.productId)}</dd><dt>Balance</dt><dd>${money(b.balance)}</dd><dt>Available</dt><dd>${money(b.available)}</dd>
-      <dt>Pledged (member)</dt><dd>${money(b.pledged)}</dd><dt>Overdraft limit</dt><dd>${money(b.overdraftLimit)}</dd>
+      <dt>Pledged (member)</dt><dd>${money(b.pledged)}</dd><dt>Overdraft limit</dt><dd>${money(b.overdraftLimit)}${b.overdraftExpiryDate ? ` (expires ${day(b.overdraftExpiryDate)}${b.overdraftExpired ? ', expired' : ''})` : ''}</dd>
       <dt>Interest accrued</dt><dd>${money(b.interest.accrued)}</dd><dt>Interest last applied</dt><dd>${esc(b.interest.lastApplied || '—')}</dd></dl>
       ${can('CLOSE_SAVINGS_ACCOUNTS') && ['ACTIVE', 'DORMANT'].includes(b.status) && Number(b.balance) === 0 ? '<button class="secondary" id="dep-close">Close account</button>' : ''}`)}</div>
     ${card('Transactions', table([
@@ -976,7 +1111,8 @@ async function clientsSetup(box) {
       <dt>Required</dt><dd>${esc((c.requiredAssignments || []).map((x) => x.replace(/_/g, ' ').toLowerCase()).join(', ') || 'nothing')}</dd>
       <dt>In more than one group</dt><dd>${c.multipleGroups ? 'allowed' : 'not allowed'}</dd>
       <dt>Group size limit</dt><dd>${c.groupSizeLimitType === 'NONE' ? 'none' : `${esc(c.groupSizeLimit)} (${esc(String(c.groupSizeLimitType).toLowerCase())})`}</dd>
-      <dt>Anonymize after exit</dt><dd>${c.anonymizeAfterDays === null || c.anonymizeAfterDays === undefined ? 'not set (anonymizing is off)' : `${esc(c.anonymizeAfterDays)} days`}</dd></dl>
+      <dt>Anonymize after exit</dt><dd>${c.anonymizeAfterDays === null || c.anonymizeAfterDays === undefined ? 'not set (anonymizing is off)' : `${esc(c.anonymizeAfterDays)} days`}</dd>
+      <dt>New credit arrangements start</dt><dd>${esc(String(c.creditArrangementInitialState || 'PENDING_APPROVAL').replace(/_/g, ' ').toLowerCase())}</dd></dl>
       ${admin ? '<button class="secondary" id="cc-edit">Edit</button>' : ''}`)}
   </div>`;
   const done = (res, msg) => { toast(res.ok ? msg : res.error, !res.ok); if (res.ok) clientsSetup(box); };
@@ -1013,6 +1149,7 @@ async function clientsSetup(box) {
       { label: 'Group size limit', name: 'groupSizeLimitType', options: ['NONE', 'WARNING', 'HARD'], value: c.groupSizeLimitType },
       opt({ label: 'Most members in a group', name: 'groupSizeLimit', type: 'number', value: c.groupSizeLimit ?? '' }),
       opt({ label: 'Days after exit before anonymizing (blank: not set)', name: 'anonymizeAfterDays', type: 'number', value: c.anonymizeAfterDays ?? '' }),
+      { label: 'New credit arrangements start', name: 'creditArrangementInitialState', options: ['PENDING_APPROVAL', 'APPROVED'], value: c.creditArrangementInitialState || 'PENDING_APPROVAL' },
     ], 'Client controls');
     if (!d) return;
     done(await api('PATCH', '/api/client-controls', {
@@ -1021,6 +1158,7 @@ async function clientsSetup(box) {
       multipleGroups: bool(d.multipleGroups), groupSizeLimitType: d.groupSizeLimitType,
       groupSizeLimit: d.groupSizeLimit === '' ? null : Number(d.groupSizeLimit),
       anonymizeAfterDays: d.anonymizeAfterDays === '' ? null : Number(d.anonymizeAfterDays),
+      creditArrangementInitialState: d.creditArrangementInitialState,
     }), 'Client controls saved');
   });
 }

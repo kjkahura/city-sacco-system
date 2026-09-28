@@ -8,6 +8,8 @@ const { pageParams } = require('../lib/page');
 const SEARCH = require('../lib/searchCriteria');
 const CL = require('../domain/clients');
 const SETUP = require('../domain/clientSetup');
+const CAR = require('./creditArrangements');
+const SOL = require('../domain/solidarityLoans');
 
 /**
  * The reference platform's API v2 for clients and groups: /clients, /groups, their
@@ -155,7 +157,10 @@ function holderRouter(holderType) {
     await CL.remove(c, req.params.id, { user: req.auth, holderType });
     res.status(204).end();
   }, { write: true }));
-  r.get('/:id/creditarrangements', ...run(async (c, req) => { await CL.find(c, req.params.id, { holderType }); return []; }));
+  r.get('/:id/creditarrangements', ...run(async (c, req, res) => {
+    const m = await CL.find(c, req.params.id, { holderType });
+    return CAR.listOut(c, req, res, { holderId: m.id });
+  }));
   if (holderType === 'CLIENT') {
     r.get('/:id/role', ...run(async (c, req) => {
       const m = await CL.find(c, req.params.id, { holderType });
@@ -163,6 +168,10 @@ function holderRouter(holderType) {
     }));
   } else {
     r.get('/:id/members', ...run(async (c, req) => (await one(c, req, req.params.id, 'GROUP')).groupMembers));
+    // Solidarity group loans: one loan per member, opened together (../domain/solidarityLoans).
+    r.get('/:id/solidarity-loans', ...run((c, req) => SOL.forGroup(c, req.params.id)));
+    r.post('/:id/solidarity-loans', ...run((c, req) => SOL.open(c, req.params.id, req.body || {}, { user: req.auth, actor: req.auth.email }),
+      { write: true, status: 201 }));
     r.post('/:id/members', ...run(async (c, req) => {
       const b = req.body || {};
       const out = await CL.addGroupMember(c, req.params.id, { memberId: b.clientKey ?? b.memberId, roles: (b.roles || []).map((x) => x.groupRoleNameKey ?? x) }, { user: req.auth });

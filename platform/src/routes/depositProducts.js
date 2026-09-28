@@ -8,6 +8,7 @@ const PA = require('../domain/productAccounting');
 const B = require('../domain/branches');
 const CF = require('../domain/customFields');
 const AC = require('../domain/accountingChanges');
+const CA = require('../domain/creditArrangements');
 
 /**
  * Deposit products: interest, withholding tax, overdrafts, fees, and the
@@ -49,6 +50,7 @@ const num = (v) => (v === null || v === undefined ? null : Number(v));
 const publicProduct = (p) => ({
   id: p.id, name: p.name, description: p.description, isActive: p.is_active, isFundingAccount: p.is_funding_account,
   availableBranches: p.branch_ids || null, availableFor: p.available_for || ['INDIVIDUALS'], withholdingSourceId: p.withholding_source_id || null, customFields: p.custom_fields || {},
+  creditArrangementRequirement: p.credit_arrangement_requirement || 'NOT_REQUIRED',
   withdrawable: p.withdrawable, minBalance: Number(p.min_balance),
   interest: {
     paidIntoAccount: p.interest_paid_into_account, annualRate: Number(p.annual_rate), calcBalance: p.interest_calc_balance,
@@ -91,6 +93,7 @@ function toColumns(body) {
   if (body && body.availableBranches !== undefined) cols.branch_ids = body.availableBranches;
   if (body && body.withholdingSourceId !== undefined) cols.withholding_source_id = body.withholdingSourceId;
   if (body) { const af = availableFor(body); if (af !== undefined) cols.available_for = af; }
+  if (body && body.creditArrangementRequirement !== undefined) cols.credit_arrangement_requirement = body.creditArrangementRequirement;
   return cols;
 }
 
@@ -197,6 +200,7 @@ router.post('/', requireAuth(), async (req, res, next) => {
     const cols = toColumns(req.body);
     const out = await withTenant(req.tenant.schema_name, async (c) => {
       await resolveExtras(c, cols, req.body, { user: req.auth });
+      if (cols.credit_arrangement_requirement !== undefined) cols.credit_arrangement_requirement = await CA.assertRequirement(c, 'DEPOSIT', null, cols.credit_arrangement_requirement);
       const problems = await validate(c, cols);
       if (problems.length) return { problems };
       const keys = Object.keys(cols);
@@ -224,6 +228,7 @@ router.patch('/:id', requireAuth(), async (req, res, next) => {
       if (!before) return { missing: true };
       const accounts = await accountsUnder(c, before.id);
       await resolveExtras(c, cols, req.body, { user: req.auth, before });
+      if (cols.credit_arrangement_requirement !== undefined) cols.credit_arrangement_requirement = await CA.assertRequirement(c, 'DEPOSIT', before.id, cols.credit_arrangement_requirement);
       const problems = await validate(c, cols, { before, accounts });
       if (problems.length) return { problems };
       const keys = Object.keys(cols);

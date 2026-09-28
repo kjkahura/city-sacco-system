@@ -35,6 +35,9 @@ const CATALOG = {
   GROUP_MEMBERS: ['OUTREACH', 'Members in groups', 'COUNT'],
   GROUP_BORROWERS: ['OUTREACH', 'Groups with running loans', 'COUNT'],
   GROUP_LOAN_PORTFOLIO: ['LOANS', 'Group loan portfolio', 'AMOUNT'],
+  SOLIDARITY_LOAN_PORTFOLIO: ['LOANS', 'Solidarity group loan portfolio', 'AMOUNT'],
+  CREDIT_ARRANGEMENTS: ['LOANS', 'Approved and active credit arrangements', 'COUNT'],
+  CREDIT_ARRANGEMENT_AMOUNT: ['LOANS', 'Credit arrangement amounts', 'AMOUNT'],
 
   DEPOSIT_ACCOUNTS: ['DEPOSITS', 'Active deposit accounts', 'COUNT'],
   DEPOSIT_BALANCE: ['DEPOSITS', 'Deposit balance', 'AMOUNT'],
@@ -175,13 +178,24 @@ async function compute(c, { entityType = 'ORGANIZATION', entityId = null, codes 
        SELECT (SELECT count(*) FROM grp)::int AS groups,
               (SELECT count(*) FROM grp WHERE status = 'ACTIVE')::int AS active_groups,
               (SELECT count(DISTINCT gm.member_id) FROM group_members gm JOIN grp ON grp.id = gm.group_id)::int AS group_members,
-              (SELECT count(DISTINCT l.member_id) FROM loan_accounts l JOIN grp ON grp.id = l.member_id
-                WHERE l.status IN ('ACTIVE','IN_ARREARS','LOCKED'))::int AS group_borrowers,
+              (SELECT count(DISTINCT grp.id) FROM grp WHERE EXISTS (SELECT 1 FROM loan_accounts l
+                WHERE (l.member_id = grp.id OR l.solidarity_group_id = grp.id) AND l.status IN ('ACTIVE','IN_ARREARS','LOCKED')))::int AS group_borrowers,
               (SELECT COALESCE(SUM(GREATEST(l.principal_disbursed - l.principal_paid, 0)), 0) FROM loan_accounts l JOIN grp ON grp.id = l.member_id
-                WHERE l.status IN ('ACTIVE','IN_ARREARS','LOCKED')) AS group_portfolio`, f.params);
+                WHERE l.status IN ('ACTIVE','IN_ARREARS','LOCKED')) AS group_portfolio,
+              (SELECT COALESCE(SUM(GREATEST(l.principal_disbursed - l.principal_paid, 0)), 0) FROM loan_accounts l JOIN grp ON grp.id = l.solidarity_group_id
+                WHERE l.status IN ('ACTIVE','IN_ARREARS','LOCKED')) AS solidarity_portfolio`, f.params);
     v.GROUPS = g.groups; v.ACTIVE_GROUPS = g.active_groups; v.GROUP_MEMBERS = g.group_members;
     v.GROUP_BORROWERS = g.group_borrowers; v.GROUP_LOAN_PORTFOLIO = round2(g.group_portfolio);
-  } else ['GROUPS', 'ACTIVE_GROUPS', 'GROUP_MEMBERS', 'GROUP_BORROWERS', 'GROUP_LOAN_PORTFOLIO'].forEach((k) => na.add(k));
+    v.SOLIDARITY_LOAN_PORTFOLIO = round2(g.solidarity_portfolio);
+    // Credit arrangements of the holders in scope, members and groups.
+    const { rows: [ca] } = await c.query(
+      `SELECT count(*)::int AS n, COALESCE(SUM(ca.amount), 0) AS amount FROM credit_arrangements ca JOIN members m ON m.id = ca.holder_id
+        WHERE ca.state IN ('APPROVED','ACTIVE') AND ${f.member}`, f.params);
+    v.CREDIT_ARRANGEMENTS = ca.n; v.CREDIT_ARRANGEMENT_AMOUNT = round2(ca.amount);
+  } else {
+    ['GROUPS', 'ACTIVE_GROUPS', 'GROUP_MEMBERS', 'GROUP_BORROWERS', 'GROUP_LOAN_PORTFOLIO', 'SOLIDARITY_LOAN_PORTFOLIO',
+      'CREDIT_ARRANGEMENTS', 'CREDIT_ARRANGEMENT_AMOUNT'].forEach((k) => na.add(k));
+  }
 
   // Deposits.
   if (f.applies.deposits) {

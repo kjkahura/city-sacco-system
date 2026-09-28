@@ -265,6 +265,7 @@ function controlsOut(r) {
     groupSizeLimitType: r.group_size_limit_type,
     groupSizeLimit: r.group_size_limit,
     anonymizeAfterDays: r.anonymize_after_days,
+    creditArrangementInitialState: r.credit_arrangement_initial_state || 'PENDING_APPROVAL',
     updatedBy: r.updated_by,
     updatedAt: r.updated_at,
   };
@@ -275,6 +276,7 @@ async function controlsRow(c) {
   return r || {
     initial_state: 'INACTIVE', duplicate_checks: { DOCUMENT_ID: 'ERROR', NAME_AND_BIRTH_DATE: 'WARNING', PHONE: 'WARNING', EMAIL: 'NONE' },
     required_assignments: [], multiple_groups: true, group_size_limit_type: 'NONE', group_size_limit: null, anonymize_after_days: null,
+    credit_arrangement_initial_state: 'PENDING_APPROVAL',
   };
 }
 
@@ -329,6 +331,12 @@ async function updateControls(c, b = {}, { actor } = {}) {
       throw err('ANONYMIZE_AFTER_DAYS_IS_A_WHOLE_NUMBER_OR_NULL', 400);
     }
     sets.anonymize_after_days = b.anonymizeAfterDays;
+  }
+  if (b.creditArrangementInitialState !== undefined) {
+    if (!['PENDING_APPROVAL', 'APPROVED'].includes(b.creditArrangementInitialState)) {
+      throw err('CREDIT_ARRANGEMENT_INITIAL_STATE_IS_PENDING_APPROVAL_OR_APPROVED', 400);
+    }
+    sets.credit_arrangement_initial_state = b.creditArrangementInitialState;
   }
   const keys = Object.keys(sets);
   if (!keys.length) return controlsOut(before);

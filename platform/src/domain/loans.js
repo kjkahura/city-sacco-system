@@ -25,6 +25,8 @@ const rates = require('./rates');
 const penalties = require('./penalties');
 const FA = require('./feeAmortization');
 const settlementLinks = require('./settlementLinks');
+const CA = require('./creditArrangements');
+const { can } = require('../lib/permissions');
 const { err, round2 } = acct;
 const { ymd, isoDate } = S;
 const {
@@ -137,7 +139,7 @@ async function nextAccountNo(c, p) {
  * running loan the new one replaces (a top-up's, or a reschedule's), which
  * is left out of the exposure check.
  */
-async function apply(c, params, { refinance = null, settles = refinance?.of || null } = {}) {
+async function apply(c, params, { refinance = null, settles = refinance?.of || null, solidarityGroupId = null } = {}) {
   const { memberId, productId = 'NL01', principal, termMonths, purpose, notes, name, accountNo, createdBy,
     tranches: plannedTranches = null, fundingSources = null, collateral = null, branchId = undefined,
     customFields = {}, carriedCustomFields = null, user = null, creditOfficer = undefined } = params;
@@ -157,6 +159,16 @@ async function apply(c, params, { refinance = null, settles = refinance?.of || n
 
   const exp = await controls.exposure(c, { memberId, requested: amount, refinancing: settles });
   if (exp.reasons.includes('ONE_ACTIVE_LOAN_PER_MEMBER')) throw err('MEMBER_ALREADY_HAS_AN_ACTIVE_LOAN', 409);
+
+  // A credit arrangement named on the application (the reference platform's creditArrangementKey).
+  const arrangement = params.creditArrangementId ?? params.creditArrangementKey ?? null;
+  if (arrangement && user && !can(user, 'ADD_ACCOUNTS_TO_LINE_OF_CREDIT')) throw err('PERMISSION_REQUIRED: ADD_ACCOUNTS_TO_LINE_OF_CREDIT', 403);
+  // A solidarity loan (./solidarityLoans) keeps its group; a reschedule or
+  // refinance of one keeps it too, where the new product is for solidarity groups.
+  let solidarity = solidarityGroupId;
+  if (!solidarity && settles && (p.available_for || []).includes('SOLIDARITY_GROUPS')) {
+    solidarity = (await c.query('SELECT solidarity_group_id FROM loan_accounts WHERE id = $1', [settles])).rows[0]?.solidarity_group_id || null;
+  }
 
   const no = accountNo || await nextAccountNo(c, p);
   const status = p.initial_state || 'PENDING_APPROVAL';
@@ -179,6 +191,7 @@ async function apply(c, params, { refinance = null, settles = refinance?.of || n
     product_type: p.product_type || 'FIXED_TERM', status, purpose: purpose || null, notes: notes || null, name: name ? String(name).slice(0, 200) : null,
     // The officer responsible: the member's unless the application names one.
     credit_officer: creditOfficer === undefined ? mem?.credit_officer || null : (creditOfficer || null),
+    ...(solidarity ? { solidarity_group_id: solidarity } : {}),
     ...own,
     ...(refinance ? { refinance_of: refinance.of, refinance_arrears: refinance.arrears, top_up_requested: refinance.topUp } : {}),
   };
@@ -207,6 +220,9 @@ async function apply(c, params, { refinance = null, settles = refinance?.of || n
   await settlementLinks.autoLink(c, rows[0], { createdBy });
   // Disbursement details given with the application (./workflow).
   await workflow.setDisbursementDetails(c, rows[0].id, params, { actor: createdBy, user: params.user || null, fresh: true });
+  // The credit arrangement: a restructure keeps the old loan's (./creditArrangements).
+  if (settles) await CA.carry(c, settles, rows[0]);
+  else if (arrangement) await CA.addAccount(c, arrangement, { accountId: rows[0].id, accountType: 'LOAN' }, { user, actor: createdBy });
   return (await c.query('SELECT * FROM loan_accounts WHERE id = $1', [rows[0].id])).rows[0];
 }
 
@@ -290,6 +306,8 @@ async function disburse(c, loanId, { amount, channelId = null, valueDate, narrat
   // next tranche, or a drawdown within the available limit).
   const { amount: amt, tranche: plannedTranche } = await type.disbursementAmount(c, l, { amount, tranche, date });
   await workflow.assertMayDisburse(c, l, { actor: createdBy, amount: amt, user });
+  // The credit arrangement's state, dates and limit (./creditArrangements).
+  await CA.onLoanDisburse(c, l, { amount: amt, date });
   // The required securities, checked again before the money leaves.
   if (first) await eligibility.assertCovered(c, l);
 
@@ -355,6 +373,7 @@ async function disburse(c, loanId, { amount, channelId = null, valueDate, narrat
   // The schedule, or its absence, is the product type's: drawn now, redrawn
   // for a later tranche, or none until the first billing date.
   const sched = await type.afterDisbursement(c, { l, fresh, first, date, plan, createdBy }, ops);
+  await CA.afterLoanDisburse(c, l.id);
   // Disbursement fees whose income is amortised are planned on the schedule just drawn.
   await fees.planPending(c, fresh, { date, createdBy });
 

@@ -120,6 +120,7 @@ const TABLES = {
   account_counters: 'The counters deposit and share account numbers are given from.',
   member_media: 'Members\' pictures and signatures.',
   member_identification_files: 'The files on a member\'s identification document (up to five).',
+  credit_arrangements: 'Credit arrangements (the reference platform\'s lines of credit): a holder\'s credit limit across loan accounts and overdrafts.',
 };
 
 const ABBR = { inc: 'income', rec: 'receivable', exp: 'expense', od: 'overdraft', neg: 'negative', ns: 'non-scheduled', gl: 'GL' };
@@ -972,10 +973,10 @@ const COLUMNS = {
   'client_controls.group_size_limit_type': 'NONE, WARNING (the limit may be passed) or HARD (it may not).',
   'client_controls.group_size_limit': 'The most members a group may have.',
   'client_controls.anonymize_after_days': 'Days after exiting before a member may be anonymized; NULL: not until the SACCO sets it.',
-  'loan_products.available_for': 'Who may hold it: INDIVIDUALS, GROUPS or both.',
+  'loan_products.available_for': 'Who may hold it: INDIVIDUALS, GROUPS or both, or SOLIDARITY_GROUPS alone.',
   'savings_products.available_for': 'Who may hold it: INDIVIDUALS, GROUPS or both.',
   'share_products.available_for': 'Who may hold it: INDIVIDUALS, GROUPS or both.',
-  'account_counters.kind': 'SAVINGS (deposit accounts) or SHARES (share accounts).',
+  'account_counters.kind': 'SAVINGS (deposit accounts), SHARES (share accounts) or CREDIT_ARRANGEMENTS.',
   'account_counters.prefix': 'The letters before the number (SA, SH).',
   'account_counters.width': 'The digits the number is padded to; a longer number is not cut.',
   'account_counters.next_number': 'The next number to give; one already taken is stepped over.',
@@ -991,6 +992,24 @@ const COLUMNS = {
   'member_identification_files.content_type': 'image/png, image/jpeg or application/pdf, as read from the file itself.',
   'member_identification_files.content': 'The file.',
   'member_identification_files.size_bytes': 'Its size in bytes (at most 50 MB).',
+  'loan_accounts.solidarity_group_id': 'The group a solidarity loan was made under (members.id); null for any other loan.',
+  'loan_accounts.credit_arrangement_id': 'The credit arrangement the loan is linked to (credit_arrangements.id).',
+  'savings_accounts.credit_arrangement_id': 'The credit arrangement the overdraft is linked to (credit_arrangements.id).',
+  'savings_accounts.overdraft_expires_on': 'The overdraft expiry date: after it the overdraft limit no longer lends.',
+  'loan_products.credit_arrangement_requirement': 'Whether its loans are linked to a credit arrangement: OPTIONAL, REQUIRED or NOT_REQUIRED (none may be).',
+  'savings_products.credit_arrangement_requirement': 'Whether its overdrafts are linked to a credit arrangement: OPTIONAL, REQUIRED or NOT_REQUIRED (none may be).',
+  'client_controls.credit_arrangement_initial_state': 'The state a new credit arrangement starts in: PENDING_APPROVAL or APPROVED.',
+  'credit_arrangements.arrangement_no': 'The arrangement ID (CA000001 unless given).',
+  'credit_arrangements.holder_id': 'The member or group it belongs to (members.id).',
+  'credit_arrangements.amount': 'The credit limit.',
+  'credit_arrangements.start_date': 'The first day an account in it may be disbursed.',
+  'credit_arrangements.expire_date': 'The day it expires; linked loans mature and overdrafts expire by it.',
+  'credit_arrangements.exposure_limit_type': 'What counts against the limit: APPROVED_AMOUNT (loan amounts and overdraft limits) or OUTSTANDING_AMOUNT (balances owed).',
+  'credit_arrangements.state': 'PENDING_APPROVAL, APPROVED, ACTIVE, CLOSED, WITHDRAWN or REJECTED.',
+  'credit_arrangements.state_before_close': 'The state it was closed from, which reopening returns to.',
+  'credit_arrangements.notes': 'Notes.',
+  'credit_arrangements.approved_at': 'When it was approved.',
+  'credit_arrangements.closed_at': 'When it was closed.',
 };
 
 /** Loan product columns that mirror a loan override are described once, here. */

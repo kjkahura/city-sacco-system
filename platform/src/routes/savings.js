@@ -95,7 +95,7 @@ router.post('/:id/fees', ...tx(async (c, req, res, { actor, user }) => {
 }));
 
 router.put('/:id/overdraft', ...tx((c, req, _res, { actor }) =>
-  S.setOverdraftLimit(c, req.params.id, { limit: req.body?.limit, createdBy: actor })));
+  S.setOverdraftLimit(c, req.params.id, { limit: req.body?.limit, expiryDate: req.body && 'expiryDate' in req.body ? req.body.expiryDate : req.body?.overdraftExpiryDate, createdBy: actor })));
 
 // Close an empty account (the reference platform's Close).
 router.post('/:id/close', ...tx(async (c, req, _res, { actor }) => S.closeAccount(c, req.params.id, { createdBy: actor, notes: req.body?.notes || null })));

@@ -96,6 +96,20 @@ const RULES = [
   ['POST', '/groups', 'CREATE_GROUP'], ['PUT', '/groups/:id', EDIT_HOLDER], ['PATCH', '/groups/:id', EDIT_HOLDER],
   ['DELETE', '/groups/:id', 'DELETE_GROUP'], ['POST', '/groups/:id/members', 'EDIT_GROUP'],
   ['DELETE', '/groups/:id/members/:memberId', 'EDIT_GROUP'],
+  ['GET', '/groups/:id/solidarity-loans', { all: ['VIEW_GROUP_DETAILS', V_LOAN] }],
+  ['POST', '/groups/:id/solidarity-loans', 'CREATE_LOAN_ACCOUNT'],
+  ['GET', '/clients/:id/creditarrangements', 'VIEW_LINE_OF_CREDIT_DETAILS'], ['GET', '/groups/:id/creditarrangements', 'VIEW_LINE_OF_CREDIT_DETAILS'],
+
+  // --- credit arrangements (the reference platform's lines of credit) -----------------------------
+  // POST /creditarrangements/:id is the shape of :changeState, :addAccount and
+  // :removeAccount; each checks the permission its action needs.
+  ['GET', '/creditarrangements', 'VIEW_LINE_OF_CREDIT_DETAILS'], ['GET', '/creditarrangements/*', 'VIEW_LINE_OF_CREDIT_DETAILS'],
+  ['POST', '/creditarrangements', 'CREATE_LINES_OF_CREDIT'],
+  ['POST', '/creditarrangements/:id', ['APPROVE_LINE_OF_CREDIT', 'UNDO_APPROVE_LINE_OF_CREDIT', 'REJECT_LINE_OF_CREDIT',
+    'UNDO_REJECT_LINE_OF_CREDIT', 'WITHDRAW_LINE_OF_CREDIT', 'UNDO_WITHDRAW_LINE_OF_CREDIT', 'CLOSE_LINES_OF_CREDIT',
+    'ADD_ACCOUNTS_TO_LINE_OF_CREDIT', 'REMOTE_ACCOUNTS_FROM_LINE_OF_CREDIT']],
+  ['PUT', '/creditarrangements/:id', 'EDIT_LINES_OF_CREDIT'], ['PATCH', '/creditarrangements/:id', 'EDIT_LINES_OF_CREDIT'],
+  ['DELETE', '/creditarrangements/:id', 'DELETE_LINES_OF_CREDIT'],
   ['GET', '/client-types', OPEN], ['GET', '/client-types/*', OPEN],
   ['*', '/client-types', 'MANAGE_GENERAL_SETUP'], ['*', '/client-types/*', 'MANAGE_GENERAL_SETUP'],
   ['GET', '/group-role-names', OPEN], ['*', '/group-role-names', 'MANAGE_GENERAL_SETUP'], ['*', '/group-role-names/*', 'MANAGE_GENERAL_SETUP'],

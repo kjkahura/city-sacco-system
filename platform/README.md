@@ -136,14 +136,19 @@ src/
     duplicates.js      the duplicate client checks
     memberFiles.js     member pictures and signatures, identification document
                        files, expiry flags
-    accountNumbers.js  deposit and share account numbers from a counter
+    accountNumbers.js  deposit, share and credit arrangement numbers from a counter
+    creditArrangements.js  credit arrangements (lines of credit): states,
+                       linked accounts, the exposure checks the engine calls
+    solidarityLoans.js solidarity group loans: one loan per member, opened
+                       together for a group
   ops/
     eod.js             end-of-day jobs, idempotent per business date
     backup.js          pg_dump per tenant, retention, restore verification
     crypt.js           AES-256-GCM streaming encryption, key ring, rekey
     offsite.js         dir and command drivers for shipping backups
     scheduler.js       in-process timer behind a Postgres advisory lock
-  routes/              auth, members, clients (the reference platform's /clients and /groups), loans, loanProducts,
+  routes/              auth, members, clients (the reference platform's /clients and /groups),
+                       creditArrangements (the reference platform's /creditarrangements), loans, loanProducts,
                        depositProducts, branches, savings, shares,
                        accounting, reports, finance (provisioning, periods,
                        returns), portal (the member-facing API)
@@ -406,7 +411,10 @@ saved). A deposit product carries:
   its own annual rate) and technical (charges the system applies when there
   is no money). A withdrawal is held to the authorised limit; the floor
   trigger on `savings_accounts` refuses anything below it unless the product
-  allows technical overdrafts.
+  allows technical overdrafts. An overdraft may have an expiry date
+  (The reference platform): after it the limit no longer lends, though what is overdrawn stays
+  owed. It is optional, and needed to link the overdraft to a credit
+  arrangement (see "Lines of credit").
 - **Fees**: `MANUAL` and `MONTHLY`, each with its own income account if it
   wants one.
 
@@ -429,7 +437,8 @@ pays them first and recognises them then. The reference platform's accrual table
 cash; here the application clears the payable explicitly, so the expense is
 recognised once.
 
-Accounts: `POST /api/savings/:id/fees`, `PUT /:id/overdraft`, `POST
+Accounts: `POST /api/savings/:id/fees`, `PUT /:id/overdraft` (`limit`,
+`expiryDate`; either may be left out, and a null `expiryDate` clears it), `POST
 /:id/overdraft/write-off`, `POST /:id/interest` (accrue to a date, and apply
 with `apply: true`), `POST /:id/branch`.
 
@@ -1522,9 +1531,95 @@ After the reference platform's "Working with loan accounts" pages.
     is reversed, and fees, guarantors, collateral, deferred fee income and
     a kept number return. The original runs again and the new loan is
     Closed (Withdrawn).
-- **Not built from these pages:** solidarity group loans (a loan split among a
-  group's members; groups hold loans of their own), lines of credit (the reference platform's credit arrangements), and the
-  secondary marketplace for funded loans, which the reference platform no longer offers.
+- **Not built from these pages:** the secondary marketplace for funded
+  loans, which the reference platform no longer offers. Solidarity group loans and lines of
+  credit are in "Lines of credit and solidarity group loans".
+
+### Lines of credit and solidarity group loans
+
+After the reference platform's "Loans for Groups" and "Working with Credit Arrangements
+(Lines of Credit)" pages. Nothing existing changes: no product is for
+solidarity groups, and every loan and deposit product starts with credit
+arrangements NOT_REQUIRED, until a tenant says otherwise.
+
+**Solidarity group loans.** One individual loan account per member, each
+with its own ID, amount and schedule, all opened together for a group
+(`POST /api/groups/:id/solidarity-loans` with the product, the shared loan
+settings and `members: [{ memberId, principal }]`; `GET` lists them with
+their totals). Each loan is then approved, disbursed, repaid and written off
+on its own, so one member's default leaves the others running and a member
+who defaulted can be left out of the next cycle.
+
+- The product is available to solidarity groups only (`availableFor:
+  ['SOLIDARITY_GROUPS']`; the reference platform's `HYBRID_GROUPS` is read as it). The
+  database refuses the product to an individual on their own and to the
+  group itself.
+- Every member named must be in the group, once. The loans sit in the
+  group's branch with the group's credit officer.
+- A member's loan keeps the group it was made under
+  (`loan_accounts.solidarity_group_id`), and a reschedule keeps it where the
+  new product is also for solidarity groups.
+- Loan cycles advance per member: a repaid solidarity loan counts in the
+  member's `loanCycle` and `groupLoanCycle`.
+- A group with solidarity loans cannot be deleted. The group page in the
+  console lists them and opens new ones.
+
+**Lines of credit (credit arrangements).** the reference platform's API v2 at
+`/api/creditarrangements`: list (filters `holderKey` and `state`, paging
+headers), `POST`, `GET`, `PUT`, `PATCH` (JSON Patch or plain fields) and
+`DELETE /:id`, `POST /:id:changeState`, `POST /:id:addAccount` and
+`:removeAccount` (`accountId`, `accountType` LOAN or DEPOSIT), `GET
+/:id/accounts`, and `GET /api/clients/:id/creditarrangements` and
+`/api/groups/:id/creditarrangements`.
+
+- **Fields:** an amount, an ID (CA000001 onwards, or given), a start date
+  and an expire date, the exposure limit type, notes and custom fields
+  (entity CREDIT_ARRANGEMENT).
+- **Exposure:** APPROVED_AMOUNT counts the loan amounts and overdraft limits
+  of the linked accounts that are not closed; OUTSTANDING_AMOUNT counts the
+  principal they owe and the overdrawn balances. Consumed is the exposure,
+  available the amount less consumed. Both bases are shown. The amount may
+  be set below the exposure, making available negative (the reference platform); nothing more
+  is then paid out.
+- **States:** PENDING_APPROVAL, APPROVED (by approval, or on creation when
+  the client controls say so: `creditArrangementInitialState`, shipped
+  PENDING_APPROVAL), ACTIVE (the first account added), CLOSED (every linked
+  account closed first), WITHDRAWN and REJECTED (from pending approval).
+  Approve, reject and withdraw each have an undo; a closed arrangement is
+  reopened with UNDO_CLOSE, and its accounts cannot reopen while it is
+  closed.
+- **Linking:** each product says whether its accounts are linked
+  (`creditArrangementRequirement`: NOT_REQUIRED, OPTIONAL or REQUIRED). An
+  account is added once the arrangement is approved; it must be the same
+  holder's, open and in no other arrangement. A loan must be in partial
+  application, pending approval, approved or active, disbursed inside the
+  dates and maturing by the expire date. A deposit account needs an
+  overdraft with an expiry date by the expire date. A loan can be linked
+  when it is applied for (`creditArrangementId`). An account is removed
+  unless it is closed or its product requires an arrangement; an
+  arrangement is deleted only with no accounts.
+- **The engine's checks:** the limit when an account is added, when a
+  linked loan's amount or an overdraft limit is raised, at every payout
+  (first disbursement, tranche or revolving draw), and on the outstanding
+  basis when a withdrawal goes into a linked overdraft. A payout also needs
+  the arrangement approved or active and the date inside its dates, and a
+  new schedule must mature by the expire date. Under a REQUIRED product a
+  loan is not approved or disbursed, and an overdraft is not set, without
+  an arrangement. A product with linked open accounts cannot go back to
+  NOT_REQUIRED.
+- **Restructures:** a rescheduled or refinanced loan stays linked (the reference platform);
+  the new principal must fit with the old loan left out.
+- **Permissions:** the reference platform's 13 codes. Roles and users holding a loan
+  permission were given the matching one (tenant migration 035, platform
+  migration 010). `REMOTE_ACCOUNTS_FROM_LINE_OF_CREDIT` is the reference platform's own
+  spelling.
+- **Reading:** a CREDIT_ARRANGEMENTS custom view and menu item, the
+  indicators CREDIT_ARRANGEMENTS and CREDIT_ARRANGEMENT_AMOUNT, and a
+  branch-limited user sees the arrangements of the holders they see. In the
+  console the member and group pages list them, and each opens on its own
+  page with its state actions, accounts and edits.
+- **The Excel import** still refuses revolving, tranched, index-rate and
+  adjustable-rate loans and solidarity loans, as the reference platform's own template does.
 
 ### Closing and exiting a loan account
 
@@ -2089,11 +2184,13 @@ holds individuals only; an exited or rejected member joins none. The client
 controls decide whether a member may be in more than one group, and the
 group size limit (NONE, WARNING or HARD). Loan, deposit and share products
 say who may hold them (`availableFor`: INDIVIDUALS, GROUPS; the reference platform's
-`PURE_GROUPS` is read as GROUPS). Loan and deposit products start as
+`PURE_GROUPS` is read as GROUPS; a loan product may instead be for
+SOLIDARITY_GROUPS alone). Loan and deposit products start as
 INDIVIDUALS; share products start open to both, since a chama may hold share
 capital. A group has no member portal. Groups are imported from the Groups
-sheet (see "Data importing"). Solidarity group loans, where one
-loan is split among a group's members, are not built.
+sheet (see "Data importing"). Solidarity group loans, one loan per member
+made together for the group, are in "Lines of credit and solidarity group
+loans".
 
 ### The reference platform's API v2
 
@@ -2141,7 +2238,8 @@ what a saved view matches, and menu items can hold group views.
 `GET /api/client-controls` (any staff user) and `PATCH` (administrators):
 `initialState`, `duplicateChecks`, `requiredAssignments` (BRANCH, CENTRE,
 CREDIT_OFFICER), `multipleGroups`, `groupSizeLimitType` and
-`groupSizeLimit`, and `anonymizeAfterDays`.
+`groupSizeLimit`, `anonymizeAfterDays`, and `creditArrangementInitialState`
+(PENDING_APPROVAL or APPROVED).
 
 **In the console** the Members page has the full create form (type,
 details, branch, centre, credit officer, the mandatory ID documents and the
@@ -2290,7 +2388,7 @@ approving imports, data dictionary comments, loan migration, resetting
 passwords), or any signed-in staff user (views, menu items, your own
 profile). A route the table does not list is refused to everyone but an
 administrator. The catalogue holds only permissions that are checked,
-154 of them: the reference platform's codes for what the platform has, and eleven of the platform's
+167 of them: the reference platform's codes for what the platform has, and eleven of the platform's
 own for what the reference platform does not have (shares and dividends, provisioning, the
 year-end close, regulatory returns, data extracts, data imports read-only,
 ID templates, approving write-off requests). A few permissions are checked
@@ -2780,13 +2878,14 @@ GET  /api/views/{id}/run?offset=&limit=  GET /api/views/{id}/export?format=csv|x
 POST /api/views/{id}/copy                PUT|DELETE /api/views/{id}/favourite
 GET  /api/members?viewfilter={id}[&resultType=BASIC|FULL_DETAILS|SUMMARY]
      (also /loans, /loans/transactions, /savings, /savings/transactions,
-      /accounting/journal, /activities, /clients)
+      /accounting/journal, /activities, /clients, /groups, /creditarrangements)
 GET  /api/users/{id|email|me}/views?for=LOANS
 ```
 
 A view is a filter (match all or any), columns, a sort, totals and a display
-mode over members, loans, loan transactions, deposit accounts, deposit
-transactions, journal entries or system activities. Every field is declared
+mode over members, groups, loans, loan transactions, deposit accounts,
+deposit transactions, credit arrangements, journal entries, system
+activities or tasks. Every field is declared
 with the SQL that produces it, so a view names fields and never carries SQL;
 values are parameters. Custom fields on standard sets are fields too, under
 their view rights. Operators follow the reference platform's search operators by field type.
@@ -2876,12 +2975,13 @@ shows only when the user holds its permission.
 
 ### Not built yet
 
-Indicators for lines of credit, which wait for an audit against the reference platform's
-Credit Arrangements. The client indicators count individual members only;
-groups have their own: GROUPS, ACTIVE_GROUPS, GROUP_MEMBERS (members in
-groups), GROUP_BORROWERS (groups with running loans) and
-GROUP_LOAN_PORTFOLIO, for the organization, a branch, a centre or a credit
-officer.
+Nothing from these pages. The client indicators count individual members
+only; groups have their own: GROUPS, ACTIVE_GROUPS, GROUP_MEMBERS (members
+in groups), GROUP_BORROWERS (groups with a running group or solidarity
+loan), GROUP_LOAN_PORTFOLIO and SOLIDARITY_LOAN_PORTFOLIO. Lines of credit
+have CREDIT_ARRANGEMENTS (approved and active) and
+CREDIT_ARRANGEMENT_AMOUNT. All work for the organization, a branch, a
+centre or a credit officer.
 
 All built from posted journal lines, so they cannot drift from the ledger.
 

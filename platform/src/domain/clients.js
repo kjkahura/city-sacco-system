@@ -445,7 +445,8 @@ async function openTies(c, memberId) {
 async function anyAccounts(c, memberId) {
   const { rows: [r] } = await c.query(
     `SELECT EXISTS (SELECT 1 FROM loan_accounts WHERE member_id = $1) OR EXISTS (SELECT 1 FROM savings_accounts WHERE member_id = $1)
-         OR EXISTS (SELECT 1 FROM share_accounts WHERE member_id = $1) OR EXISTS (SELECT 1 FROM loan_guarantors WHERE member_id = $1) AS any`,
+         OR EXISTS (SELECT 1 FROM share_accounts WHERE member_id = $1) OR EXISTS (SELECT 1 FROM loan_guarantors WHERE member_id = $1)
+         OR EXISTS (SELECT 1 FROM loan_accounts WHERE solidarity_group_id = $1) OR EXISTS (SELECT 1 FROM credit_arrangements WHERE holder_id = $1) AS any`,
     [memberId]);
   return r.any;
 }
@@ -757,7 +758,10 @@ async function loanCycles(c, ids) {
     `SELECT m.id,
             (SELECT count(*)::int FROM loan_accounts l WHERE l.member_id = m.id AND l.status = 'CLOSED_REPAID') + m.prior_loan_cycles AS own,
             (SELECT count(*)::int FROM loan_accounts l JOIN group_members gm ON gm.group_id = l.member_id
-              WHERE gm.member_id = m.id AND l.status = 'CLOSED_REPAID') AS grp
+              WHERE gm.member_id = m.id AND l.status = 'CLOSED_REPAID')
+            -- A member's own solidarity loans advance their group loan cycle too (the reference platform: individually).
+            + (SELECT count(*)::int FROM loan_accounts l WHERE l.member_id = m.id AND l.solidarity_group_id IS NOT NULL
+              AND l.status = 'CLOSED_REPAID') AS grp
        FROM members m WHERE m.id = ANY($1::uuid[])`, [ids]);
   return { own: new Map(rows.map((r) => [r.id, r.own])), group: new Map(rows.map((r) => [r.id, r.grp])) };
 }

@@ -6,6 +6,7 @@ const { requireAuth } = require('../tenancy/resolve');
 const { apiError, badRequest, notFound } = require('../lib/http');
 const PA = require('../domain/productAccounting');
 const B = require('../domain/branches');
+const CA = require('../domain/creditArrangements');
 
 /**
  * Loan products, the whole configuration surface, after the reference platform's loan
@@ -138,6 +139,7 @@ const num = (v) => (v === null || v === undefined ? null : Number(v));
 const publicProduct = (p) => ({
   id: p.id, name: p.name, description: p.description, category: p.category,
   availableBranches: p.branch_ids || null, availableFor: p.available_for || ['INDIVIDUALS'], taxSourceId: p.tax_source_id || null,
+  creditArrangementRequirement: p.credit_arrangement_requirement || 'NOT_REQUIRED',
   productType: p.product_type, method: p.method,
   interestType: p.interest_type, simpleBase: p.simple_base, interestPosting: p.interest_posting,
   rateFrequency: p.rate_frequency, monthlyRate: Number(p.monthly_rate), rate: Number(p.monthly_rate),
@@ -405,14 +407,20 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
   return problems;
 }
 
-// The reference platform's "available for": INDIVIDUALS and GROUPS (PURE_GROUPS is read as GROUPS).
+// The reference platform's "available for": INDIVIDUALS, GROUPS (PURE_GROUPS is read as
+// GROUPS) and SOLIDARITY_GROUPS (HYBRID_GROUPS), which stands alone: a
+// product for solidarity groups is for them only (the reference platform).
+const AVAILABLE_FOR = { PURE_GROUPS: 'GROUPS', HYBRID_GROUPS: 'SOLIDARITY_GROUPS' };
 function availableFor(body) {
   const v = body.availableFor !== undefined ? body.availableFor : body.availabilitySettings?.availableFor;
   if (v === undefined) return undefined;
   const list = Array.isArray(v) ? v : [v];
-  const out = [...new Set(list.map((x) => (String(x).toUpperCase() === 'PURE_GROUPS' ? 'GROUPS' : String(x).toUpperCase())))];
-  if (!out.length || out.some((x) => !['INDIVIDUALS', 'GROUPS'].includes(x))) {
-    throw Object.assign(new Error('AVAILABLE_FOR_IS_A_LIST_OF: INDIVIDUALS, GROUPS'), { status: 400 });
+  const out = [...new Set(list.map((x) => AVAILABLE_FOR[String(x).toUpperCase()] || String(x).toUpperCase()))];
+  if (!out.length || out.some((x) => !['INDIVIDUALS', 'GROUPS', 'SOLIDARITY_GROUPS'].includes(x))) {
+    throw Object.assign(new Error('AVAILABLE_FOR_IS_A_LIST_OF: INDIVIDUALS, GROUPS, SOLIDARITY_GROUPS'), { status: 400 });
+  }
+  if (out.includes('SOLIDARITY_GROUPS') && out.length > 1) {
+    throw Object.assign(new Error('SOLIDARITY_GROUPS_STANDS_ALONE: a product for solidarity groups is for them only'), { status: 400 });
   }
   return out;
 }
@@ -425,6 +433,7 @@ function toColumns(body) {
   if (body && body.availableBranches !== undefined) cols.branch_ids = body.availableBranches;
   if (body && body.taxSourceId !== undefined) cols.tax_source_id = body.taxSourceId;
   if (body) { const af = availableFor(body); if (af !== undefined) cols.available_for = af; }
+  if (body && body.creditArrangementRequirement !== undefined) cols.credit_arrangement_requirement = body.creditArrangementRequirement;
   return cols;
 }
 
@@ -484,6 +493,7 @@ router.post('/', requireAuth(), async (req, res, next) => {
     if (cols.product_type === 'INTEREST_FREE' && cols.monthly_rate === undefined) cols.monthly_rate = 0;
     const out = await withTenant(req.tenant.schema_name, async (c) => {
       await resolveExtras(c, cols);
+      if (cols.credit_arrangement_requirement !== undefined) cols.credit_arrangement_requirement = await CA.assertRequirement(c, 'LOAN', null, cols.credit_arrangement_requirement);
       const problems = await validate(c, cols, { creating: true });
       if (problems.length) return { problems };
       const keys = Object.keys(cols);
@@ -517,6 +527,7 @@ router.patch('/:id', requireAuth(), async (req, res, next) => {
       if (!before) return { missing: true };
       const loans = await loansUnder(c, before.id);
       await resolveExtras(c, cols);
+      if (cols.credit_arrangement_requirement !== undefined) cols.credit_arrangement_requirement = await CA.assertRequirement(c, 'LOAN', before.id, cols.credit_arrangement_requirement);
       const problems = await validate(c, cols, { creating: false, before, loans });
       if (problems.length) return { problems };
       const keys = Object.keys(cols);

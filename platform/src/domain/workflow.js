@@ -33,6 +33,7 @@ const securities = require('./securities');
 const savings = require('./savings');
 const FA = require('./feeAmortization');
 const customFields = require('./customFields');
+const CA = require('./creditArrangements');
 const {
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMaySetDisbursementConditions,
 } = require('./controls');
@@ -224,6 +225,7 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     if (l.refinance_of) await assertTopUpStands(c, l);
     await tranches.assertPlanned(c, l);
     await funding.assertFundedForApproval(c, l);
+    await CA.onLoanApprove(c, l);
     set('approved_on', (await orgToday(c)));
     set('approved_by', createdBy || null);
   }
@@ -257,6 +259,8 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
       set('closure', null);
     }
     if (['UNDO_REJECT', 'UNDO_WITHDRAW', 'UNDO_CLOSE'].includes(name)) {
+      // Not back into a closed credit arrangement (the reference platform).
+      await CA.onLoanReopen(c, l);
       const ctl = await controls(c);
       if (ctl.max_days_undo_close !== null && l.closed_on) {
         const days = Math.floor((Date.now() - new Date(l.closed_on).getTime()) / 86400000);
@@ -553,6 +557,7 @@ async function amend(c, loanId, patch, { actor, user = null } = {}) {
     ledger.within('TERM', term, p.min_term, null);
     const given = Object.fromEntries(keys.filter((k) => ledger.OVERRIDES[k]).map((k) => [k, patch[k]]));
     Object.assign(values, ledger.resolveOverrides(p, given, { term, current: l }));
+    if (keys.includes('principal') && l.credit_arrangement_id) await CA.onLoanAmount(c, l, round2(principal));
   }
 
   const sets = [];

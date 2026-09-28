@@ -133,6 +133,7 @@ tenantApi.get('/loans', ...views.viewfilter('LOANS'));
 tenantApi.get('/loans/transactions', ...views.viewfilter('LOAN_TRANSACTIONS', { required: true }));
 tenantApi.get('/savings', ...views.viewfilter('DEPOSITS'));
 tenantApi.get('/savings/transactions', ...views.viewfilter('DEPOSIT_TRANSACTIONS', { required: true }));
+tenantApi.get('/creditarrangements', ...views.viewfilter('CREDIT_ARRANGEMENTS'));
 tenantApi.get('/accounting/journal', ...views.viewfilter('JOURNAL_ENTRIES'));
 tenantApi.get('/activities', ...views.viewfilter('ACTIVITIES', { required: true }));
 tenantApi.get('/tasks', ...views.viewfilter('TASKS'));
@@ -161,6 +162,8 @@ tenantApi.use('/groups', clientRoutes.groups);
 tenantApi.use('/client-types', clientRoutes.types);
 tenantApi.use('/group-role-names', clientRoutes.roleNames);
 tenantApi.use('/client-controls', clientRoutes.controls);
+// The reference platform's credit arrangements (lines of credit).
+tenantApi.use('/creditarrangements', require('./routes/creditArrangements').router);
 
 const savings = require('./routes/savings');
 tenantApi.use('/savings', savings);

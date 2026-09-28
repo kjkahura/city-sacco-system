@@ -48,6 +48,7 @@ const ENTITIES = {
   CENTRE: { table: 'centres', key: 'id' },
   USER: { table: 'platform.users', key: 'id', platform: true },
   TRANSACTION_CHANNEL: { table: 'transactions', key: 'id', item: 'channel_id', itemLabel: 'transaction channel' },
+  CREDIT_ARRANGEMENT: { table: 'credit_arrangements', key: 'id' },
 };
 const TYPES = ['FREE_TEXT', 'SELECTION', 'NUMBER', 'CHECKBOX', 'DATE', 'DATE_TIME', 'MEMBER_LINK', 'USER_LINK'];
 const ROLE = require('./roles');

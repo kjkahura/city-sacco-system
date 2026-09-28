@@ -1,6 +1,8 @@
 'use strict';
 
 const NUMBERS = require('./accountNumbers');
+const CA = require('./creditArrangements');
+const { orgToday } = require('../lib/orgDate');
 
 const acct = require('./accounting');
 const S = require('./schedule');
@@ -111,13 +113,23 @@ async function lockedFunding(c, memberId) {
   return round2(r.t);
 }
 
+/**
+ * The account as it lends on a day: past its overdraft expiry date (the reference platform)
+ * the overdraft limit no longer lends, though what is overdrawn stays owed.
+ */
+function onDay(a, day) {
+  if (!a.overdraft_expires_on || !day || String(a.overdraft_expires_on).slice(0, 10) >= String(day).slice(0, 10)) return a;
+  return { ...a, overdraft_limit: 0 };
+}
+
 /** What may be withdrawn: the balance plus the authorised overdraft, less pledges and the minimum balance. */
 function availableOf(a, pledged) {
   return round2(Number(a.balance) + Number(a.overdraft_limit || 0) - pledged - Number(a.min_balance || 0));
 }
 
 async function summary(c, accountId) {
-  const a = await lock(c, accountId);
+  const locked = await lock(c, accountId);
+  const a = onDay(locked, await orgToday(c));
   const pledged = await pledgedAmount(c, a.member_id);
   return {
     accountId: a.id,
@@ -129,7 +141,10 @@ async function summary(c, accountId) {
     balance: round2(a.balance),
     pledged,
     minBalance: round2(a.min_balance),
-    overdraftLimit: round2(a.overdraft_limit),
+    overdraftLimit: round2(locked.overdraft_limit),
+    overdraftExpiryDate: a.overdraft_expires_on ? S.ymd(a.overdraft_expires_on) : null,
+    overdraftExpired: Number(a.overdraft_limit) !== Number(locked.overdraft_limit),
+    creditArrangementId: a.credit_arrangement_id || null,
     overdrawn: round2(Math.max(0, -Number(a.balance))),
     available: round2(Math.max(0, availableOf(a, pledged))),
     interest: {
@@ -254,7 +269,8 @@ async function deposit(c, accountId, { amount, channelId = 'cash', valueDate, na
 }
 
 async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null, offsetPledge = null, user = null }) {
-  const a = await lock(c, accountId);
+  const day = valueDate ? S.ymd(valueDate) : await orgToday(c);
+  const a = onDay(await lock(c, accountId), day);
   if (a.status !== 'ACTIVE') throw err(`ACCOUNT_NOT_ACTIVE: ${a.status}`, 409);
   // `offsetPledge`: a guarantor's pledge being collected (./loanClosures
   // collectSecurities). The deposits it was pledged from need not be
@@ -270,6 +286,8 @@ async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, n
     throw err(`INSUFFICIENT_AVAILABLE_BALANCE: available ${available}, requested ${amt}` +
       (pledged ? ` (${pledged} pledged as loan security)` : ''), 409);
   }
+  // Into a linked overdraft: the credit arrangement's state, expiry and limit.
+  await CA.onOverdraw(c, a, amt, day);
   const ch = await channels.assertUsable(c, channelId, { side: 'SAVINGS', type: 'WITHDRAWAL', amount: amt, productId: a.product_id, user });
   if (!ch.gl_account_code) throw err(`CHANNEL_HAS_NO_GL_ACCOUNT: ${channelId}`);
 
@@ -296,7 +314,8 @@ async function transfer(c, fromId, { toAccountId, amount, valueDate, narration, 
   const first = ids.slice().sort()[0];
   await lock(c, first);
 
-  const from = await lock(c, fromId);
+  const day = valueDate ? S.ymd(valueDate) : await orgToday(c);
+  const from = onDay(await lock(c, fromId), day);
   const to = await lock(c, toAccountId);
   if (from.id === to.id) throw err('SAME_ACCOUNT_TRANSFER');
   if (to.status !== 'ACTIVE') throw err(`ACCOUNT_NOT_ACTIVE: ${to.status}`, 409);
@@ -306,6 +325,7 @@ async function transfer(c, fromId, { toAccountId, amount, valueDate, narration, 
   const pledged = await pledgedAmount(c, from.member_id);
   const available = availableOf(from, pledged);
   if (amt > available) throw err(`INSUFFICIENT_AVAILABLE_BALANCE: available ${available}`, 409);
+  await CA.onOverdraw(c, from, amt, day);
 
   const out = outLegs(from, amt);
   const inn = inLegs(to, amt);
@@ -657,17 +677,29 @@ async function endOfDay(c, { date, createdBy = 'EOD' } = {}) {
 // Overdrafts
 // --------------------------------------------------------------------------
 
-async function setOverdraftLimit(c, accountId, { limit, createdBy } = {}) {
+async function setOverdraftLimit(c, accountId, { limit, expiryDate, createdBy } = {}) {
   const a = await lock(c, accountId);
-  const lim = round2(limit);
+  const lim = limit === undefined ? round2(a.overdraft_limit) : round2(limit);
   if (!(lim >= 0)) throw err('INVALID_OVERDRAFT_LIMIT', 400);
   if (lim > 0 && !a.allow_overdraft) throw err('PRODUCT_DOES_NOT_ALLOW_OVERDRAFTS', 409);
   if (a.max_overdraft_limit !== null && lim > Number(a.max_overdraft_limit)) throw err(`OVERDRAFT_LIMIT_ABOVE_PRODUCT_MAXIMUM: ${a.max_overdraft_limit}`, 400);
   if (Number(a.balance) < -lim && !a.allow_technical_overdraft) throw err(`BALANCE_ALREADY_BELOW_THAT_LIMIT: ${a.balance}`, 409);
-  const { rows: [r] } = await c.query('UPDATE savings_accounts SET overdraft_limit = $1 WHERE id = $2 RETURNING *', [lim, a.id]);
+  // The overdraft expiry date (the reference platform): optional, a date or null to clear it.
+  let expires = a.overdraft_expires_on ? S.ymd(a.overdraft_expires_on) : null;
+  if (expiryDate !== undefined) {
+    if (expiryDate === null || expiryDate === '') expires = null;
+    else {
+      expires = String(expiryDate).slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(expires) || Number.isNaN(Date.parse(`${expires}T00:00:00Z`))) throw err('OVERDRAFT_EXPIRY_DATE_IS_A_DATE: yyyy-MM-dd', 400);
+    }
+  }
+  // The credit arrangement it is linked to, or the product's requirement for one.
+  await CA.onOverdraft(c, a, { limit: lim, expiresOn: expires });
+  const { rows: [r] } = await c.query('UPDATE savings_accounts SET overdraft_limit = $1, overdraft_expires_on = $3 WHERE id = $2 RETURNING *', [lim, a.id, expires]);
   await c.query(
     `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'OVERDRAFT_LIMIT_SET','savings_account',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', a.id, JSON.stringify({ overdraftLimit: Number(a.overdraft_limit) }), JSON.stringify({ overdraftLimit: lim })]);
+    [createdBy || 'SYSTEM', a.id, JSON.stringify({ overdraftLimit: Number(a.overdraft_limit), overdraftExpiryDate: a.overdraft_expires_on ? S.ymd(a.overdraft_expires_on) : null }),
+      JSON.stringify({ overdraftLimit: lim, overdraftExpiryDate: expires })]);
   return r;
 }
 
@@ -774,6 +806,8 @@ async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = un
   if (p.is_active === false) throw err('DEPOSIT_PRODUCT_INACTIVE', 409);
   const lim = round2(overdraftLimit || 0);
   if (lim > 0 && !p.allow_overdraft) throw err('PRODUCT_DOES_NOT_ALLOW_OVERDRAFTS', 409);
+  // An overdraft under a product that requires a credit arrangement is set once the account is linked.
+  if (lim > 0 && p.credit_arrangement_requirement === 'REQUIRED') throw err(`OVERDRAFT_NEEDS_A_CREDIT_ARRANGEMENT: product ${p.id} requires one`, 409);
   if (lim > 0 && p.max_overdraft_limit !== null && lim > Number(p.max_overdraft_limit)) {
     throw err(`OVERDRAFT_LIMIT_ABOVE_PRODUCT_MAXIMUM: ${p.max_overdraft_limit}`, 400);
   }
@@ -821,5 +855,5 @@ async function closeAccount(c, accountId, { createdBy, notes = null } = {}) {
 module.exports = {
   closeAccount, lockedFunding, open, deposit, withdraw, transfer, summary, reverseTransaction, pledgedAmount, lock, record, ref,
   applyFee, applyMonthlyFees, accrueInterest, applyInterest, endOfDay, isApplicationDate,
-  setOverdraftLimit, writeOffOverdraft, inLegs, outLegs, availableOf, books,
+  setOverdraftLimit, writeOffOverdraft, inLegs, outLegs, availableOf, onDay, books,
 };

@@ -227,6 +227,39 @@ const ENTITIES = {
       createdAt: f('Entered', 't.created_at', 'TIMESTAMP'),
     },
   },
+  CREDIT_ARRANGEMENTS: {
+    label: 'Credit arrangements', reference: 'CREDIT_ARRANGEMENTS', table: 'credit_arrangements', idSql: 'ca.id', permission: 'VIEW_LINE_OF_CREDIT_DETAILS',
+    from: `credit_arrangements ca JOIN members m ON m.id = ca.holder_id LEFT JOIN branches b ON b.id = m.branch_id
+      LEFT JOIN LATERAL (SELECT
+        (SELECT COALESCE(SUM(l.principal), 0) FROM loan_accounts l WHERE l.credit_arrangement_id = ca.id AND l.status NOT LIKE 'CLOSED%')
+          + (SELECT COALESCE(SUM(a.overdraft_limit), 0) FROM savings_accounts a WHERE a.credit_arrangement_id = ca.id AND a.status <> 'CLOSED') AS approved,
+        (SELECT COALESCE(SUM(GREATEST(l.principal_disbursed + l.principal_capitalized - l.principal_paid, 0)), 0) FROM loan_accounts l
+          WHERE l.credit_arrangement_id = ca.id AND l.status NOT LIKE 'CLOSED%')
+          + (SELECT COALESCE(SUM(GREATEST(-a.balance, 0)), 0) FROM savings_accounts a WHERE a.credit_arrangement_id = ca.id AND a.status <> 'CLOSED') AS outstanding,
+        (SELECT count(*) FROM loan_accounts l WHERE l.credit_arrangement_id = ca.id)
+          + (SELECT count(*) FROM savings_accounts a WHERE a.credit_arrangement_id = ca.id) AS accounts) x ON true`,
+    cf: { alias: 'ca', entity: 'CREDIT_ARRANGEMENT' },
+    defaults: ['arrangementId', 'holderName', 'state', 'amount', 'consumed', 'available', 'expireDate'],
+    fields: {
+      arrangementId: f('Credit arrangement ID', 'ca.arrangement_no'),
+      holderId: f('Holder ID', 'm.member_no'),
+      holderName: f('Holder', "CASE WHEN m.holder_type = 'GROUP' THEN m.first_name ELSE concat_ws(' ', m.first_name, m.last_name) END"),
+      holderType: f('Holder type', "CASE WHEN m.holder_type = 'GROUP' THEN 'GROUP' ELSE 'CLIENT' END", 'SELECTION', { values: ['CLIENT', 'GROUP'] }),
+      state: f('State', 'ca.state', 'SELECTION', { values: ['PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'CLOSED', 'WITHDRAWN', 'REJECTED'] }),
+      amount: f('Amount', 'ca.amount', 'MONEY'),
+      exposureLimitType: f('Exposure limit type', 'ca.exposure_limit_type', 'SELECTION', { values: ['APPROVED_AMOUNT', 'OUTSTANDING_AMOUNT'] }),
+      consumed: f('Consumed credit amount', "CASE WHEN ca.exposure_limit_type = 'OUTSTANDING_AMOUNT' THEN x.outstanding ELSE x.approved END", 'MONEY'),
+      available: f('Available credit amount', "ca.amount - CASE WHEN ca.exposure_limit_type = 'OUTSTANDING_AMOUNT' THEN x.outstanding ELSE x.approved END", 'MONEY'),
+      accounts: f('Accounts', 'x.accounts::int', 'NUMBER'),
+      startDate: f('Start date', 'ca.start_date', 'DATE'),
+      expireDate: f('Expire date', 'ca.expire_date', 'DATE'),
+      branch: f('Holder branch', 'b.code'),
+      approvedAt: f('Approved', 'ca.approved_at', 'TIMESTAMP'),
+      closedAt: f('Closed', 'ca.closed_at', 'TIMESTAMP'),
+      createdAt: f('Created', 'ca.created_at', 'TIMESTAMP'),
+      updatedAt: f('Last modified', 'ca.updated_at', 'TIMESTAMP'),
+    },
+  },
   JOURNAL_ENTRIES: {
     label: 'Journal entries', reference: 'JOURNAL_ENTRIES', table: 'journal_lines', idSql: 'jl.id', permission: 'VIEW_ACCOUNTING_REPORTS',
     from: 'journal_lines jl JOIN journal_entries e ON e.id = jl.entry_id JOIN gl_accounts g ON g.code = jl.gl_code LEFT JOIN branches b ON b.id = jl.branch_id',
