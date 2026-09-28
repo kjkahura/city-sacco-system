@@ -226,7 +226,7 @@ router.get('/transfers/lookup', ...read(async (c, req) => {
   const { rows: [m] } = await c.query(
     `SELECT m.id, m.first_name, m.last_name FROM members m
      JOIN member_credentials cr ON cr.member_id = m.id
-     WHERE cr.phone = $1 AND m.status = 'ACTIVE'`, [phone]);
+     WHERE cr.phone = $1 AND m.status IN ('INACTIVE', 'ACTIVE')`, [phone]);
   if (!m || m.id === req.member.id) return null;
   const a = await primarySavings(c, m.id);
   if (!a) return null;
@@ -246,7 +246,7 @@ router.post('/transfers/internal', ...write(async (c, req, { actor }) => {
 
   const { rows: [r] } = await c.query(
     `SELECT m.id FROM members m JOIN member_credentials cr ON cr.member_id = m.id
-     WHERE cr.phone = $1 AND m.status = 'ACTIVE'`, [phone]);
+     WHERE cr.phone = $1 AND m.status IN ('INACTIVE', 'ACTIVE')`, [phone]);
   if (!r) throw MA.err('RECIPIENT_NOT_FOUND', 404);
   if (r.id === req.member.id) throw MA.err('CANNOT_TRANSFER_TO_YOURSELF');
   const to = await primarySavings(c, r.id);

@@ -187,14 +187,14 @@ async function organization(c) {
   };
   const { rows: branches } = await c.query(
     `SELECT b.id::text AS id, b.code, b.name, b.status,
-            (SELECT count(*) FROM members m WHERE m.branch_id = b.id AND m.status = 'ACTIVE')::int AS members,
+            (SELECT count(*) FROM members m WHERE m.branch_id = b.id AND m.holder_type = 'CLIENT' AND m.status IN ('INACTIVE', 'ACTIVE'))::int AS members,
             (SELECT count(*) FROM centres ce WHERE ce.branch_id = b.id AND ce.status = 'ACTIVE')::int AS centres,
             (SELECT COALESCE(SUM(GREATEST(a.balance, 0)), 0) FROM savings_accounts a WHERE a.branch_id = b.id AND a.status = 'ACTIVE') AS deposits
      FROM branches b ORDER BY b.code`);
   const lb = byKey('branch_id');
   const { rows: officers } = await c.query(
-    `SELECT lower(m.credit_officer) AS email, count(*) FILTER (WHERE m.status = 'ACTIVE')::int AS members
-     FROM members m WHERE m.credit_officer IS NOT NULL GROUP BY 1`);
+    `SELECT lower(m.credit_officer) AS email, count(*) FILTER (WHERE m.status IN ('INACTIVE', 'ACTIVE'))::int AS members
+     FROM members m WHERE m.credit_officer IS NOT NULL AND m.holder_type = 'CLIENT' GROUP BY 1`);
   const lo = byKey('credit_officer');
   const emails = [...new Set([...officers.map((o) => o.email), ...[...lo.keys()].filter(Boolean)])];
   const { rows: users } = await c.query(
@@ -362,10 +362,10 @@ async function outreach(c, { from = null, to = null } = {}) {
     `WITH borrowers AS (SELECT DISTINCT member_id FROM loan_accounts WHERE status IN ('ACTIVE','IN_ARREARS','LOCKED')),
           savers AS (SELECT DISTINCT member_id FROM savings_accounts WHERE status = 'ACTIVE' AND balance > 0)
      SELECT COALESCE(b.code, 'NONE') AS branch, COALESCE(b.name, 'No branch') AS branch_name,
-            count(*) FILTER (WHERE m.status NOT IN ('EXITED','DECEASED'))::int AS clients,
+            count(*) FILTER (WHERE m.status NOT IN ('EXITED','REJECTED'))::int AS clients,
             count(*) FILTER (WHERE m.status = 'ACTIVE')::int AS active_clients,
-            count(*) FILTER (WHERE m.status NOT IN ('EXITED','DECEASED') AND m.gender = 'FEMALE')::int AS female_clients,
-            count(*) FILTER (WHERE m.status NOT IN ('EXITED','DECEASED') AND m.gender = 'MALE')::int AS male_clients,
+            count(*) FILTER (WHERE m.status NOT IN ('EXITED','REJECTED') AND m.gender = 'FEMALE')::int AS female_clients,
+            count(*) FILTER (WHERE m.status NOT IN ('EXITED','REJECTED') AND m.gender = 'MALE')::int AS male_clients,
             count(*) FILTER (WHERE bo.member_id IS NOT NULL)::int AS borrowers,
             count(*) FILTER (WHERE bo.member_id IS NOT NULL AND m.gender = 'FEMALE')::int AS female_borrowers,
             count(*) FILTER (WHERE sv.member_id IS NOT NULL)::int AS savers,
@@ -375,6 +375,7 @@ async function outreach(c, { from = null, to = null } = {}) {
      LEFT JOIN branches b ON b.id = m.branch_id
      LEFT JOIN borrowers bo ON bo.member_id = m.id
      LEFT JOIN savers sv ON sv.member_id = m.id
+     WHERE m.holder_type = 'CLIENT'
      GROUP BY 1, 2 ORDER BY 1`, [p.from, p.to]);
   const total = rows.reduce((t, r) => {
     for (const k of ['clients', 'active_clients', 'female_clients', 'male_clients', 'borrowers', 'female_borrowers', 'savers', 'joined', 'exited']) t[k] = (t[k] || 0) + r[k];

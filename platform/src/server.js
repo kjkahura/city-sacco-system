@@ -125,7 +125,7 @@ tenantApi.use('/auth', require('./routes/auth'));
 // ahead of the routers; without the parameter the request goes on to them.
 const views = require('./routes/views');
 tenantApi.get('/members', ...views.viewfilter('MEMBERS'));
-tenantApi.get('/clients', ...views.viewfilter('MEMBERS', { required: true }));
+tenantApi.get('/clients', ...views.viewfilter('MEMBERS'));
 tenantApi.get('/loans', ...views.viewfilter('LOANS'));
 tenantApi.get('/loans/transactions', ...views.viewfilter('LOAN_TRANSACTIONS', { required: true }));
 tenantApi.get('/savings', ...views.viewfilter('DEPOSITS'));
@@ -142,9 +142,22 @@ tenantApi.use('/tasks', require('./routes/tasks'));
 tenantApi.use('/tills', require('./routes/tills'));
 tenantApi.use('/report-templates', require('./routes/reportTemplates'));
 
+// The reference platform's colon actions (/members:search) escape the colon: unescaped, Express
+// reads ':search' as a route parameter and the paths overlap.
 const members = require('./routes/members');
-tenantApi.post('/members:search', ...members.searchMembers);
+tenantApi.post('/members\\:search', ...members.searchMembers);
+tenantApi.post('/members\\:duplicates', ...members.checkDuplicates);
+tenantApi.post('/members\\:reassign', ...members.reassignMembers);
 tenantApi.use('/members', members);
+// The reference platform's API v2 for clients and groups, and their setup (./routes/clients).
+const clientRoutes = require('./routes/clients');
+tenantApi.post('/clients\\:search', ...clientRoutes.searchClients);
+tenantApi.post('/groups\\:search', ...clientRoutes.searchGroups);
+tenantApi.use('/clients', clientRoutes.clients);
+tenantApi.use('/groups', clientRoutes.groups);
+tenantApi.use('/client-types', clientRoutes.types);
+tenantApi.use('/group-role-names', clientRoutes.roleNames);
+tenantApi.use('/client-controls', clientRoutes.controls);
 
 const savings = require('./routes/savings');
 tenantApi.use('/savings', savings);

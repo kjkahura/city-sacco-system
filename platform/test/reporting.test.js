@@ -85,7 +85,7 @@ const LAST_YEAR = new Date().getFullYear() - 1;
           `INSERT INTO members (member_no, first_name, last_name, status)
            VALUES ($1,$2,$3,$4)`,
           [`M${String(i).padStart(4, '0')}`, `First${i}`, `Last${String(i).padStart(4, '0')}`,
-           i % 10 === 0 ? 'DORMANT' : 'ACTIVE']
+           i % 10 === 0 ? 'EXITED' : 'ACTIVE']
         );
       }
     });
@@ -107,7 +107,7 @@ const LAST_YEAR = new Date().getFullYear() - 1;
     check('and still knows the total, so a client can recover',
       past.total === 137, String(past.total));
 
-    const filtered = await call('GET', '/api/members?status=DORMANT&limit=5');
+    const filtered = await call('GET', '/api/members?status=EXITED&limit=5');
     check('the total respects the filter', filtered.total === 13, String(filtered.total));
 
     const capped = await call('GET', '/api/members?limit=99999');

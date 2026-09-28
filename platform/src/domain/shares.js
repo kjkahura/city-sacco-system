@@ -85,7 +85,9 @@ async function transfer(c, fromAccountId, { toAccountId, units, valueDate, narra
   if (u > Number(from.units)) {
     throw err(`INSUFFICIENT_UNITS: holds ${from.units}, transferring ${u}`, 409);
   }
-  if (round4(Number(from.units) - u) < Number(from.min_units)) {
+  // The minimum holding applies to what stays; a member leaving transfers all of it.
+  const remaining = round4(Number(from.units) - u);
+  if (remaining > 0 && remaining < Number(from.min_units)) {
     throw err(`TRANSFER_WOULD_BREACH_MINIMUM_HOLDING: min ${from.min_units}`, 409);
   }
 

@@ -128,18 +128,26 @@ src/
     reports.js         balance sheet, income statement, prudential, PAR
     returns.js         regulatory return engine, templates held as data
     shares.js          share capital and the dividend cycle
+    clients.js         members and groups: create, edit, the life cycle,
+                       reassigning, deleting, anonymizing, group membership,
+                       The reference platform's Client and Group shapes
+    clientSetup.js     client and group types, ID patterns, group role names,
+                       the client controls
+    duplicates.js      the duplicate client checks
   ops/
     eod.js             end-of-day jobs, idempotent per business date
     backup.js          pg_dump per tenant, retention, restore verification
     crypt.js           AES-256-GCM streaming encryption, key ring, rekey
     offsite.js         dir and command drivers for shipping backups
     scheduler.js       in-process timer behind a Postgres advisory lock
-  routes/              auth, members, loans, loanProducts, depositProducts, branches, savings, shares,
+  routes/              auth, members, clients (the reference platform's /clients and /groups), loans, loanProducts,
+                       depositProducts, branches, savings, shares,
                        accounting, reports, finance (provisioning, periods,
                        returns), portal (the member-facing API)
   lib/
     http.js            error envelope, filter operators, legacy slicing
     page.js            SQL-side paging: offset, limit, count(*) OVER ()
+    searchCriteria.js     the reference platform's :search bodies as SQL over a map of fields
     limits.js          rate limiting and per-tenant concurrency gates
     ratestore.js       Redis-backed counters, memory fallback
 public/                the back office console: index.html, app.js, styles.css
@@ -1501,8 +1509,8 @@ After the reference platform's "Working with loan accounts" pages.
     is reversed, and fees, guarantors, collateral, deferred fee income and
     a kept number return. The original runs again and the new loan is
     Closed (Withdrawn).
-- **Not built from these pages:** solidarity group loans (there are no
-  groups), lines of credit (the reference platform's credit arrangements), and the
+- **Not built from these pages:** solidarity group loans (a loan split among a
+  group's members; groups hold loans of their own), lines of credit (the reference platform's credit arrangements), and the
   secondary marketplace for funded loans, which the reference platform no longer offers.
 
 ### Closing and exiting a loan account
@@ -1632,11 +1640,11 @@ Organization page covers all of it.
 - **Custom fields.** `/api/custom-fields`: sets (standard or grouped) and
   definitions for members, loan accounts, deposit accounts, deposit
   products, guarantors, collateral, branches, centres, users and
-  transactions by channel. Nine the reference platform types less group links (there are no
-  groups): free text with a mask and a unique flag, selection with scores
+  transactions by channel, and groups. Nine the reference platform types less group links:
+  free text with a mask and a unique flag, selection with scores
   and dependent options, number, checkbox, date, date and time, member and
   user links. Usage is Available, Default or Required, per loan product,
-  deposit product or channel where the reference platform allows it. View and edit rights
+  deposit product, channel, or client or group type where the reference platform allows it. View and edit rights
   are per role. Values sit with the record in `custom_fields` in the reference platform's
   API v2 shape; `GET` and `PUT /api/custom-fields/values/:entity/:id` read
   and change them in any state, and the create paths (members, loan
@@ -1656,7 +1664,8 @@ Organization page covers all of it.
   under their `_` IDs, beside the native fields.
 - **Found on the way:** new member numbers compared the digits of existing
   numbers as text, so '0006' sorted after '000007' and a number could repeat.
-  They are compared as numbers now.
+  They are compared as numbers now. (Member IDs now come from the client
+  type's counter; see "Members and groups".)
 
 ## Data management
 
@@ -1811,8 +1820,12 @@ SA, SU. IDs are at most 32 characters and other text 255, as in the reference pl
 - Members: the reference platform's client fields, including an ID document (type, number,
   authority, valid until, checked against the ID templates), the credit
   officer (checked against the SACCO's active users) and loan cycles
-  completed in the old system. Groups are not part of this system: a Groups
-  sheet with rows, a Group ID or a loan with client type G is refused.
+  completed in the old system. The Status column takes Active, Inactive,
+  Dormant or Exited: Active, Inactive and Dormant are imported INACTIVE and
+  become ACTIVE with the member's running accounts. Groups are not
+  imported: a Groups sheet with rows, a Group ID or a loan with client type
+  G is refused, and groups are created in the console or through
+  `/api/groups` after the import.
 - Deposit Accounts: the balance (including interest accrued and not yet
   applied), the dates applied and opened (the balance is recorded on the
   opening date, as in the reference platform), notes, an overdraft limit, and for an
@@ -1914,6 +1927,179 @@ NULL and empty text are kept apart (an empty string is written `""`).
 principal paid where it meant the installment's, so a loan that had repaid
 more than one installment's principal was never marked in arrears. It now
 reads the installment's.
+
+## Members and groups
+
+After the reference platform's Clients and Groups. The platform calls clients members. A
+member (holder type `CLIENT`) and a group (`GROUP`) are both rows of
+`members`: a group is an account holder of its own and holds loans,
+deposit accounts and shares through the same code as a member. A group
+keeps its name in `first_name` (`last_name` is empty) and has no personal
+details. The members list and the reports' member counts are individuals;
+`GET /api/members?holderType=GROUP` lists groups. This is a deviation in
+storage only: the API shows groups apart (`/api/groups`), as the reference platform does.
+
+The rules are in `src/domain/clients.js`, the setup in
+`src/domain/clientSetup.js`, the duplicate checks in
+`src/domain/duplicates.js`, and the reference platform's API shapes in `src/routes/clients.js`.
+
+### Client and group types, and member IDs
+
+`/api/client-types` (the reference platform's Client Types and Group Types): each type is for
+members or for groups, with a name, description, ID pattern, whether its
+holders may open accounts, whether they may guarantee loans, whether its
+members must bring the mandatory ID documents, and whether the address
+fields are shown. The defaults are Client (`M######`) and Group
+(`G######`); a default type and a type in use cannot be deleted. Custom
+fields for members and groups are set per type (the custom field's usage
+items are type IDs). `CHANGE_CLIENT_TYPE` and `CHANGE_GROUP_TYPE` change a
+holder's type.
+
+An ID pattern is literal characters with `#` for a digit, `@` for a letter
+and `$` for either. The run of `#` is filled from the type's counter,
+zero-padded and never cut: `M######` gives `M000041`, and `M1000000` after
+`M999999`. The counter row is locked while an ID is given out, so members
+created at the same time get different IDs, and an ID already taken (by
+hand or by an import) is stepped over. An ID by hand needs
+`EDIT_CLIENT_ID` (`EDIT_GROUP_ID`) and is 1 to 32 letters, digits, dots,
+hyphens or underscores.
+
+### Creating and editing
+
+`POST /api/members` takes the member's details, branch, centre, credit
+officer, type, ID documents and custom fields. Without a branch the member
+goes to the creator's own branch. Birth dates are checked (a real date, not
+in the future, not before 1900), gender is MALE, FEMALE or OTHER (M and F
+are read as those), email and phone numbers are checked, and the national
+ID is kept without spaces and in capitals. One ID template may be marked as
+the national ID (`nationalId: true`): its document fills the member's
+national ID, and a change to the national ID changes the document.
+
+`PATCH /api/members/:id` changes the details, each kind of change under its
+own permission: the details `EDIT_CLIENT`, the ID `EDIT_CLIENT_ID`, the type
+`CHANGE_CLIENT_TYPE`, the branch, centre and credit officer
+`MANAGE_CLIENT_ASSOCIATION`. The state does not change by PATCH.
+
+### Duplicate checks
+
+Four checks, each at NONE, WARNING or ERROR in the client controls: the
+document number (the national ID or any ID document, compared without
+spaces, hyphens or case), name with birth date, phone (the last nine
+digits, so `0712...` and `+254 712...` match) and email. ERROR refuses the
+create or the edit with `409 DUPLICATE_CLIENT`; WARNING lets it through and
+lists the matches in `duplicateWarnings`. The defaults are ERROR on the
+document number, WARNING on name with birth date and on phone, and NONE on
+email. The lookup runs in the database as the table owner, so a
+branch-limited user does not miss a duplicate in a branch they cannot see.
+`POST /api/members:duplicates` runs the checks without saving; the console
+asks before it saves a member with warnings.
+
+### The life cycle
+
+The reference platform's six states. A new member starts INACTIVE or PENDING_APPROVAL (the
+client controls; INACTIVE by default). `POST /api/members/:id/state` with
+an `action` and an optional `reason`:
+
+| Action | From | To | Permission |
+|---|---|---|---|
+| APPROVE | PENDING_APPROVAL | INACTIVE | APPROVE_CLIENT |
+| UNDO_APPROVE | INACTIVE, with no accounts or guarantees ever | PENDING_APPROVAL | UNDO_CLIENT_STATE_CHANGED |
+| REJECT | PENDING_APPROVAL | REJECTED | REJECT_CLIENT |
+| UNDO_REJECT | REJECTED | PENDING_APPROVAL | UNDO_CLIENT_STATE_CHANGED |
+| EXIT | INACTIVE | EXITED | EXIT_CLIENT |
+| UNDO_EXIT | EXITED, not anonymized | INACTIVE | UNDO_CLIENT_STATE_CHANGED |
+| BLACKLIST | PENDING_APPROVAL, INACTIVE, ACTIVE | BLACKLISTED | BLACKLIST_CLIENT |
+| UNDO_BLACKLIST | BLACKLISTED | the state before | UNDO_CLIENT_STATE_CHANGED |
+
+ACTIVE and INACTIVE follow the accounts on their own, in the database: a
+member is ACTIVE while they have a running loan (active, in arrears or
+locked) or an open deposit account (active, dormant or locked). Share
+accounts do not count. Exiting needs no open loan or application, no open
+deposit account (`POST /api/savings/:id/close` closes an empty one), no
+pledged guarantee on a running loan, no shares held (a member transfers
+them first; the minimum holding applies to what stays, not to a full
+transfer) and no group membership. The exit is dated, and emptied share
+accounts close with it.
+
+The database refuses a new running account unless its holder is INACTIVE
+or ACTIVE and of a type that may open accounts, and unless the product is
+available to that kind of holder. It refuses a guarantee unless the
+guarantor is INACTIVE or ACTIVE and of a type that may guarantee. A
+blacklisted member's existing accounts still transact; its details cannot
+change, and its custom fields change only with
+`EDIT_BLACKLISTED_CLIENT_CFV`. Groups have no state actions: a group is
+INACTIVE or ACTIVE by its accounts. Every change of state, the automatic
+ones included, is in `member_state_changes`
+(`GET /api/members/:id/state-history`).
+
+The migration mapped the old states: PENDING to PENDING_APPROVAL, DECEASED
+to EXITED with the exit reason DECEASED, and ACTIVE and DORMANT to ACTIVE or
+INACTIVE by the member's accounts (dormancy is a deposit account's state).
+
+### Reassigning, deleting and anonymizing
+
+`POST /api/members/:id/association` and `POST /api/members:reassign` (up to
+1,000 members) change the branch, centre and credit officer
+(`MANAGE_CLIENT_ASSOCIATION`). In bulk, a blank centre or credit officer
+keeps each member's own. With `moveAccounts: true` the member's open loans
+and deposit accounts move too, through the inter-branch postings (which
+needs `MANAGE_LOAN_ASSOCIATION` and `MANAGE_DEPOSIT_ASSOCIATION` as well).
+
+`DELETE /api/members/:id` (`DELETE_CLIENTS`; `DELETE_GROUP` for a group)
+deletes a member or group that never held an account or a guarantee; its
+copies in the audit log lose the personal details.
+`POST /api/members/:id/anonymize` (`ANONYMIZE_CLIENT`) removes an exited
+member's personal details, ID documents, portal access and custom field
+values, and keeps the number, the accounts and the ledger. It waits for the
+tenant to set `anonymizeAfterDays` in the client controls, and for that
+many days to pass after the exit. The period ships unset, since how long
+member records must be kept depends on the Kenya Data Protection Act 2019
+and the SACCO's own obligations.
+
+### Groups
+
+`/api/groups` (the reference platform's API): a group has a name, a type, members (each with
+any number of role names), a branch, centre and credit officer, contact
+details, an address, notes and custom fields. `/api/group-role-names`
+holds the role names (chairperson, treasurer, signatory); one in use is not
+deleted. `POST /api/groups/:id/members` and
+`DELETE /api/groups/:id/members/:memberId` add and remove members. A group
+holds individuals only; an exited or rejected member joins none. The client
+controls decide whether a member may be in more than one group, and the
+group size limit (NONE, WARNING or HARD). Loan, deposit and share products
+say who may hold them (`availableFor`: INDIVIDUALS, GROUPS; the reference platform's
+`PURE_GROUPS` is read as GROUPS). Loan and deposit products start as
+INDIVIDUALS; share products start open to both, since a chama may hold share
+capital. A group has no member portal. Solidarity group loans, where one
+loan is split among a group's members, are not built.
+
+### The reference platform's API v2
+
+`/api/clients` and `/api/groups` take and return the reference platform's Client and Group
+objects: `GET` (with `offset`, `limit`, `paginationDetails=ON`), `POST`,
+`GET /:id`, `PUT /:id` (the whole object; personal fields left out are
+cleared), `PATCH /:id` (the reference platform's JSON Patch, or a plain object of fields; a
+patch of `/state` is the state action that leads there), `DELETE /:id`,
+`POST /clients:search` and `POST /groups:search` (the reference platform's field names and
+operators, custom fields as `_set.field`, done in SQL), and
+`GET /clients/:id/role` (the client type). `/api/members` stays in the
+platform's own shape.
+
+### Client controls
+
+`GET /api/client-controls` (any staff user) and `PATCH` (administrators):
+`initialState`, `duplicateChecks`, `requiredAssignments` (BRANCH, CENTRE,
+CREDIT_OFFICER), `multipleGroups`, `groupSizeLimitType` and
+`groupSizeLimit`, and `anonymizeAfterDays`.
+
+**In the console** the Members page has the full create form (type,
+details, branch, centre, credit officer, the mandatory ID documents and the
+type's required custom fields), a bulk reassign, and on each member Edit,
+Change association, the state actions, the state history, Anonymize and
+Delete, as the user's permissions allow. The Groups page lists and creates
+groups; a group's page shows its members and roles. The Organization page
+has the client and group types, the group role names and the client
+controls.
 
 ## Staff users
 
@@ -2031,7 +2217,7 @@ approving imports, data dictionary comments, loan migration, resetting
 passwords), or any signed-in staff user (views, menu items, your own
 profile). A route the table does not list is refused to everyone but an
 administrator. The catalogue holds only permissions that are checked,
-136 of them: the reference platform's codes for what the platform has, and eleven of the platform's
+154 of them: the reference platform's codes for what the platform has, and eleven of the platform's
 own for what the reference platform does not have (shares and dividends, provisioning, the
 year-end close, regulatory returns, data extracts, data imports read-only,
 ID templates, approving write-off requests). A few permissions are checked
@@ -2213,8 +2399,7 @@ GET  /api/tasks?viewfilter={view id}  (a custom view of tasks)
 
 After the reference platform's Tasks. A task has a title, a description, a due date, an
 assignee and optionally a member; the reference platform's field names (`assignedUserKey`,
-`taskLinkType: CLIENT`, `taskLinkKey`) are accepted too. Links to groups
-are refused, since the platform has no groups. A task template fills a
+`taskLinkType: CLIENT` or `GROUP`, `taskLinkKey`) are accepted too. A task template fills a
 task's title and description, with placeholders such as `{MEMBER_NAME}` and
 `{CREDIT_OFFICER}` taking the linked member's details. A user sees the tasks
 assigned to them or made by them, and, with `EDIT_TASK`, their branch's
@@ -2618,9 +2803,10 @@ shows only when the user holds its permission.
 
 ### Not built yet
 
-Indicators for groups and lines of credit. The platform has neither groups
-nor lines of credit; both wait for an audit against the reference platform's Groups and
-Credit Arrangements before they are designed.
+Indicators for groups and lines of credit. Groups exist now (see "Members
+and groups"); their indicators, and lines of credit, wait for an audit
+against the reference platform's Credit Arrangements. The client indicators count
+individual members only.
 
 All built from posted journal lines, so they cannot drift from the ledger.
 

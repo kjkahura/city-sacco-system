@@ -11,5 +11,6 @@ The same files are kept in the claude.ai project "CoreBanking Service" under `cl
 | 3 | Data and Reporting > Reporting | 0565bbe | [build log](build-log-reporting.md) |
 | 4 | Report templates, menu items, tasks, tills and permissions | b620ab6 | [build log](build-log-workspace.md) |
 | 5 | Users and Access Control | a88a0e9 | [audit](audit-users-access-control.md), [build log](build-log-users-access-control.md) |
+| 6 | Clients and Groups | the commit that adds these files | [audit](audit-clients-and-groups.md), [build log](build-log-clients-and-groups.md) |
 
 Before section 5, the audit findings were recorded inside the build logs, with no separate audit file.

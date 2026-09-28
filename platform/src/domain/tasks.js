@@ -145,9 +145,11 @@ function dueOf(v) {
 
 async function create(c, body = {}, user) {
   const tpl = await templateOf(c, body.templateId || body.template);
-  const linkKey = body.memberId || (String(body.taskLinkType || '').toUpperCase() === 'CLIENT' ? body.taskLinkKey : null);
-  if (body.taskLinkType && String(body.taskLinkType).toUpperCase() === 'GROUP') throw err('GROUPS_ARE_NOT_BUILT: link a task to a member', 400);
+  // A task links to a member or a group (the reference platform's CLIENT and GROUP links); both are account holders here.
+  const linkType = String(body.taskLinkType || '').toUpperCase();
+  const linkKey = body.memberId || (['CLIENT', 'GROUP'].includes(linkType) ? body.taskLinkKey : null);
   const m = await memberOf(c, linkKey);
+  if (m && linkType && m.holder_type !== (linkType === 'GROUP' ? 'GROUP' : 'CLIENT')) throw err(`NOT_A_${linkType}: ${linkKey}`, 400);
   const title = String(body.title || body.summary || fill(tpl?.title, m) || '').trim();
   if (!title) throw err('TASK_TITLE_REQUIRED');
   if (title.length > 255) throw err('TASK_TITLE_TOO_LONG: at most 255 characters');

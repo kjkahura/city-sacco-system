@@ -28,6 +28,12 @@ const V_LOAN = 'VIEW_LOAN_ACCOUNT_DETAILS';
 const V_DEP = 'VIEW_SAVINGS_ACCOUNT_DETAILS';
 const V_ACC = 'VIEW_ACCOUNTING_REPORTS';
 const EOD = 'MANAGE_EOD_PROCESSING';
+// Changing a member or group: the details, its ID, its type, its association,
+// or (blacklisted) its custom fields. ../domain/clients checks the one a change needs.
+const EDIT_HOLDER = ['EDIT_CLIENT', 'EDIT_GROUP', 'EDIT_CLIENT_ID', 'EDIT_GROUP_ID', 'CHANGE_CLIENT_TYPE', 'CHANGE_GROUP_TYPE',
+  'MANAGE_CLIENT_ASSOCIATION', 'MANAGE_GROUP_ASSOCIATION', 'EDIT_BLACKLISTED_CLIENT_CFV'];
+const ASSOC = ['MANAGE_CLIENT_ASSOCIATION', 'MANAGE_GROUP_ASSOCIATION'];
+const STATE_ACTIONS = ['APPROVE_CLIENT', 'REJECT_CLIENT', 'EXIT_CLIENT', 'BLACKLIST_CLIENT', 'UNDO_CLIENT_STATE_CHANGED'];
 
 const RULES = [
   // --- not staff routes, or open to any staff ---------------------------------
@@ -68,11 +74,27 @@ const RULES = [
   ['POST', '/consumers/keys/rotation', NONE],
   ['GET', '/audit-trail/events', 'MANAGE_AUDIT_TRAIL'],
 
-  // --- members -------------------------------------------------------------------
+  // --- members and groups (the domain checks which of a list a change needs) --------
   ['GET', '/members', V_MEMBER], ['POST', '/members:search', V_MEMBER], ['GET', '/members/*', V_MEMBER],
-  ['POST', '/members', 'CREATE_CLIENT'], ['PATCH', '/members/:id', 'EDIT_CLIENT'],
+  ['POST', '/members:duplicates', V_MEMBER], ['POST', '/members:reassign', ASSOC],
+  ['POST', '/members', ['CREATE_CLIENT', 'CREATE_GROUP']], ['PATCH', '/members/:id', EDIT_HOLDER],
+  ['DELETE', '/members/:id', ['DELETE_CLIENTS', 'DELETE_GROUP']],
+  ['POST', '/members/:id/state', STATE_ACTIONS], ['POST', '/members/:id/association', ASSOC],
+  ['POST', '/members/:id/anonymize', 'ANONYMIZE_CLIENT'],
   ['POST', '/members/:id/identifications', 'CREATE_DOCUMENTS'],
   ['DELETE', '/members/:id/identifications/:docId', 'DELETE_DOCUMENTS'],
+  // The reference platform's API v2 shapes.
+  ['GET', '/clients/*', V_MEMBER], ['POST', '/clients:search', V_MEMBER], ['POST', '/clients', 'CREATE_CLIENT'],
+  ['PUT', '/clients/:id', EDIT_HOLDER], ['PATCH', '/clients/:id', [...EDIT_HOLDER, ...STATE_ACTIONS]],
+  ['DELETE', '/clients/:id', 'DELETE_CLIENTS'],
+  ['GET', '/groups', 'VIEW_GROUP_DETAILS'], ['GET', '/groups/*', 'VIEW_GROUP_DETAILS'], ['POST', '/groups:search', 'VIEW_GROUP_DETAILS'],
+  ['POST', '/groups', 'CREATE_GROUP'], ['PUT', '/groups/:id', EDIT_HOLDER], ['PATCH', '/groups/:id', EDIT_HOLDER],
+  ['DELETE', '/groups/:id', 'DELETE_GROUP'], ['POST', '/groups/:id/members', 'EDIT_GROUP'],
+  ['DELETE', '/groups/:id/members/:memberId', 'EDIT_GROUP'],
+  ['GET', '/client-types', OPEN], ['GET', '/client-types/*', OPEN],
+  ['*', '/client-types', 'MANAGE_GENERAL_SETUP'], ['*', '/client-types/*', 'MANAGE_GENERAL_SETUP'],
+  ['GET', '/group-role-names', OPEN], ['*', '/group-role-names', 'MANAGE_GENERAL_SETUP'], ['*', '/group-role-names/*', 'MANAGE_GENERAL_SETUP'],
+  ['GET', '/client-controls', OPEN], ['PATCH', '/client-controls', ADMIN],
 
   // --- deposits ------------------------------------------------------------------
   ['GET', '/savings', V_DEP], ['GET', '/savings/*', V_DEP],
@@ -80,7 +102,7 @@ const RULES = [
   ['POST', '/savings/:id/deposits', 'MAKE_DEPOSIT'], ['POST', '/savings/:id/withdrawals', 'MAKE_WITHDRAWAL'],
   ['POST', '/savings/:id/transfers', 'MAKE_TRANSFER'], ['POST', '/savings/:id/fees', 'APPLY_SAVINGS_FEES'],
   ['PUT', '/savings/:id/overdraft', 'EDIT_SAVINGS_ACCOUNT'],
-  ['POST', '/savings/:id/overdraft/write-off', 'CLOSE_SAVINGS_ACCOUNTS'],
+  ['POST', '/savings/:id/overdraft/write-off', 'CLOSE_SAVINGS_ACCOUNTS'], ['POST', '/savings/:id/close', 'CLOSE_SAVINGS_ACCOUNTS'],
   ['POST', '/savings/:id/interest', 'APPLY_ACCRUED_SAVINGS_INTEREST'],
   ['POST', '/savings/:id/branch', 'MANAGE_DEPOSIT_ASSOCIATION'],
   ['POST', '/savings/:id/loan-repayments', { all: ['MAKE_TRANSFER', 'ENTER_REPAYMENT'] }],
@@ -283,6 +305,8 @@ const CRITICAL = [
   ['POST', '/database/backup'], ['GET', '/database/backup/:id/file'],
   ['POST', '/documents/templates/:kind/:productId'], ['PATCH', '/documents/templates/:id'], ['DELETE', '/documents/templates/:id'],
   ['PATCH', '/loans/controls'], ['PATCH', '/loans/controls/users/:userId'],
+  ['DELETE', '/members/:id'], ['DELETE', '/clients/:id'], ['DELETE', '/groups/:id'], ['POST', '/members/:id/anonymize'],
+  ['PATCH', '/client-controls'],
 ].map(([m, pth], i) => compile([m, pth, null], i));
 
 function isCritical(method, path) {

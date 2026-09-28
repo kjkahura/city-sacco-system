@@ -212,7 +212,7 @@ async function call(method, p, body, { who = 'admin' } = {}) {
     await call('POST', '/api/tasks', { title: 'Count the vault', assignedTo: 'teller@till.local', dueDate: orgDay(0) }, { who: 'super' });
     await call('POST', '/api/tasks', { title: 'Plan the week', dueDate: orgDay(3) }, { who: 'teller' });
     const groupTask = await call('POST', '/api/tasks', { title: 'Group', taskLinkType: 'GROUP', taskLinkKey: 'G1' }, { who: 'teller' });
-    check('groups are not built, so a task links to a member', groupTask.status === 400);
+    check('a task linked to a group that does not exist is refused', groupTask.status === 404 || groupTask.status === 400, groupTask.text);
     const w = await call('GET', '/api/tasks/mine', null, { who: 'teller' });
     check('Your Tasks: one overdue, one due today, one upcoming', w.body.overdue === 1 && w.body.today === 1 && w.body.upcoming === 1, JSON.stringify(w.body));
     const other2 = await call('GET', '/api/tasks', null, { who: 'far' });

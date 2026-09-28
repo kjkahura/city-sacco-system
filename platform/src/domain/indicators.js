@@ -143,15 +143,15 @@ async function compute(c, { entityType = 'ORGANIZATION', entityId = null, codes 
 
   // Outreach.
   const { rows: [o] } = await c.query(
-    `WITH mem AS (SELECT m.* FROM members m WHERE ${f.member}),
+    `WITH mem AS (SELECT m.* FROM members m WHERE m.holder_type = 'CLIENT' AND ${f.member}),
           borrowers AS (SELECT DISTINCT l.member_id FROM loan_accounts l JOIN members m ON m.id = l.member_id
                         WHERE l.status IN ('ACTIVE','IN_ARREARS','LOCKED') AND ${f.loan}),
           savers AS (SELECT DISTINCT a.member_id FROM savings_accounts a JOIN members m ON m.id = a.member_id
                      WHERE a.status = 'ACTIVE' AND a.balance > 0 AND ${f.deposit})
-     SELECT (SELECT count(*) FROM mem WHERE status NOT IN ('EXITED','DECEASED'))::int AS clients,
+     SELECT (SELECT count(*) FROM mem WHERE status NOT IN ('EXITED','REJECTED'))::int AS clients,
             (SELECT count(*) FROM mem WHERE status = 'ACTIVE')::int AS active_clients,
             (SELECT count(*) FROM mem WHERE date_trunc('month', joined_on) = date_trunc('month', current_date))::int AS new_clients,
-            (SELECT count(*) FROM mem WHERE status NOT IN ('EXITED','DECEASED') AND gender = 'FEMALE')::int AS female_clients,
+            (SELECT count(*) FROM mem WHERE status NOT IN ('EXITED','REJECTED') AND gender = 'FEMALE')::int AS female_clients,
             (SELECT count(*) FROM borrowers)::int AS borrowers,
             (SELECT count(*) FROM borrowers b JOIN members m ON m.id = b.member_id WHERE m.gender = 'FEMALE')::int AS female_borrowers,
             (SELECT count(*) FROM savers)::int AS savers`, f.params);

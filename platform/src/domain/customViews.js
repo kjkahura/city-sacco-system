@@ -52,7 +52,7 @@ const LOAN_STATES = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACT
 const ENTITIES = {
   MEMBERS: {
     label: 'Members', reference: 'CLIENTS', table: 'members', idSql: 'm.id', permission: 'VIEW_CLIENT_DETAILS',
-    from: 'members m LEFT JOIN branches b ON b.id = m.branch_id LEFT JOIN centres ce ON ce.id = m.centre_id',
+    from: "(SELECT * FROM members WHERE holder_type = 'CLIENT') m LEFT JOIN branches b ON b.id = m.branch_id LEFT JOIN centres ce ON ce.id = m.centre_id",
     cf: { alias: 'm', entity: 'MEMBER' },
     defaults: ['memberNo', 'fullName', 'status', 'branch', 'phone'],
     fields: {
@@ -67,7 +67,9 @@ const ENTITIES = {
       email: f('Email', 'm.email'),
       gender: f('Gender', 'm.gender', 'SELECTION', { values: ['MALE', 'FEMALE', 'OTHER'] }),
       dateOfBirth: f('Date of birth', 'm.date_of_birth', 'DATE'),
-      status: f('State', 'm.status', 'SELECTION', { values: ['PENDING', 'ACTIVE', 'DORMANT', 'EXITED', 'DECEASED'] }),
+      status: f('State', 'm.status', 'SELECTION', { values: ['PENDING_APPROVAL', 'INACTIVE', 'ACTIVE', 'EXITED', 'BLACKLISTED', 'REJECTED'] }),
+      clientType: f('Client type', 'm.client_type_id'),
+      preferredLanguage: f('Preferred language', 'm.preferred_language'),
       joinedOn: f('Joined on', 'm.joined_on', 'DATE'),
       exitedOn: f('Exited on', 'm.exited_on', 'DATE'),
       branch: f('Branch', 'b.code'),

@@ -118,9 +118,10 @@ const SHEETS = [
     { h: 'Gender', k: 'gender', map: lookup(GENDER, 'M, F or O') },
     { h: 'Employer', k: 'employer' },
     { h: 'Branch ID', k: 'branch', id: true }, { h: 'Centre ID', k: 'centre', id: true },
-    { h: 'Group ID', k: 'groupId', id: true, hint: 'Not supported: groups are not part of this system' },
+    { h: 'Group ID', k: 'groupId', id: true, hint: 'Not supported: create groups in the console or through /api/groups' },
     { h: 'Joined on', k: 'joinedOn', type: 'date', a: ['Date Joined'], hint: 'Default: the migration date' },
-    { h: 'Status', k: 'status', map: lookup({ ACTIVE: 'ACTIVE', DORMANT: 'DORMANT', EXITED: 'EXITED' }, 'Active, Dormant or Exited'), hint: 'Default Active' },
+    { h: 'Status', k: 'status', map: lookup({ ACTIVE: 'INACTIVE', INACTIVE: 'INACTIVE', DORMANT: 'INACTIVE', EXITED: 'EXITED' },
+      'Active, Inactive, Dormant or Exited'), hint: 'Default Active. Active and Inactive follow the member\'s accounts' },
     { h: 'Address line 1', k: 'addressLine1', a: ['Address 1'] }, { h: 'Address line 2', k: 'addressLine2', a: ['Address 2'] },
     { h: 'City', k: 'city' }, { h: 'Postcode', k: 'postcode', a: ['Zip'] }, { h: 'Region', k: 'region', a: ['State/Province/Region'] }, { h: 'Country', k: 'country' },
     { h: 'Credit officer', k: 'creditOfficer', a: ['Credit Officer username', 'Credit Officer'], hint: 'The staff user\'s email (Credit Officers sheet)' },
@@ -334,7 +335,7 @@ function parse(buffer, { today }) {
   }
   const groups = byName.get(norm('Groups'));
   if (groups && groups.rows.slice(1).some((r) => r && !r.every(blank))) {
-    report.error('Groups', null, null, 'Groups are not part of this system; import their members as members');
+    report.error('Groups', null, null, 'Groups are not imported; create them in the console or through /api/groups after importing their members');
   }
 
   const data = {};
@@ -409,7 +410,7 @@ function parse(buffer, { today }) {
     if (rest.length) r.address = [r.address, ...rest].filter(Boolean).join(', ').slice(0, MAX_TEXT);
   }
   for (const r of data.members) {
-    if (r.groupId) e('members', r, 'Group ID', 'Groups are not part of this system; leave Group ID empty');
+    if (r.groupId) e('members', r, 'Group ID', 'Groups are not imported; leave Group ID empty and add the member to its group after the import');
     if ((r.idNumber && !r.idType) || (r.idType && !r.idNumber)) e('members', r, r.idNumber ? 'ID type' : 'ID number', 'An ID document needs both its type and its number');
   }
   const later = (key, r, field, label) => {
@@ -457,7 +458,7 @@ function parse(buffer, { today }) {
     }
   }
   for (const r of data.loans) {
-    if (r.clientType === 'G') e('loans', r, 'Client type', 'Group loans are not part of this system');
+    if (r.clientType === 'G') e('loans', r, 'Client type', 'Group loans are not imported; open them for the group after the import');
     r.state = r.state || 'ACTIVE';
     if (r.principalOutstanding === null && r.principalPaid !== null && r.principal !== null) r.principalOutstanding = round2(r.principal - r.principalPaid);
     if (r.principalOutstanding !== null && r.principalPaid !== null && r.principal !== null && round2(r.principal - r.principalPaid) !== r.principalOutstanding) {
@@ -749,7 +750,7 @@ async function execute(c, { asOf, data, layout = {} }, { importId, createdBy, us
       if (r.centre) dependsOn(failed.centre, String(r.centre).toUpperCase(), 'Centre');
       const centre = r.centre ? await B.centreFor(c, String(r.centre).toUpperCase(), bId || null) : null;
       const credit = await officer(r.creditOfficer);
-      const values = await CF.prepare(c, 'MEMBER', { patch: await coerce('MEMBER', r.customFields), user, creating: true });
+      const values = await CF.prepare(c, 'MEMBER', { item: 'client', patch: await coerce('MEMBER', r.customFields), user, creating: true });
       // The ID document, against the ID templates (the reference platform: ID type, number,
       // authority, valid until); mandatory templates apply as on the form.
       let docs = [];
@@ -762,14 +763,17 @@ async function execute(c, { asOf, data, layout = {} }, { importId, createdBy, us
         `INSERT INTO members (member_no, first_name, middle_name, last_name, national_id, kra_pin, phone, phone2, email,
             date_of_birth, gender, employer, status, joined_on, branch_id, centre_id, address_line1, address_line2, city,
             postcode, region, country, credit_officer, prior_loan_cycles, notes, custom_fields, import_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13,'ACTIVE'),COALESCE($14::date,$15::date),$16,$17,$18,$19,$20,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13,'INACTIVE'),COALESCE($14::date,$15::date),$16,$17,$18,$19,$20,
                  $21,$22,$23,$24,COALESCE($25,0),$26,$27,$28)
          RETURNING id, branch_id, member_no`,
-        [r.memberNo, r.firstName, r.middleName, r.lastName, r.nationalId, r.kraPin, r.phone, r.phone2, r.email,
+        [r.memberNo, r.firstName, r.middleName, r.lastName, r.nationalId ? String(r.nationalId).replace(/\s/g, '').toUpperCase() : null, r.kraPin, r.phone, r.phone2, r.email,
           r.dateOfBirth, r.gender, r.employer, r.status, r.joinedOn, asOf, bId || (centre ? centre.branch_id : null), centre ? centre.id : null,
           r.addressLine1, r.addressLine2, r.city, r.postcode, r.region, r.country, credit, r.priorLoanCycles, r.notes,
           JSON.stringify(values), importId]);
       await IDT.storeForMember(c, x.id, shaped, { createdBy });
+      if (r.status === 'EXITED') await c.query('UPDATE members SET exited_on = COALESCE(exited_on, $2::date) WHERE id = $1', [x.id, asOf]);
+      await c.query("INSERT INTO member_state_changes (member_id, to_state, action, actor) VALUES ($1, COALESCE($2, 'INACTIVE'), 'IMPORTED', $3)",
+        [x.id, r.status, createdBy]);
       await c.query(
         `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'MEMBER_IMPORTED','member',$2,$3)`,
         [createdBy, x.id, JSON.stringify({ memberNo: r.memberNo, importId })]);

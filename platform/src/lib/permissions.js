@@ -54,7 +54,7 @@ const GROUPS = [
     P('MANAGE_EOD_PROCESSING', 'Manage end of day processing and batch jobs'),
     P('MANAGE_INDEX_RATES', 'Manage index rates'),
     P('MANAGE_CURRENCIES', 'Manage currencies'),
-    PF('MANAGE_GENERAL_SETUP', 'Manage ID templates'),
+    PF('MANAGE_GENERAL_SETUP', 'Manage ID templates, client and group types, and group role names'),
   ]],
   ['Access', [
     P('CREATE_USER', 'Create users'),
@@ -79,7 +79,27 @@ const GROUPS = [
   ['Clients', [
     P('VIEW_CLIENT_DETAILS', 'View members'),
     P('CREATE_CLIENT', 'Create members'),
-    P('EDIT_CLIENT', 'Edit members'),
+    P('EDIT_CLIENT', 'Edit members\' details'),
+    P('DELETE_CLIENTS', 'Delete members who never had an account'),
+    P('APPROVE_CLIENT', 'Approve members pending approval'),
+    P('REJECT_CLIENT', 'Reject members pending approval'),
+    P('EXIT_CLIENT', 'Exit members'),
+    P('ANONYMIZE_CLIENT', 'Anonymize exited members'),
+    P('BLACKLIST_CLIENT', 'Blacklist members'),
+    P('UNDO_CLIENT_STATE_CHANGED', 'Undo approving, rejecting, exiting or blacklisting a member'),
+    P('CHANGE_CLIENT_TYPE', 'Change a member\'s client type'),
+    P('MANAGE_CLIENT_ASSOCIATION', 'Change a member\'s branch, centre and credit officer'),
+    P('EDIT_CLIENT_ID', 'Set or change a member or group ID by hand'),
+    P('EDIT_BLACKLISTED_CLIENT_CFV', 'Edit custom field values of blacklisted members'),
+  ]],
+  ['Groups', [
+    P('VIEW_GROUP_DETAILS', 'View groups'),
+    P('CREATE_GROUP', 'Create groups'),
+    P('EDIT_GROUP', 'Edit groups and their members'),
+    P('DELETE_GROUP', 'Delete groups that never had an account'),
+    P('CHANGE_GROUP_TYPE', 'Change a group\'s type'),
+    P('MANAGE_GROUP_ASSOCIATION', 'Change a group\'s branch, centre and credit officer'),
+    P('EDIT_GROUP_ID', 'Set or change a group ID by hand'),
   ]],
   ['Loan accounts', [
     P('VIEW_LOAN_ACCOUNT_DETAILS', 'View loan accounts'),
@@ -187,18 +207,20 @@ const CATALOG = GROUPS.flatMap(([group, list]) => list.map((p) => ({ ...p, group
 const CODES = new Set(CATALOG.map((p) => p.code));
 
 // Every staff user can look.
-const ALL_STAFF = ['VIEW_CLIENT_DETAILS', 'VIEW_LOAN_ACCOUNT_DETAILS', 'VIEW_SAVINGS_ACCOUNT_DETAILS', 'VIEW_TASK', 'CREATE_TASK',
+const ALL_STAFF = ['VIEW_CLIENT_DETAILS', 'VIEW_GROUP_DETAILS', 'VIEW_LOAN_ACCOUNT_DETAILS', 'VIEW_SAVINGS_ACCOUNT_DETAILS', 'VIEW_TASK', 'CREATE_TASK',
   'EDIT_TASK', 'EXPORT_TO_EXCEL', 'VIEW_BRANCH_DETAILS', 'VIEW_CENTRE_DETAILS', 'VIEW_TRANSACTION_CHANNELS', 'VIEW_DOCUMENTS',
   'VIEW_LOAN_PRODUCT_DETAILS', 'VIEW_SAVINGS_PRODUCT_DETAILS', 'VIEW_CUSTOM_FIELD'];
 const READERS = ['VIEW_REPORTS', 'VIEW_INTELLIGENCE', 'VIEW_ACCOUNTING_REPORTS'];
 // What the front office posts: members, accounts, cash, loan applications.
-const FRONT_OFFICE = ['CREATE_CLIENT', 'CREATE_DOCUMENTS', 'EDIT_DOCUMENTS', 'CREATE_SAVINGS_ACCOUNT', 'MAKE_DEPOSIT', 'MAKE_WITHDRAWAL',
+const FRONT_OFFICE = ['CREATE_CLIENT', 'CREATE_GROUP', 'CREATE_DOCUMENTS', 'EDIT_DOCUMENTS', 'CREATE_SAVINGS_ACCOUNT', 'MAKE_DEPOSIT', 'MAKE_WITHDRAWAL',
   'MAKE_TRANSFER', 'APPLY_SAVINGS_FEES', 'ENTER_REPAYMENT', 'CREATE_LOAN_ACCOUNT', 'EDIT_LOAN_ACCOUNT', 'CREATE_SECURITIES',
   'REQUEST_LOAN_APPROVAL', 'SET_LOAN_INCOMPLETE', 'WITHDRAW_LOAN_ACCOUNTS', 'PAY_OFF_LOAN', 'EDIT_LOAN_TRANCHES', 'EDIT_INVESTOR_FUNDS',
   'APPLY_LOAN_FEES', 'REFINANCE_LOAN_ACCOUNT', 'WRITE_OFF_LOAN_ACCOUNTS', 'LINK_ACCOUNTS', 'BUY_SHARES',
   'POST_TRANSACTIONS_ON_LOCKED_LOAN_ACCOUNTS', 'PERFORM_REPAYMENTS_WITH_CUSTOM_AMOUNTS_ALLOCATION', 'SET_DISBURSEMENT_CONDITIONS'];
 // What a branch manager approves and runs on top of that.
-const MANAGEMENT = ['EDIT_CLIENT', 'DELETE_DOCUMENTS', 'EDIT_SAVINGS_ACCOUNT', 'CLOSE_SAVINGS_ACCOUNTS', 'APPLY_ACCRUED_SAVINGS_INTEREST',
+const MANAGEMENT = ['EDIT_CLIENT', 'APPROVE_CLIENT', 'REJECT_CLIENT', 'EXIT_CLIENT', 'BLACKLIST_CLIENT',
+  'UNDO_CLIENT_STATE_CHANGED', 'CHANGE_CLIENT_TYPE', 'MANAGE_CLIENT_ASSOCIATION', 'EDIT_CLIENT_ID', 'EDIT_BLACKLISTED_CLIENT_CFV', 'EDIT_GROUP',
+  'CHANGE_GROUP_TYPE', 'MANAGE_GROUP_ASSOCIATION', 'EDIT_GROUP_ID', 'DELETE_DOCUMENTS', 'EDIT_SAVINGS_ACCOUNT', 'CLOSE_SAVINGS_ACCOUNTS', 'APPLY_ACCRUED_SAVINGS_INTEREST',
   'MANAGE_DEPOSIT_ASSOCIATION', 'APPLY_SAVINGS_ADJUSTMENTS', 'DELETE_SECURITIES', 'EDIT_SECURITIES', 'COLLECT_GUARANTIES',
   'APPROVE_LOANS', 'REJECT_LOANS', 'UNDO_REJECT_LOANS', 'UNDO_WITHDRAW_LOAN_ACCOUNTS', 'LOCK_LOAN_ACCOUNTS', 'CLOSE_LOAN_ACCOUNTS',
   'UNDO_LOAN_ACCOUNT_CLOSURE', 'TERMINATE_LOAN_ACCOUNTS', 'EDIT_INTEREST_RATE', 'RESCHEDULE_LOAN_ACCOUNT', 'EDIT_REPAYMENT_SCHEDULE',

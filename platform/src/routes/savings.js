@@ -97,6 +97,9 @@ router.post('/:id/fees', ...tx(async (c, req, res, { actor, user }) => {
 router.put('/:id/overdraft', ...tx((c, req, _res, { actor }) =>
   S.setOverdraftLimit(c, req.params.id, { limit: req.body?.limit, createdBy: actor })));
 
+// Close an empty account (the reference platform's Close).
+router.post('/:id/close', ...tx(async (c, req, _res, { actor }) => S.closeAccount(c, req.params.id, { createdBy: actor, notes: req.body?.notes || null })));
+
 router.post('/:id/overdraft/write-off', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   return await S.writeOffOverdraft(c, req.params.id, { ...req.body, createdBy: actor });

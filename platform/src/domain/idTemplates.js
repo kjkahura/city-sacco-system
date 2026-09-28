@@ -2,6 +2,7 @@
 
 const acct = require('./accounting');
 const { err } = acct;
+const DUP = require('./duplicates');
 
 /**
  * ID templates, after the reference platform's page of that name: the kinds of
@@ -14,6 +15,13 @@ const { err } = acct;
  * without a template. A template in use cannot be deleted; editing one can
  * leave older documents out of step, and they are brought in line the next
  * time they are edited.
+ *
+ * One template may be marked as the national ID: its document fills the
+ * member's national ID, and a change to the national ID changes the
+ * document. A client type may leave out the mandatory templates (the reference platform's
+ * "Require identification documents"); groups hold no documents. A document
+ * number that another member already holds is checked as the client
+ * controls' DOCUMENT_ID duplicate check says (./duplicates).
  */
 
 // Sent as base64 in JSON, inside the 1 MB request limit.
@@ -62,11 +70,19 @@ function shape(body, creating) {
   if (out.mask && !/[#@$]/.test(out.mask)) throw err('THE_TEMPLATE_NEEDS_AT_LEAST_ONE_OF_#_@_$', 400);
   if (body.mandatory !== undefined) out.mandatory = body.mandatory === true;
   if (body.allowAttachments !== undefined) out.allow_attachments = body.allowAttachments === true;
+  if (body.nationalId !== undefined) out.national_id = body.nationalId === true;
   return out;
+}
+
+async function oneNationalId(c, cols, id = null) {
+  if (!cols.national_id) return;
+  const { rows: [o] } = await c.query('SELECT id FROM id_templates WHERE national_id AND id IS DISTINCT FROM $1', [id]);
+  if (o) throw err(`ANOTHER_TEMPLATE_IS_THE_NATIONAL_ID: ${o.id}`, 409);
 }
 
 async function create(c, body = {}, { createdBy } = {}) {
   const cols = { ...shape(body, true), created_by: createdBy || 'SYSTEM' };
+  await oneNationalId(c, cols);
   const keys = Object.keys(cols);
   const { rows: [t] } = await c.query(
     `INSERT INTO id_templates (${keys.join(', ')}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(', ')}) ON CONFLICT (id) DO NOTHING RETURNING *`,
@@ -85,6 +101,7 @@ async function find(c, id) {
 async function update(c, id, body = {}, { createdBy } = {}) {
   const before = await find(c, id);
   const cols = shape(body, false);
+  await oneNationalId(c, cols, before.id);
   const keys = Object.keys(cols);
   if (!keys.length) throw err('NO_UPDATABLE_FIELDS', 400);
   const { rows: [after] } = await c.query(`UPDATE id_templates SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')} WHERE id = $1 RETURNING *`,
@@ -152,15 +169,38 @@ async function shapeDocument(c, d) {
 }
 
 async function addDocument(c, memberId, d = {}, { createdBy } = {}) {
-  const { rows: [m] } = await c.query('SELECT id FROM members WHERE id::text = $1 OR member_no = $1', [String(memberId)]);
+  const { rows: [m] } = await c.query('SELECT * FROM members WHERE id::text = $1 OR member_no = $1', [String(memberId)]);
   if (!m) throw err('MEMBER_NOT_FOUND', 404);
+  if (m.holder_type === 'GROUP') throw err('GROUPS_HAVE_NO_IDENTIFICATION_DOCUMENTS', 400);
+  if (m.anonymized_at) throw err('THE_MEMBER_IS_ANONYMIZED', 409);
   const cols = { ...(await shapeDocument(c, d)), member_id: m.id, created_by: createdBy || 'SYSTEM' };
+  const found = (await DUP.find(c, { holder_type: 'CLIENT', first_name: null, last_name: null }, { docs: [cols], exclude: m.id }))
+    .filter((x) => x.check === 'DOCUMENT_ID');
+  if (found.some((x) => x.level === 'ERROR')) {
+    throw err(`DUPLICATE_CLIENT: DOCUMENT_ID matches ${found.map((x) => x.memberNo).join(', ')}`, 409);
+  }
+  // The national ID template's document fills the member's national ID.
+  if (cols.template_id) {
+    const t = await find(c, cols.template_id);
+    if (t.national_id) {
+      const v = DUP.normId(cols.document_id);
+      try {
+        await c.query('SAVEPOINT nid');
+        await c.query('UPDATE members SET national_id = $2, updated_at = now() WHERE id = $1 AND national_id IS DISTINCT FROM $2', [m.id, v]);
+        await c.query('RELEASE SAVEPOINT nid');
+      } catch (e) {
+        await c.query('ROLLBACK TO SAVEPOINT nid');
+        if (e.code === '23505') throw err('DUPLICATE_MEMBER: another member holds this national ID', 409);
+        throw e;
+      }
+    }
+  }
   const keys = Object.keys(cols);
   const { rows: [doc] } = await c.query(
     `INSERT INTO member_identifications (${keys.join(', ')}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING *`,
     keys.map((k) => cols[k]));
   await audit(c, createdBy, 'MEMBER_ID_DOCUMENT_ADDED', 'member', m.id, null, publicDoc(doc));
-  return publicDoc(doc);
+  return { ...publicDoc(doc), duplicateWarnings: found.filter((x) => x.level === 'WARNING') };
 }
 
 async function documents(c, memberId) {
@@ -197,10 +237,11 @@ async function attachment(c, memberId, docId) {
  * The documents a new member arrives with: each checked, and every
  * mandatory template covered.
  */
-async function forNewMember(c, docs = []) {
+async function forNewMember(c, docs = [], { requireMandatory = true } = {}) {
   if (!Array.isArray(docs)) throw err('IDENTIFICATION_DOCUMENTS_IS_A_LIST', 400);
   const shaped = [];
   for (const d of docs) shaped.push(await shapeDocument(c, d));
+  if (!requireMandatory) return shaped;
   const { rows: mandatory } = await c.query('SELECT id, id_type FROM id_templates WHERE mandatory');
   const missing = mandatory.filter((t) => !shaped.some((d) => d.template_id === t.id));
   if (missing.length) throw err(`MANDATORY_ID_DOCUMENTS_MISSING: ${missing.map((t) => t.id_type).join(', ')}`, 400);

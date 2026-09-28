@@ -447,6 +447,9 @@ function render() {
 // --------------------------------------------------------------------------
 
 const memberState = { offset: 0, limit: 25, q: '', status: '' };
+const MEMBER_STATES = ['PENDING_APPROVAL', 'INACTIVE', 'ACTIVE', 'EXITED', 'BLACKLISTED', 'REJECTED'];
+const LANGUAGES = ['ENGLISH', 'SWAHILI', 'FRENCH', 'PORTUGESE', 'SPANISH', 'GERMAN', 'ITALIAN', 'CHINESE', 'RUSSIAN', 'NORWEGIAN'];
+const stateBadge = (s) => `<span class="badge ${['ACTIVE', 'INACTIVE'].includes(s) ? '' : 'bad'}" data-state="${esc(s)}">${esc(String(s).replace(/_/g, ' ').toLowerCase())}</span>`;
 
 async function membersView() {
   const qs = new URLSearchParams({ offset: memberState.offset, limit: memberState.limit });
@@ -454,26 +457,31 @@ async function membersView() {
   if (memberState.status) qs.set('status', memberState.status);
   const r = await api('GET', `/api/members?${qs}`);
   if (!r.ok) throw new Error(r.error);
+  const assoc = can('MANAGE_CLIENT_ASSOCIATION');
 
   view().innerHTML = `
     <div class="toolbar">
-      <label>Search<input id="m-q" value="${esc(memberState.q)}" placeholder="name, number or phone"></label>
-      <label>Status<select id="m-status">
-        ${['', 'ACTIVE', 'DORMANT', 'PENDING', 'EXITED'].map((s) =>
-    `<option ${s === memberState.status ? 'selected' : ''} value="${s}">${s || 'Any'}</option>`).join('')}
+      <label>Search<input id="m-q" value="${esc(memberState.q)}" placeholder="name, number, phone, email or national ID"></label>
+      <label>State<select id="m-status">
+        ${['', ...MEMBER_STATES].map((s) =>
+    `<option ${s === memberState.status ? 'selected' : ''} value="${s}">${s ? s.replace(/_/g, ' ').toLowerCase() : 'Any'}</option>`).join('')}
       </select></label>
-      <button id="m-new">New member</button>
+      ${can('CREATE_CLIENT') ? '<button id="m-new">New member</button>' : ''}
+      ${assoc ? '<button class="secondary" id="m-reassign">Reassign selected</button>' : ''}
     </div>
     ${table([
+    ...(assoc ? [{ label: '', html: true, value: (m) => `<input type="checkbox" data-pick="${esc(m.id)}" aria-label="select ${esc(m.member_no)}">` }] : []),
     { label: 'No.', key: 'member_no' },
-    { label: 'Name', value: (m) => `${m.first_name} ${m.last_name}` },
+    { label: 'Name', value: (m) => [m.first_name, m.middle_name, m.last_name].filter(Boolean).join(' ') },
     { label: 'Phone', key: 'phone' },
-    { label: 'Status', value: (m) => m.status },
+    { label: 'State', html: true, value: (m) => stateBadge(m.status) },
+    { label: 'Type', key: 'client_type_id' },
     { label: 'Joined', value: (m) => day(m.joined_on) },
   ], r.body, { onRow: true, empty: 'No members match' })}
     ${pager(memberState, r.total)}`;
 
   wireRows(r.body, memberDetail);
+  view().querySelectorAll('[data-pick]').forEach((b) => b.addEventListener('click', (e) => e.stopPropagation()));
   wirePager(memberState, membersView);
   $('#m-q').addEventListener('change', (e) => {
     memberState.q = e.target.value; memberState.offset = 0; membersView();
@@ -481,53 +489,201 @@ async function membersView() {
   $('#m-status').addEventListener('change', (e) => {
     memberState.status = e.target.value; memberState.offset = 0; membersView();
   });
-  $('#m-new').addEventListener('click', async () => {
-    const d = await ask([
-      { label: 'First name', name: 'firstName' },
-      { label: 'Last name', name: 'lastName' },
-      { label: 'Phone', name: 'phone', required: false },
-      { label: 'National ID', name: 'nationalId', required: false },
-    ], 'New member');
+  const nb = $('#m-new');
+  if (nb) nb.addEventListener('click', () => newHolder('CLIENT', membersView));
+  const rb = $('#m-reassign');
+  if (rb) rb.addEventListener('click', async () => {
+    const ids = [...view().querySelectorAll('[data-pick]:checked')].map((x) => x.dataset.pick);
+    if (!ids.length) return toast('Select the members to reassign first', true);
+    const d = await associationForm(`Reassign ${ids.length} member(s)`, { bulk: true });
     if (!d) return;
-    const res = await api('POST', '/api/members', d);
-    toast(res.ok ? `Member ${res.body.member_no} created` : res.error, !res.ok);
+    const res = await api('POST', '/api/members:reassign', { members: ids, ...d });
+    toast(res.ok ? `${res.body.reassigned} member(s) reassigned` : res.error, !res.ok);
     if (res.ok) membersView();
   });
 }
 
-async function memberDetail(m) {
-  const [savings, loans, shares, history, ids, cf] = await Promise.all([
+/** Branch, centre, credit officer and whether the accounts move (the reference platform's Reassign). */
+async function associationForm(title, { bulk = false, m = null } = {}) {
+  const [br, ce] = await Promise.all([api('GET', '/api/branches'), api('GET', '/api/centres')]);
+  const code = (list, id) => (list || []).find((x) => x.id === id)?.code || '';
+  const d = await ask([
+    opt({ label: 'Branch', name: 'branchId', options: ['', ...(br.body || []).filter((b) => b.status === 'ACTIVE').map((b) => b.code)], value: m ? code(br.body, m.branch_id) : '' }),
+    opt({ label: 'Centre', name: 'centreId', options: ['', ...(ce.body || []).filter((x) => x.status === 'ACTIVE').map((x) => x.code)], value: m ? code(ce.body, m.centre_id) : '',
+      hint: bulk ? 'Blank keeps each member\'s centre' : 'In the branch chosen' }),
+    opt({ label: 'Credit officer (email)', name: 'creditOfficer', value: m?.credit_officer || '', hint: bulk ? 'Blank keeps each member\'s credit officer' : '' }),
+    { label: 'Move the accounts too', name: 'moveAccounts', options: ['false', 'true'] },
+  ], title);
+  if (!d) return null;
+  const out = { moveAccounts: d.moveAccounts === 'true' };
+  if (d.branchId) out.branchId = d.branchId;
+  if (bulk) { if (d.centreId) out.centreId = d.centreId; if (d.creditOfficer) out.creditOfficer = d.creditOfficer; }
+  else { out.centreId = d.centreId || null; out.creditOfficer = d.creditOfficer || null; }
+  return out;
+}
+
+/** The fields of the create and edit forms, as the holder's type shows them. */
+function holderFields(type, m = null, holderType = 'CLIENT') {
+  const f = [];
+  if (holderType === 'GROUP') f.push({ label: 'Group name', name: 'groupName', value: m?.first_name || '' });
+  else {
+    f.push({ label: 'First name', name: 'firstName', value: m?.first_name || '' }, opt({ label: 'Middle name', name: 'middleName', value: m?.middle_name || '' }),
+      { label: 'Last name', name: 'lastName', value: m?.last_name || '' },
+      opt({ label: 'Gender', name: 'gender', options: ['', 'FEMALE', 'MALE', 'OTHER'], value: m?.gender || '' }),
+      opt({ label: 'Date of birth', name: 'dateOfBirth', type: 'date', value: m?.date_of_birth || '' }),
+      opt({ label: 'National ID', name: 'nationalId', value: m?.national_id || '' }), opt({ label: 'KRA PIN', name: 'kraPin', value: m?.kra_pin || '' }),
+      opt({ label: 'Employer', name: 'employer', value: m?.employer || '' }));
+  }
+  f.push(opt({ label: 'Mobile phone', name: 'phone', value: m?.phone || '' }), opt({ label: 'Other phone', name: 'phone2', value: m?.phone2 || '' }),
+    opt({ label: 'Email', name: 'email', type: 'email', value: m?.email || '' }),
+    opt({ label: 'Preferred language', name: 'preferredLanguage', options: ['', ...LANGUAGES], value: m?.preferred_language || '' }));
+  if (!type || type.useDefaultAddress !== false) {
+    f.push(opt({ label: 'Address', name: 'addressLine1', value: m?.address_line1 || '' }), opt({ label: 'Address, second line', name: 'addressLine2', value: m?.address_line2 || '' }),
+      opt({ label: 'City', name: 'city', value: m?.city || '' }), opt({ label: 'Postcode', name: 'postcode', value: m?.postcode || '' }),
+      opt({ label: 'Region', name: 'region', value: m?.region || '' }), opt({ label: 'Country', name: 'country', value: m?.country || '' }));
+  }
+  f.push(opt({ label: 'Notes', name: 'notes', type: 'textarea', rows: 3, value: m?.notes || '' }));
+  return f;
+}
+
+/**
+ * Create a member or a group (the reference platform's Create): the type first, then its
+ * form, with the association, the mandatory ID documents and the required
+ * custom fields of that type. A member's duplicate checks are asked before
+ * it is saved; warnings are shown and confirmed.
+ */
+async function newHolder(holderType, after) {
+  const word = holderType === 'GROUP' ? 'group' : 'member';
+  const tr = await api('GET', `/api/client-types?holderType=${holderType}`);
+  const types = tr.body || [];
+  let type = types.find((t) => t.isDefault) || types[0];
+  if (types.length > 1) {
+    const d = await ask([{ label: holderType === 'GROUP' ? 'Group type' : 'Client type', name: 'type', options: types.map((t) => t.id), value: type?.id,
+      hint: types.map((t) => `${t.id}: ${t.name}`).join('; ') }], `New ${word}`);
+    if (!d) return;
+    type = types.find((t) => t.id === d.type);
+  }
+  const [br, ce, idt, defs] = await Promise.all([api('GET', '/api/branches'), api('GET', '/api/centres'), api('GET', '/api/id-templates'),
+    api('GET', `/api/custom-fields/definitions?entity=${holderType === 'GROUP' ? 'GROUP' : 'MEMBER'}`)]);
+  const fields = holderFields(type, null, holderType);
+  fields.push(opt({ label: 'Branch', name: 'branchId', options: ['', ...(br.body || []).filter((b) => b.status === 'ACTIVE').map((b) => b.code)], hint: 'Blank: your own branch' }),
+    opt({ label: 'Centre', name: 'centreId', options: ['', ...(ce.body || []).filter((x) => x.status === 'ACTIVE').map((x) => x.code)] }),
+    opt({ label: 'Credit officer (email)', name: 'creditOfficer' }));
+  if (can(holderType === 'GROUP' ? 'EDIT_GROUP_ID' : 'EDIT_CLIENT_ID')) fields.push(opt({ label: 'ID (blank: the next from the type)', name: 'memberNo' }));
+  const mandatory = holderType === 'CLIENT' && type?.requireIdentificationDocuments ? (idt.body?.templates || []).filter((t) => t.mandatory) : [];
+  for (const t of mandatory) fields.push({ label: `${t.id_type} number`, name: `doc:${t.id}`, hint: `Template ${t.mask}` });
+  const required = (defs.body || []).filter((d) => d.is_active && d.set_id && d.set_type !== 'GROUPED'
+    && (d.available_for_all ? d.usage?.required : d.usage?.items?.[type?.id]?.required));
+  for (const d of required) {
+    const f = { label: `${d.set_name || d.set_id}: ${d.name}`, name: `cf:${d.set_id}|${d.id}` };
+    if (d.field_type === 'SELECTION') f.options = (d.options || []).map((o) => o.id);
+    if (d.field_type === 'DATE') f.type = 'date';
+    if (d.field_type === 'NUMBER') { f.type = 'number'; f.step = 'any'; }
+    fields.push(f);
+  }
+  const d = await ask(fields, `New ${type ? type.name.toLowerCase() : word}`);
+  if (!d) return;
+  const body = { holderType, clientTypeId: type?.id, identificationDocuments: [], customFields: {} };
+  for (const [k, v] of Object.entries(d)) {
+    if (v === '' || v === undefined) continue;
+    if (k.startsWith('doc:')) body.identificationDocuments.push({ templateId: k.slice(4), documentId: v });
+    else if (k.startsWith('cf:')) {
+      const [sid, fid] = k.slice(3).split('|');
+      const def = required.find((x) => x.set_id === sid && x.id === fid);
+      body.customFields[sid] = { ...(body.customFields[sid] || {}), [fid]: def?.field_type === 'NUMBER' ? Number(v) : v };
+    } else body[k] = v;
+  }
+  if (holderType === 'CLIENT') {
+    const dup = await api('POST', '/api/members:duplicates', body);
+    const hard = (dup.body || []).filter((x) => x.level === 'ERROR');
+    if (hard.length) return toast(`Duplicate: ${hard.map((x) => `${x.check.replace(/_/g, ' ').toLowerCase()} matches ${x.memberNo} (${x.state.toLowerCase()})`).join('; ')}`, true);
+    const soft = (dup.body || []).filter((x) => x.level === 'WARNING');
+    if (soft.length && !(await ask([], `Possible duplicate: ${soft.map((x) => `${x.check.replace(/_/g, ' ').toLowerCase()} matches ${x.memberNo}`).join('; ')}. Create anyway?`))) return;
+  }
+  const res = await api('POST', '/api/members', body);
+  toast(res.ok ? `${holderType === 'GROUP' ? 'Group' : 'Member'} ${res.body.member_no} created` : res.error, !res.ok);
+  if (res.ok) memberDetail(res.body);
+  else if (after) after();
+}
+
+/** The state actions a member's state allows and the user may take (the reference platform's life cycle). */
+const STATE_ACTIONS = [
+  ['APPROVE', 'Approve', ['PENDING_APPROVAL'], 'APPROVE_CLIENT'], ['REJECT', 'Reject', ['PENDING_APPROVAL'], 'REJECT_CLIENT'],
+  ['UNDO_APPROVE', 'Undo approve', ['INACTIVE'], 'UNDO_CLIENT_STATE_CHANGED'], ['UNDO_REJECT', 'Undo reject', ['REJECTED'], 'UNDO_CLIENT_STATE_CHANGED'],
+  ['EXIT', 'Exit', ['INACTIVE'], 'EXIT_CLIENT'], ['UNDO_EXIT', 'Undo exit', ['EXITED'], 'UNDO_CLIENT_STATE_CHANGED'],
+  ['BLACKLIST', 'Blacklist', ['PENDING_APPROVAL', 'INACTIVE', 'ACTIVE'], 'BLACKLIST_CLIENT'],
+  ['UNDO_BLACKLIST', 'Undo blacklist', ['BLACKLISTED'], 'UNDO_CLIENT_STATE_CHANGED'],
+];
+
+async function memberDetail(m0) {
+  const fresh = await api('GET', `/api/members/${m0.id}`);
+  if (!fresh.ok) throw new Error(fresh.error);
+  const m = fresh.body;
+  const isGroup = m.holder_type === 'GROUP';
+  const P = isGroup ? { edit: 'EDIT_GROUP', assoc: 'MANAGE_GROUP_ASSOCIATION', del: 'DELETE_GROUP' } : { edit: 'EDIT_CLIENT', assoc: 'MANAGE_CLIENT_ASSOCIATION', del: 'DELETE_CLIENTS' };
+  const [savings, loans, shares, history, ids, cf, types, br, ce, roleNames] = await Promise.all([
     api('GET', `/api/savings?memberId=${m.id}&limit=50`),
     api('GET', `/api/loans?memberId=${m.id}&limit=50`),
-    api('GET', '/api/shares?limit=200'),
+    api('GET', `/api/shares?memberId=${m.id}&limit=50`),
     api('GET', `/api/members/${m.id}/loan-history`),
-    api('GET', `/api/members/${m.id}/identifications`),
-    api('GET', `/api/custom-fields/values/MEMBER/${m.id}`),
+    isGroup ? Promise.resolve({ ok: true, body: [] }) : api('GET', `/api/members/${m.id}/identifications`),
+    api('GET', `/api/custom-fields/values/${isGroup ? 'GROUP' : 'MEMBER'}/${m.id}`),
+    api('GET', '/api/client-types'), api('GET', '/api/branches'), api('GET', '/api/centres'),
+    isGroup ? api('GET', '/api/group-role-names') : Promise.resolve({ body: [] }),
   ]);
   const h = history.body || {};
   const myShares = (shares.body || []).filter((s) => s.member_id === m.id);
+  const type = (types.body || []).find((t) => t.id === m.client_type_id);
+  const code = (list, id) => (list || []).find((x) => x.id === id)?.code || '—';
+  const name = isGroup ? m.first_name : [m.first_name, m.middle_name, m.last_name].filter(Boolean).join(' ');
+  const actions = isGroup || m.anonymized_at ? [] : STATE_ACTIONS.filter(([, , from, perm]) => from.includes(m.status) && can(perm));
+  const editable = m.status !== 'BLACKLISTED' && !m.anonymized_at;
+  const roleName = new Map((roleNames.body || []).map((r) => [r.id, r.name]));
 
   view().innerHTML = `
-    <button class="secondary" id="back">← Members</button>
-    <h1>${esc(m.first_name)} ${esc(m.last_name)} <span class="badge">${esc(m.member_no)}</span></h1>
+    <button class="secondary" id="back">← ${isGroup ? 'Groups' : 'Members'}</button>
+    <h1>${esc(name)} <span class="badge">${esc(m.member_no)}</span> ${stateBadge(m.status)}</h1>
+    <div class="toolbar" id="member-actions">
+      ${editable && can(P.edit) ? '<button class="secondary" id="m-edit">Edit</button>' : ''}
+      ${editable && can(P.assoc) ? '<button class="secondary" id="m-assoc">Change association</button>' : ''}
+      ${actions.map(([a, label]) => `<button class="secondary" data-state-action="${a}">${esc(label)}</button>`).join('')}
+      ${!isGroup ? '<button class="secondary" id="m-history">State history</button>' : ''}
+      ${!isGroup && m.status === 'EXITED' && !m.anonymized_at && can('ANONYMIZE_CLIENT') ? '<button class="secondary" id="m-anon">Anonymize</button>' : ''}
+      ${can(P.del) ? '<button class="secondary" id="m-delete">Delete</button>' : ''}
+    </div>
     <div class="grid">
-      ${card('Details', `<dl class="kv">
-        <dt>Status</dt><dd>${esc(m.status)}</dd>
-        <dt>Phone</dt><dd>${esc(m.phone || '—')}</dd>
+      ${card('Details', `<dl class="kv" id="member-details">
+        <dt>State</dt><dd>${esc(m.status)}${m.state_reason ? ` (${esc(m.state_reason)})` : ''}${m.exit_reason ? ` (${esc(m.exit_reason)})` : ''}</dd>
+        <dt>Type</dt><dd>${esc(type ? type.name : m.client_type_id)}</dd>
+        ${isGroup ? '' : `<dt>Gender</dt><dd>${esc(m.gender || '—')}</dd><dt>Date of birth</dt><dd>${day(m.date_of_birth) || '—'}</dd>
+        <dt>National ID</dt><dd>${esc(m.national_id || '—')}</dd><dt>KRA PIN</dt><dd>${esc(m.kra_pin || '—')}</dd>`}
+        <dt>Phone</dt><dd>${esc(m.phone || '—')}${m.phone2 ? `, ${esc(m.phone2)}` : ''}</dd>
         <dt>Email</dt><dd>${esc(m.email || '—')}</dd>
-        <dt>National ID</dt><dd>${esc(m.national_id || '—')}</dd>
-        <dt>Joined</dt><dd>${day(m.joined_on)}</dd>
+        <dt>Branch</dt><dd>${esc(code(br.body, m.branch_id))}</dd><dt>Centre</dt><dd>${esc(code(ce.body, m.centre_id))}</dd>
+        <dt>Credit officer</dt><dd>${esc(m.credit_officer || '—')}</dd>
+        <dt>Joined</dt><dd>${day(m.joined_on)}</dd>${m.exited_on ? `<dt>Exited</dt><dd>${day(m.exited_on)}</dd>` : ''}
+        ${!isGroup ? `<dt>Groups</dt><dd>${(m.groups || []).map((g) => esc(`${g.group_name} (${g.member_no})`)).join(', ') || '—'}</dd>` : ''}
       </dl>`)}
-      ${card('Savings', table([
+      ${card('Savings', `${table([
     { label: 'Account', key: 'account_no' },
     { label: 'Product', key: 'product_id' },
+    { label: 'State', key: 'status' },
     { label: 'Balance', num: true, value: (a) => money(a.balance) },
-  ], savings.body || [], { empty: 'No savings accounts' }))}
+    { label: '', html: true, value: (a) => (can('CLOSE_SAVINGS_ACCOUNTS') && ['ACTIVE', 'DORMANT'].includes(a.status) && Number(a.balance) === 0
+      ? `<button class="link" data-close-acc="${esc(a.id)}">close</button>` : '') },
+  ], savings.body || [], { empty: 'No savings accounts' })}`)}
       ${card('Shares', table([
     { label: 'Account', key: 'account_no' },
     { label: 'Units', num: true, value: (a) => Number(a.units).toLocaleString() },
   ], myShares, { empty: 'No share account' }))}
     </div>
+    ${isGroup ? `<div id="group-members">${card('Group members', `${table([
+    { label: 'No.', key: 'member_no' }, { label: 'Name', value: (x) => `${x.first_name} ${x.last_name}` },
+    { label: 'Roles', value: (x) => (x.roles || []).map((r) => roleName.get(r) || r).join(', ') },
+    { label: 'State', key: 'status' },
+    { label: '', html: true, value: (x) => (can('EDIT_GROUP') ? `<button class="link" data-gm-drop="${esc(x.member_id)}">remove</button>` : '') },
+  ], m.groupMembers || [], { empty: 'No members yet' })}
+      ${can('EDIT_GROUP') ? '<button class="secondary" id="gm-add">Add member</button>' : ''}`)}</div>` : ''}
     ${card('Loans', table([
     { label: 'Account', key: 'account_no' },
     { label: 'Status', key: 'status' },
@@ -545,20 +701,94 @@ async function memberDetail(m) {
     { label: 'How', value: (x) => String(x.closedAs).toLowerCase().replace(/_/g, ' ') },
     { label: 'On time', num: true, value: (x) => (x.onTimeRate === null ? '' : `${x.onTimeRate}%`) },
   ], h.closedLoans || [], { empty: 'No closed loans' })}`)}</div>` : ''}
-    <div id="identifications">${card('Identification documents', `${table([
+    ${isGroup ? '' : `<div id="identifications">${card('Identification documents', `${table([
     { label: 'Type', key: 'id_type' }, { label: 'Number', key: 'document_id' }, { label: 'Issued by', key: 'issuing_authority' },
     { label: 'Valid until', value: (x) => day(x.valid_until) },
     { label: '', html: true, value: (x) => `${x.hasAttachment ? `<button class="link" data-id-file="${esc(x.id)}">attachment</button> ` : ''}<button class="link" data-id-drop="${esc(x.id)}">remove</button>` },
   ], ids.body || [], { empty: 'No identification documents' })}
-      <button class="secondary" id="id-add">Add document</button>`)}</div>
+      <button class="secondary" id="id-add">Add document</button>`)}</div>`}
     ${cf.ok ? customFieldsCard(cf.body) : ''}`;
 
-  $('#back').addEventListener('click', membersView);
+  $('#back').addEventListener('click', isGroup ? groupsView : membersView);
   memberTasks(m);
   entityReports('MEMBER', m.member_no);
   wireRows(loans.body || [], loanDetail);
   const reload = () => memberDetail(m);
-  if (cf.ok) wireCustomFields(cf.body, 'MEMBER', m.id, reload);
+  const on = (sel, fn) => { const b = $(sel); if (b) b.addEventListener('click', fn); };
+  if (cf.ok) wireCustomFields(cf.body, isGroup ? 'GROUP' : 'MEMBER', m.id, reload);
+  on('#m-edit', async () => {
+    const fields = holderFields(type, m, m.holder_type);
+    if (can(isGroup ? 'CHANGE_GROUP_TYPE' : 'CHANGE_CLIENT_TYPE')) {
+      fields.push({ label: 'Type', name: 'clientTypeId', options: (types.body || []).filter((t) => t.holderType === m.holder_type).map((t) => t.id), value: m.client_type_id });
+    }
+    if (can(isGroup ? 'EDIT_GROUP_ID' : 'EDIT_CLIENT_ID')) fields.push({ label: 'ID', name: 'memberNo', value: m.member_no });
+    const d = await ask(fields, `Edit ${m.member_no}`);
+    if (!d) return;
+    const cols = { firstName: 'first_name', middleName: 'middle_name', lastName: 'last_name', groupName: 'first_name', gender: 'gender', dateOfBirth: 'date_of_birth',
+      nationalId: 'national_id', kraPin: 'kra_pin', employer: 'employer', phone: 'phone', phone2: 'phone2', email: 'email', preferredLanguage: 'preferred_language',
+      addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', postcode: 'postcode', region: 'region', country: 'country', notes: 'notes',
+      clientTypeId: 'client_type_id', memberNo: 'member_no' };
+    const patch = {};
+    for (const [k, v] of Object.entries(d)) if ((m[cols[k]] ?? '') !== v) patch[k] = v === '' ? null : v;
+    if (!Object.keys(patch).length) return toast('Nothing changed');
+    const res = await api('PATCH', `/api/members/${m.id}`, patch);
+    const warn = res.body?.duplicateWarnings?.length ? ` (possible duplicate of ${res.body.duplicateWarnings.map((x) => x.memberNo).join(', ')})` : '';
+    toast(res.ok ? `Saved${warn}` : res.error, !res.ok);
+    if (res.ok) reload();
+  });
+  on('#m-assoc', async () => {
+    const d = await associationForm(`Association of ${m.member_no}`, { m });
+    if (!d) return;
+    const res = await api('POST', `/api/members/${m.id}/association`, d);
+    toast(res.ok ? `Reassigned${res.body.accountsMoved.length ? `, ${res.body.accountsMoved.length} account(s) moved` : ''}` : res.error, !res.ok);
+    if (res.ok) reload();
+  });
+  view().querySelectorAll('[data-state-action]').forEach((b) => b.addEventListener('click', async () => {
+    const a = b.dataset.stateAction;
+    const needsReason = ['REJECT', 'BLACKLIST', 'EXIT'].includes(a);
+    const d = await ask(needsReason ? [opt({ label: 'Reason', name: 'reason', type: 'textarea', rows: 3 })] : [], `${b.textContent} ${m.member_no}?`);
+    if (!d) return;
+    const res = await api('POST', `/api/members/${m.id}/state`, { action: a, reason: d.reason || undefined });
+    toast(res.ok ? `Now ${res.body.status.replace(/_/g, ' ').toLowerCase()}` : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
+  on('#m-history', async () => {
+    const r = await api('GET', `/api/members/${m.id}/state-history`);
+    showDialog(`State history of ${m.member_no}`, table([
+      { label: 'When', value: (x) => String(x.changed_at).replace('T', ' ').slice(0, 16) }, { label: 'Action', key: 'action' },
+      { label: 'From', key: 'from_state' }, { label: 'To', key: 'to_state' }, { label: 'By', key: 'actor' }, { label: 'Reason', key: 'reason' },
+    ], r.body || [], { empty: 'No changes' }));
+  });
+  on('#m-anon', async () => {
+    if (!(await ask([], `Anonymize ${m.member_no}? Personal details, ID documents and portal access are removed for good; the number and the accounts stay.`))) return;
+    const res = await api('POST', `/api/members/${m.id}/anonymize`);
+    toast(res.ok ? 'Anonymized' : res.error, !res.ok);
+    if (res.ok) reload();
+  });
+  on('#m-delete', async () => {
+    if (!(await ask([], `Delete ${m.member_no}? Only a ${isGroup ? 'group' : 'member'} that never had an account can be deleted, and it cannot be undone.`))) return;
+    const res = await api('DELETE', `/api/members/${m.id}`);
+    toast(res.ok ? `Deleted ${m.member_no}` : res.error, !res.ok);
+    if (res.ok) (isGroup ? groupsView : membersView)();
+  });
+  view().querySelectorAll('[data-close-acc]').forEach((b) => b.addEventListener('click', async () => {
+    const res = await api('POST', `/api/savings/${b.dataset.closeAcc}/close`, {});
+    toast(res.ok ? 'Account closed' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
+  on('#gm-add', async () => {
+    const d = await ask([{ label: 'Member number', name: 'memberId' },
+      opt({ label: 'Role names (IDs, comma separated)', name: 'roles', hint: (roleNames.body || []).map((r) => `${r.id}: ${r.name}`).join('; ') || 'No role names are set up' })], `Add a member to ${m.member_no}`);
+    if (!d) return;
+    const res = await api('POST', `/api/groups/${m.id}/members`, { memberId: d.memberId, roles: String(d.roles || '').split(',').map((x) => x.trim()).filter(Boolean) });
+    toast(res.ok ? `Added${res.body.groupWarnings?.length ? ` (${res.body.groupWarnings.join('; ')})` : ''}` : res.error, !res.ok);
+    if (res.ok) reload();
+  });
+  view().querySelectorAll('[data-gm-drop]').forEach((b) => b.addEventListener('click', async () => {
+    const res = await api('DELETE', `/api/groups/${m.id}/members/${b.dataset.gmDrop}`);
+    toast(res.ok ? 'Removed from the group' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
   view().querySelectorAll('[data-id-file]').forEach((b) => b.addEventListener('click', () =>
     openFile(`/api/members/${m.id}/identifications/${b.dataset.idFile}/attachment`, 'document', { save: true })));
   view().querySelectorAll('[data-id-drop]').forEach((b) => b.addEventListener('click', async () => {
@@ -566,7 +796,7 @@ async function memberDetail(m) {
     toast(res.ok ? 'Document removed' : res.error, !res.ok);
     if (res.ok) reload();
   }));
-  $('#id-add').addEventListener('click', async () => {
+  on('#id-add', async () => {
     const t = await api('GET', '/api/id-templates');
     const opts = (t.body?.templates || []).map((x) => x.id);
     if (t.body?.allowOther) opts.push('OTHER');
@@ -583,6 +813,108 @@ async function memberDetail(m) {
     const res = await api('POST', `/api/members/${m.id}/identifications`, body);
     toast(res.ok ? 'Document added' : res.error, !res.ok);
     if (res.ok) reload();
+  });
+}
+
+// --------------------------------------------------------------------------
+// Groups (the reference platform's groups: account holders with individual members in roles)
+// --------------------------------------------------------------------------
+
+const groupState = { offset: 0, limit: 25 };
+
+async function groupsView() {
+  const r = await api('GET', `/api/groups?offset=${groupState.offset}&limit=${groupState.limit}&paginationDetails=ON`);
+  if (!r.ok) throw new Error(r.error);
+  view().innerHTML = `
+    <div class="toolbar"><h1>Groups</h1>${can('CREATE_GROUP') ? '<button id="g-new">New group</button>' : ''}</div>
+    <p class="hint">A group holds loans and deposit accounts of its own; its members are individual members, each with any group role names.
+    A group is inactive until it has a running account.</p>
+    ${table([
+    { label: 'ID', key: 'id' }, { label: 'Name', key: 'groupName' }, { label: 'Type', key: 'groupRoleKey' },
+    { label: 'State', html: true, value: (g) => stateBadge(g.state) }, { label: 'Members', num: true, value: (g) => g.groupMembers.length },
+  ], r.body, { onRow: true, empty: 'No groups yet' })}
+    ${pager(groupState, r.total)}`;
+  wireRows(r.body, (g) => memberDetail({ id: g.encodedKey }));
+  wirePager(groupState, groupsView);
+  const nb = $('#g-new');
+  if (nb) nb.addEventListener('click', () => newHolder('GROUP', groupsView));
+}
+
+/** Organization: client and group types, group role names and the client controls. */
+async function clientsSetup(box) {
+  if (!box) return;
+  const [types, roles, ctl] = await Promise.all([api('GET', '/api/client-types'), api('GET', '/api/group-role-names'), api('GET', '/api/client-controls')]);
+  const setup = can('MANAGE_GENERAL_SETUP');
+  const admin = S.user.role === 'TENANT_ADMIN';
+  const c = ctl.body || {};
+  const yes = (v) => (v ? 'yes' : '');
+  box.innerHTML = `
+    ${card('Client and group types', `${table([
+    { label: 'ID', key: 'id' }, { label: 'Name', key: 'name' }, { label: 'For', value: (t) => (t.holderType === 'GROUP' ? 'groups' : 'members') },
+    { label: 'ID pattern', key: 'idPattern' }, { label: 'Opens accounts', value: (t) => yes(t.canOpenAccounts) },
+    { label: 'Guarantees', value: (t) => yes(t.canGuarantee) }, { label: 'ID documents', value: (t) => yes(t.requireIdentificationDocuments) },
+    { label: 'In use', num: true, key: 'inUse' },
+    { label: '', html: true, value: (t) => (setup ? `<button class="link" data-ctype="${esc(t.id)}">edit</button>${t.isDefault || t.inUse ? '' : ` <button class="link" data-ctype-drop="${esc(t.id)}">delete</button>`}` : '') },
+  ], types.body || [], { empty: 'No types' })}
+    <p class="hint">ID pattern: # a digit (the run of # counts up and widens past its length), @ a letter, $ either.</p>
+    ${setup ? '<button class="secondary" id="ctype-add">New type</button>' : ''}`)}
+    <div class="grid">
+    ${card('Group role names', `${table([{ label: 'ID', key: 'id' }, { label: 'Name', key: 'name' }, { label: 'Held', num: true, key: 'inUse' },
+    { label: '', html: true, value: (r) => (setup ? `<button class="link" data-grn="${esc(r.id)}">rename</button>${r.inUse ? '' : ` <button class="link" data-grn-drop="${esc(r.id)}">delete</button>`}` : '') },
+  ], roles.body || [], { empty: 'No role names' })}
+    ${setup ? '<button class="secondary" id="grn-add">New role name</button>' : ''}`)}
+    ${card('Client controls', `<dl class="kv" id="client-controls">
+      <dt>New members start</dt><dd>${esc(String(c.initialState || '').replace(/_/g, ' ').toLowerCase())}</dd>
+      <dt>Duplicate checks</dt><dd>${esc(Object.entries(c.duplicateChecks || {}).map(([k, v]) => `${k.replace(/_/g, ' ').toLowerCase()}: ${v.toLowerCase()}`).join(', '))}</dd>
+      <dt>Required</dt><dd>${esc((c.requiredAssignments || []).map((x) => x.replace(/_/g, ' ').toLowerCase()).join(', ') || 'nothing')}</dd>
+      <dt>In more than one group</dt><dd>${c.multipleGroups ? 'allowed' : 'not allowed'}</dd>
+      <dt>Group size limit</dt><dd>${c.groupSizeLimitType === 'NONE' ? 'none' : `${esc(c.groupSizeLimit)} (${esc(String(c.groupSizeLimitType).toLowerCase())})`}</dd>
+      <dt>Anonymize after exit</dt><dd>${c.anonymizeAfterDays === null || c.anonymizeAfterDays === undefined ? 'not set (anonymizing is off)' : `${esc(c.anonymizeAfterDays)} days`}</dd></dl>
+      ${admin ? '<button class="secondary" id="cc-edit">Edit</button>' : ''}`)}
+  </div>`;
+  const done = (res, msg) => { toast(res.ok ? msg : res.error, !res.ok); if (res.ok) clientsSetup(box); };
+  const bool = (v) => v === 'true';
+  const typeForm = (t = {}) => ask([
+    ...(t.id ? [] : [{ label: 'For', name: 'holderType', options: ['CLIENT', 'GROUP'] }, opt({ label: 'ID (blank: generated)', name: 'id' })]),
+    { label: 'Name', name: 'name', value: t.name || '' }, opt({ label: 'Description', name: 'description', value: t.description || '' }),
+    opt({ label: 'ID pattern', name: 'idPattern', value: t.idPattern || '', hint: 'e.g. M######; blank: the default' }),
+    { label: 'May open accounts', name: 'canOpenAccounts', options: ['true', 'false'], value: String(t.canOpenAccounts ?? true) },
+    { label: 'May guarantee', name: 'canGuarantee', options: ['true', 'false'], value: String(t.canGuarantee ?? true) },
+    { label: 'Must bring the mandatory ID documents (members)', name: 'requireIdentificationDocuments', options: ['true', 'false'], value: String(t.requireIdentificationDocuments ?? true) },
+    { label: 'Show the address fields', name: 'useDefaultAddress', options: ['true', 'false'], value: String(t.useDefaultAddress ?? true) },
+  ], t.id ? `Type ${t.id}` : 'New type');
+  const typeBody = (d) => ({ ...d, id: d.id || undefined, idPattern: d.idPattern || null, description: d.description || null, canOpenAccounts: bool(d.canOpenAccounts),
+    canGuarantee: bool(d.canGuarantee), requireIdentificationDocuments: bool(d.requireIdentificationDocuments), useDefaultAddress: bool(d.useDefaultAddress) });
+  const on = (sel, fn) => { const b = $(sel, box); if (b) b.addEventListener('click', fn); };
+  const each = (attr, fn) => box.querySelectorAll(`[data-${attr}]`).forEach((b) => b.addEventListener('click', () => fn(b.getAttribute(`data-${attr}`))));
+  on('#ctype-add', async () => { const d = await typeForm(); if (d) done(await api('POST', '/api/client-types', typeBody(d)), 'Type created'); });
+  each('ctype', async (id) => { const d = await typeForm((types.body || []).find((t) => t.id === id)); if (d) done(await api('PATCH', `/api/client-types/${id}`, typeBody(d)), 'Type saved'); });
+  each('ctype-drop', async (id) => done(await api('DELETE', `/api/client-types/${id}`), 'Type deleted'));
+  on('#grn-add', async () => { const d = await ask([{ label: 'Name', name: 'name' }, opt({ label: 'ID (blank: generated)', name: 'id' })], 'New group role name'); if (d) done(await api('POST', '/api/group-role-names', { name: d.name, id: d.id || undefined }), 'Role name created'); });
+  each('grn', async (id) => { const d = await ask([{ label: 'Name', name: 'name', value: (roles.body || []).find((r) => r.id === id)?.name }], `Role name ${id}`); if (d) done(await api('PATCH', `/api/group-role-names/${id}`, d), 'Saved'); });
+  each('grn-drop', async (id) => done(await api('DELETE', `/api/group-role-names/${id}`), 'Role name deleted'));
+  on('#cc-edit', async () => {
+    const lv = ['NONE', 'WARNING', 'ERROR'];
+    const dc = c.duplicateChecks || {};
+    const d = await ask([
+      { label: 'New members start', name: 'initialState', options: ['INACTIVE', 'PENDING_APPROVAL'], value: c.initialState },
+      { label: 'Duplicate document number', name: 'DOCUMENT_ID', options: lv, value: dc.DOCUMENT_ID },
+      { label: 'Duplicate name and birth date', name: 'NAME_AND_BIRTH_DATE', options: lv, value: dc.NAME_AND_BIRTH_DATE },
+      { label: 'Duplicate phone', name: 'PHONE', options: lv, value: dc.PHONE }, { label: 'Duplicate email', name: 'EMAIL', options: lv, value: dc.EMAIL },
+      opt({ label: 'Required (comma separated: BRANCH, CENTRE, CREDIT_OFFICER)', name: 'requiredAssignments', value: (c.requiredAssignments || []).join(', ') }),
+      { label: 'Members may be in more than one group', name: 'multipleGroups', options: ['true', 'false'], value: String(c.multipleGroups) },
+      { label: 'Group size limit', name: 'groupSizeLimitType', options: ['NONE', 'WARNING', 'HARD'], value: c.groupSizeLimitType },
+      opt({ label: 'Most members in a group', name: 'groupSizeLimit', type: 'number', value: c.groupSizeLimit ?? '' }),
+      opt({ label: 'Days after exit before anonymizing (blank: not set)', name: 'anonymizeAfterDays', type: 'number', value: c.anonymizeAfterDays ?? '' }),
+    ], 'Client controls');
+    if (!d) return;
+    done(await api('PATCH', '/api/client-controls', {
+      initialState: d.initialState, duplicateChecks: { DOCUMENT_ID: d.DOCUMENT_ID, NAME_AND_BIRTH_DATE: d.NAME_AND_BIRTH_DATE, PHONE: d.PHONE, EMAIL: d.EMAIL },
+      requiredAssignments: String(d.requiredAssignments || '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
+      multipleGroups: bool(d.multipleGroups), groupSizeLimitType: d.groupSizeLimitType,
+      groupSizeLimit: d.groupSizeLimit === '' ? null : Number(d.groupSizeLimit),
+      anonymizeAfterDays: d.anonymizeAfterDays === '' ? null : Number(d.anonymizeAfterDays),
+    }), 'Client controls saved');
   });
 }
 
@@ -3152,6 +3484,7 @@ async function orgView() {
     { label: 'Loans left out', num: true, key: 'failed_loans' },
   ], (e.completions || []).slice(0, 5), { empty: 'No end of day recorded yet' })}`)}
     </div>
+    <div id="org-clients"></div>
     ${card('Branches and centres', `<div id="org-branches">${table([
     { label: 'Code', key: 'code' }, { label: 'Name', key: 'name' }, { label: 'Status', key: 'status' },
     { label: 'Email', key: 'email' }, { label: 'Members', num: true, key: 'members' },
@@ -3185,6 +3518,7 @@ async function orgView() {
       ${card('ID templates', `<div id="org-idt">${table([
     { label: 'ID', key: 'id' }, { label: 'Type', key: 'id_type' }, { label: 'Issued by', key: 'issuing_authority' }, { label: 'Template', key: 'mask' },
     { label: 'Mandatory', value: (t) => (t.mandatory ? 'yes' : '') }, { label: 'Attachments', value: (t) => (t.allow_attachments ? 'yes' : '') },
+    { label: 'National ID', value: (t) => (t.national_id ? 'yes' : '') },
     { label: '', html: true, value: (t) => (manage ? `<button class="link" data-idt="${esc(t.id)}">edit</button>` : '') },
   ], idt.body?.templates || [], { empty: 'No ID templates' })}</div>
       <p class="hint">Other documents without a template: ${idt.body?.allowOther ? 'allowed' : 'not allowed'}. Template: # a digit, @ a letter, $ either.</p>
@@ -3216,6 +3550,7 @@ async function orgView() {
       ${manage ? '<button class="secondary" id="doc-list">Templates of a product</button> <button class="secondary" id="doc-add">New template</button>' : ''}
       <div id="org-docs"></div>`)}`;
 
+  clientsSetup($('#org-clients'));
   const done = (res, msg) => { toast(res.ok ? msg : res.error, !res.ok); if (res.ok) orgView(); };
   const on = (sel, fn) => { const b = $(sel); if (b) b.addEventListener('click', fn); };
   const each = (attr, fn) => view().querySelectorAll(`[data-${attr}]`).forEach((b) => b.addEventListener('click', () => fn(b.dataset[attr.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())])));
@@ -3338,8 +3673,9 @@ async function orgView() {
     { label: 'ID document template', name: 'mask', value: t.mask || '', hint: '# a digit, @ a letter, $ either' },
     { label: 'Mandatory for members', name: 'mandatory', options: ['false', 'true'], value: String(Boolean(t.mandatory)) },
     { label: 'Allow attachments', name: 'allowAttachments', options: ['false', 'true'], value: String(Boolean(t.allow_attachments)) },
+    { label: 'Fills the member\'s national ID', name: 'nationalId', options: ['false', 'true'], value: String(Boolean(t.national_id)) },
   ], t.id ? `ID template ${t.id}` : 'New ID template');
-  const idtBody = (d) => ({ ...d, id: d.id || undefined, mandatory: d.mandatory === 'true', allowAttachments: d.allowAttachments === 'true' });
+  const idtBody = (d) => ({ ...d, id: d.id || undefined, mandatory: d.mandatory === 'true', allowAttachments: d.allowAttachments === 'true', nationalId: d.nationalId === 'true' });
   on('#idt-add', async () => { const d = await idtForm(); if (d) done(await api('POST', '/api/id-templates', idtBody(d)), 'Template created'); });
   each('idt', async (id) => { const d = await idtForm((idt.body?.templates || []).find((t) => t.id === id)); if (d) done(await api('PATCH', `/api/id-templates/${id}`, idtBody(d)), 'Template saved'); });
   on('#idt-other', async () => done(await api('PUT', '/api/id-templates/other', { allow: !idt.body?.allowOther }), 'Saved'));
@@ -3361,7 +3697,7 @@ async function orgView() {
     const d = await ask([{ label: `Buy rate (${code} in base)`, name: 'buyRate', type: 'number', step: 'any' }, { label: 'Sell rate', name: 'sellRate', type: 'number', step: 'any' }], `Exchange rate for ${code}`);
     if (d) done(await api('POST', `/api/currencies/${code}/exchange-rates`, { buyRate: Number(d.buyRate), sellRate: Number(d.sellRate) }), 'Exchange rate set');
   });
-  const ENTITIES = ['MEMBER', 'LOAN_ACCOUNT', 'SAVINGS_ACCOUNT', 'SAVINGS_PRODUCT', 'GUARANTOR', 'COLLATERAL', 'BRANCH', 'CENTRE', 'USER', 'TRANSACTION_CHANNEL'];
+  const ENTITIES = ['MEMBER', 'GROUP', 'LOAN_ACCOUNT', 'SAVINGS_ACCOUNT', 'SAVINGS_PRODUCT', 'GUARANTOR', 'COLLATERAL', 'BRANCH', 'CENTRE', 'USER', 'TRANSACTION_CHANNEL'];
   on('#cf-set-add', async () => {
     const d = await ask([{ label: 'Entity', name: 'entity', options: ENTITIES }, { label: 'Name', name: 'name' }, opt({ label: 'ID (blank: from the name)', name: 'id' }),
       { label: 'Type', name: 'type', options: ['STANDARD', 'GROUPED'] }], 'New custom field set');
@@ -3376,7 +3712,7 @@ async function orgView() {
       opt({ label: 'Depends on (a selection field in the set)', name: 'dependentOn' }), opt({ label: 'Format (free text)', name: 'format' }),
       { label: 'Unique value', name: 'uniqueValue', options: ['false', 'true'] },
       { label: 'Usage', name: 'usage', options: ['AVAILABLE', 'DEFAULT', 'REQUIRED'] },
-      opt({ label: 'Only for these products or channels (comma separated; blank: all)', name: 'items' }),
+      opt({ label: 'Only for these products, channels or client types (comma separated; blank: all)', name: 'items' }),
       opt({ label: 'Roles that may edit (comma separated; blank: all)', name: 'editRoles' }),
       opt({ label: 'Roles that may view (comma separated; blank: all)', name: 'viewRoles' }),
     ], 'New custom field');
@@ -4524,6 +4860,7 @@ const VIEWS = {
   dashboard: dashboardView,
   views: viewsView,
   members: membersView,
+  groups: groupsView,
   data: dataView,
   users: usersView,
   organization: orgView,

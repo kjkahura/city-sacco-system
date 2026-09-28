@@ -25,8 +25,8 @@ const { err } = acct;
  *
  * Usage: Available, Default and Required (Required implies Default implies
  * Available). Loan accounts are set per loan product, deposit accounts per
- * deposit product and transactions per channel; the other entities as a
- * whole. A dependent field takes its parent's usage.
+ * deposit product, transactions per channel, members per client type and
+ * groups per group type; the other entities as a whole. A dependent field takes its parent's usage.
  *
  * Rights: view and edit roles per definition (NULL: every role). A user
  * without edit rights cannot enter a value, and may save the record without
@@ -36,7 +36,9 @@ const { err } = acct;
  */
 
 const ENTITIES = {
-  MEMBER: { table: 'members', key: 'id' },
+  // Members and groups share the members table; their fields are set per client or group type.
+  MEMBER: { table: 'members', key: 'id', item: 'client_type_id', itemLabel: 'client type' },
+  GROUP: { table: 'members', key: 'id', item: 'client_type_id', itemLabel: 'group type' },
   LOAN_ACCOUNT: { table: 'loan_accounts', key: 'id', item: 'product_id', itemLabel: 'loan product' },
   SAVINGS_ACCOUNT: { table: 'savings_accounts', key: 'id', item: 'product_id', itemLabel: 'deposit product' },
   SAVINGS_PRODUCT: { table: 'savings_products', key: 'id' },

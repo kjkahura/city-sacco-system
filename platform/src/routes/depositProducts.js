@@ -48,7 +48,7 @@ const num = (v) => (v === null || v === undefined ? null : Number(v));
 
 const publicProduct = (p) => ({
   id: p.id, name: p.name, description: p.description, isActive: p.is_active, isFundingAccount: p.is_funding_account,
-  availableBranches: p.branch_ids || null, withholdingSourceId: p.withholding_source_id || null, customFields: p.custom_fields || {},
+  availableBranches: p.branch_ids || null, availableFor: p.available_for || ['INDIVIDUALS'], withholdingSourceId: p.withholding_source_id || null, customFields: p.custom_fields || {},
   withdrawable: p.withdrawable, minBalance: Number(p.min_balance),
   interest: {
     paidIntoAccount: p.interest_paid_into_account, annualRate: Number(p.annual_rate), calcBalance: p.interest_calc_balance,
@@ -73,11 +73,24 @@ const publicProduct = (p) => ({
   accounts: p.accounts === undefined ? undefined : p.accounts,
 });
 
+// The reference platform's "available for": INDIVIDUALS and GROUPS (PURE_GROUPS is read as GROUPS).
+function availableFor(body) {
+  const v = body.availableFor !== undefined ? body.availableFor : body.availabilitySettings?.availableFor;
+  if (v === undefined) return undefined;
+  const list = Array.isArray(v) ? v : [v];
+  const out = [...new Set(list.map((x) => (String(x).toUpperCase() === 'PURE_GROUPS' ? 'GROUPS' : String(x).toUpperCase())))];
+  if (!out.length || out.some((x) => !['INDIVIDUALS', 'GROUPS'].includes(x))) {
+    throw Object.assign(new Error('AVAILABLE_FOR_IS_A_LIST_OF: INDIVIDUALS, GROUPS'), { status: 400 });
+  }
+  return out;
+}
+
 function toColumns(body) {
   const cols = {};
   for (const [k, v] of Object.entries(body || {})) if (FIELDS[k]) cols[FIELDS[k]] = v;
   if (body && body.availableBranches !== undefined) cols.branch_ids = body.availableBranches;
   if (body && body.withholdingSourceId !== undefined) cols.withholding_source_id = body.withholdingSourceId;
+  if (body) { const af = availableFor(body); if (af !== undefined) cols.available_for = af; }
   return cols;
 }
 

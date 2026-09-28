@@ -793,8 +793,32 @@ async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = un
   return rows[0];
 }
 
+/**
+ * Close a deposit account (the reference platform's Close), which a member's exit needs. Only
+ * an account with nothing in it and nothing owed on it closes: a zero
+ * balance, no interest accrued or booked, no overdraft interest or fees due,
+ * and not the settlement account of a running loan. Closing a member's last
+ * open account makes the member INACTIVE (tenant migration 033).
+ */
+async function closeAccount(c, accountId, { createdBy, notes = null } = {}) {
+  const a = await lock(c, accountId);
+  if (!['ACTIVE', 'DORMANT'].includes(a.status)) throw err(`ACCOUNT_NOT_OPEN: ${a.status}`, 409);
+  const left = ['balance', 'interest_accrued', 'neg_interest_accrued', 'od_interest_accrued', 'interest_booked', 'neg_interest_booked',
+    'od_interest_booked', 'od_interest_due', 'od_fees_due'].filter((k) => Number(a[k] || 0) !== 0);
+  if (left.length) throw err(`ACCOUNT_NOT_EMPTY: ${left.join(', ')}`, 409);
+  const { rows: [l] } = await c.query(
+    "SELECT account_no FROM loan_accounts WHERE settlement_account_id = $1 AND status NOT LIKE 'CLOSED%' LIMIT 1", [a.id]);
+  if (l) throw err(`SETTLEMENT_ACCOUNT_OF_A_RUNNING_LOAN: ${l.account_no}`, 409);
+  const { rows: [out] } = await c.query(
+    `UPDATE savings_accounts SET status = 'CLOSED', closed_on = current_date, notes = COALESCE($2, notes), updated_at = now()
+     WHERE id = $1 RETURNING *`, [a.id, notes]);
+  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'SAVINGS_ACCOUNT_CLOSED','savings_account',$2,$3,$4)`,
+    [createdBy || 'SYSTEM', a.id, JSON.stringify({ status: a.status }), JSON.stringify({ status: 'CLOSED', closedOn: out.closed_on })]);
+  return out;
+}
+
 module.exports = {
-  lockedFunding, open, deposit, withdraw, transfer, summary, reverseTransaction, pledgedAmount, lock, record, ref,
+  closeAccount, lockedFunding, open, deposit, withdraw, transfer, summary, reverseTransaction, pledgedAmount, lock, record, ref,
   applyFee, applyMonthlyFees, accrueInterest, applyInterest, endOfDay, isApplicationDate,
   setOverdraftLimit, writeOffOverdraft, inLegs, outLegs, availableOf, books,
 };

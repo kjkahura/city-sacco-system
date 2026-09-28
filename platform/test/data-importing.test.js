@@ -273,10 +273,10 @@ function templateWorkbook() {
     const m1 = b1.body.errors.map((e) => `${e.sheet}:${e.row}:${e.message}`);
     const has = (re) => m1.some((m) => re.test(m));
     check('INVALID', b1.body.status === 'INVALID', b1.text.slice(0, 200));
-    check('groups are refused', has(/^Groups:.*Groups are not part of this system/), m1.join(' | '));
+    check('groups are not imported (they are created in the console or through /api/groups)', has(/^Groups:.*Groups are not imported/), m1.join(' | '));
     check('an ID over 32 characters', has(/^Clients:2:Member number is longer than 32 characters/));
     check('text over 255 characters', has(/^Clients:3:First name is longer than 255 characters/));
-    check('a group loan', has(/^Loan Accounts:2:Group loans are not part/));
+    check('a group loan', has(/^Loan Accounts:2:Group loans are not imported/));
     check('a principal interval other than 1', has(/^Loan Accounts:3:Principal paid less often/));
     check('a closed loan that still owes', has(/^Loan Accounts:4:A closed loan owes nothing/));
     check('transactions that do not start with the disbursement', has(/^Loan Accounts:5:.*start with its DISBURSEMENT/));

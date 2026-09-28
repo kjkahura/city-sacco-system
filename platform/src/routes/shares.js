@@ -28,8 +28,9 @@ router.get('/', requireAuth(), async (req, res, next) => {
       c,
       `SELECT a.*, m.member_no, m.first_name, m.last_name
        FROM share_accounts a JOIN members m ON m.id = a.member_id
+       WHERE ($1::text IS NULL OR a.member_id::text = $1 OR m.member_no = $1)
        ORDER BY a.account_no`,
-      [],
+      [req.query.memberId || null],
       req.query
     ));
     sendPage(res, page);

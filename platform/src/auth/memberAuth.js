@@ -1,5 +1,8 @@
 'use strict';
 
+// The member states that may use the portal: a current member, with or without running accounts.
+const CURRENT = ['INACTIVE', 'ACTIVE'];
+
 const crypto = require('crypto');
 const { hashPin, verifyPassword } = require('./passwords');
 const { signToken } = require('../tenancy/resolve');
@@ -71,8 +74,11 @@ async function activate(c, { memberNo, nationalId, phone, pin }) {
   // three identifiers was wrong.
   const noMatch = err('MEMBER_DETAILS_DO_NOT_MATCH', 404);
   if (!m) throw noMatch;
-  if (m.status !== 'ACTIVE') throw err(`MEMBER_NOT_ACTIVE: ${m.status}`, 403);
-  if (!m.national_id || String(m.national_id).trim() !== String(nationalId || '').trim()) throw noMatch;
+  // A current member (INACTIVE or ACTIVE, the reference platform's states); a group has no portal.
+  if (m.holder_type === 'GROUP') throw noMatch;
+  if (!CURRENT.includes(m.status)) throw err(`MEMBER_NOT_ACTIVE: ${m.status}`, 403);
+  const idKey = (v) => String(v || '').replace(/\s/g, '').toUpperCase();
+  if (!m.national_id || idKey(m.national_id) !== idKey(nationalId)) throw noMatch;
   if (m.phone && normalisePhone(m.phone) !== ph) throw noMatch;
 
   const { rows: existing } = await c.query(
@@ -139,7 +145,7 @@ async function login(c, { phone, pin, tenantSlug, userAgent = null, ip = null })
     cred?.pin_hash || 'scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAA');
 
   if (!cred) { await fail(); return refuse('INVALID_CREDENTIALS', 401); }
-  if (cred.status === 'DISABLED' || cred.member_status !== 'ACTIVE') {
+  if (cred.status === 'DISABLED' || !CURRENT.includes(cred.member_status)) {
     await fail(cred.member_id); return refuse('ACCOUNT_DISABLED', 403);
   }
   if (cred.locked_until && new Date(cred.locked_until) > new Date()) {
@@ -192,7 +198,7 @@ async function rotate(c, presented, tenantSlug, { userAgent = null, ip = null } 
 
   await c.query('UPDATE member_sessions SET used_at = now() WHERE id = $1', [tok.id]);
   const { rows: [m] } = await c.query('SELECT * FROM members WHERE id = $1', [tok.member_id]);
-  if (!m || m.status !== 'ACTIVE') return refuse('ACCOUNT_DISABLED', 403);
+  if (!m || !CURRENT.includes(m.status)) return refuse('ACCOUNT_DISABLED', 403);
   return issueTokens(c, m, tenantSlug, { familyId: tok.family_id, userAgent, ip });
 }
 

@@ -4,48 +4,49 @@ const { orgToday } = require('../lib/orgDate');
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
-const { apiError, notFound, badRequest, paginate, withPaginationHeaders, applyFilterCriteria } = require('../lib/http');
+const { notFound, paginate, withPaginationHeaders, applyFilterCriteria } = require('../lib/http');
 const { pageQuery, sendPage } = require('../lib/page');
 const HIST = require('../domain/loanHistory');
 const CF = require('../domain/customFields');
 const IDT = require('../domain/idTemplates');
-const B = require('../domain/branches');
+const CL = require('../domain/clients');
+const PERMS = require('../lib/permissions');
 
 const router = express.Router();
 
 /**
- * Members. Reference implementation of the tenant-scoped resource pattern.
+ * Members (the platform's own shape; the reference platform's is /api/clients and
+ * /api/groups, ./clients). The rules are in ../domain/clients.
  *
  * Note what is absent: no tenant_id in any WHERE clause. The transaction's
  * search_path already points at exactly one SACCO's schema, so there is no
  * such thing as forgetting the tenant filter here.
+ *
+ * The list holds individuals; ?holderType=GROUP lists groups and ALL both.
  */
 
-const COLUMNS = `id, member_no, first_name, middle_name, last_name, national_id, kra_pin, phone, phone2,
-                 email, date_of_birth, gender, branch_id, centre_id, employer, status,
-                 joined_on, exited_on, address_line1, address_line2, city, postcode, region, country,
-                 credit_officer, prior_loan_cycles, notes, import_id, created_at, updated_at`;
+const { COLUMNS } = CL;
 
-// The optional member fields (the reference platform's client fields the import also carries):
-// body key -> column.
-const EXTRA = {
-  middleName: 'middle_name', phone2: 'phone2', addressLine1: 'address_line1', addressLine2: 'address_line2',
-  city: 'city', postcode: 'postcode', region: 'region', country: 'country', creditOfficer: 'credit_officer',
-  priorLoanCycles: 'prior_loan_cycles', notes: 'notes',
+const holderFilter = (v) => {
+  const s = String(v || 'CLIENT').toUpperCase();
+  return s === 'ALL' ? null : s === 'GROUP' ? 'GROUP' : 'CLIENT';
 };
 
 router.get('/', requireAuth(), async (req, res, next) => {
   try {
-    const q = req.query.q ? `%${String(req.query.q).toLowerCase()}%` : null;
+    const q = req.query.q ? `%${String(req.query.q).toLowerCase().replace(/[\\%_]/g, '\\$&')}%` : null;
+    const qid = req.query.q ? CL.docKey(req.query.q) : null;
     const page = await withTenantRead(req.tenant.schema_name, (c) => pageQuery(
       c,
       `SELECT ${COLUMNS} FROM members
        WHERE ($1::text IS NULL OR status = $1::text)
+         AND ($3::text IS NULL OR holder_type = $3::text)
          AND ($2::text IS NULL OR
-              lower(first_name) LIKE $2::text OR lower(last_name) LIKE $2::text OR
-              lower(member_no) LIKE $2::text OR phone LIKE $2::text)
+              lower(first_name) LIKE $2::text OR lower(last_name) LIKE $2::text OR lower(middle_name) LIKE $2::text OR
+              lower(member_no) LIKE $2::text OR phone LIKE $2::text OR lower(email) LIKE $2::text OR
+              upper(regexp_replace(national_id, '[\\s-]', '', 'g')) = $4::text)
        ORDER BY last_name, first_name, id`,
-      [req.query.status || null, q],
+      [req.query.status || null, q, holderFilter(req.query.holderType), qid],
       req.query
     ));
     sendPage(res, page);
@@ -58,7 +59,8 @@ router.get('/', requireAuth(), async (req, res, next) => {
 // rows before it can filter them. It is bounded rather than unbounded: a
 // scan cap keeps one client from pulling a 40,000-member register into
 // memory, and the response says plainly when the scan was cut short instead
-// of quietly returning a subset as if it were the whole answer.
+// of quietly returning a subset as if it were the whole answer. The reference platform's
+// field names and custom fields are searched in SQL by POST /clients:search.
 const SEARCH_SCAN_CAP = 5000;
 
 const searchMembers = [requireAuth(), async (req, res, next) => {
@@ -67,7 +69,7 @@ const searchMembers = [requireAuth(), async (req, res, next) => {
     const rows = await withTenantRead(req.tenant.schema_name, async (c) => {
       today = await orgToday(c);
       return (await c.query(
-        `SELECT ${COLUMNS} FROM members ORDER BY last_name, first_name, id LIMIT $1`,
+        `SELECT ${COLUMNS} FROM members WHERE holder_type = 'CLIENT' ORDER BY last_name, first_name, id LIMIT $1`,
         [SEARCH_SCAN_CAP + 1]
       )).rows;
     });
@@ -80,17 +82,46 @@ const searchMembers = [requireAuth(), async (req, res, next) => {
   } catch (e) { next(e); }
 }];
 
+// POST /members:duplicates: the duplicate checks for a member about to be
+// created or changed, without saving anything (the console asks before it
+// saves a member that has warnings).
+const checkDuplicates = [requireAuth(), async (req, res, next) => {
+  try {
+    const b = req.body || {};
+    const out = await withTenantRead(req.tenant.schema_name, async (c) => CL.duplicates(c, {
+      holder_type: 'CLIENT', first_name: b.firstName || null, last_name: b.lastName || null,
+      national_id: b.nationalId ? CL.normId(b.nationalId) : null, date_of_birth: b.dateOfBirth || null,
+      phone: b.phone || null, phone2: b.phone2 || null, email: b.email || null,
+    }, {
+      docs: (b.identificationDocuments || []).filter((d) => d && d.documentId).map((d) => ({ document_id: String(d.documentId) })),
+      exclude: b.memberId && /^[0-9a-f-]{36}$/i.test(b.memberId) ? b.memberId : null,
+    }));
+    res.json(out);
+  } catch (e) { next(e); }
+}];
+
+// POST /members:reassign: branch, centre and credit officer for many members at once.
+const reassignMembers = [requireAuth(), async (req, res, next) => {
+  try {
+    const b = req.body || {};
+    res.json(await withTenant(req.tenant.schema_name, (c) => CL.reassign(c, b.members || b.memberIds, b, { user: req.auth })));
+  } catch (e) { next(e); }
+}];
+
+async function detail(c, m, user) {
+  const cf = await CF.getValues(c, m.holder_type === 'GROUP' ? 'GROUP' : 'MEMBER', m.id, { user });
+  const out = { ...m, customFields: cf.values, customFieldScores: cf.scores };
+  if (m.holder_type === 'GROUP') out.groupMembers = await CL.groupMembers(c, m.id);
+  else out.groups = await CL.groupsOf(c, m.id);
+  return out;
+}
+
 router.get('/:id', requireAuth(), async (req, res, next) => {
   try {
     const row = await withTenantRead(req.tenant.schema_name, async (c) => {
-      const byId = /^[0-9a-f-]{36}$/i.test(req.params.id);
-      const sql = byId
-        ? `SELECT ${COLUMNS} FROM members WHERE id = $1`
-        : `SELECT ${COLUMNS} FROM members WHERE member_no = $1`;
-      const m = (await c.query(sql, [req.params.id])).rows[0];
-      if (!m) return null;
-      const cf = await CF.getValues(c, 'MEMBER', m.id, { user: req.auth });
-      return { ...m, customFields: cf.values, customFieldScores: cf.scores };
+      const { rows: [m] } = await c.query(
+        `SELECT ${COLUMNS} FROM members WHERE ${/^[0-9a-f-]{36}$/i.test(req.params.id) ? 'id = $1::uuid' : 'member_no = $1'}`, [req.params.id]);
+      return m ? detail(c, m, req.auth) : null;
     });
     return row ? res.json(row) : notFound(res, 'member');
   } catch (e) { next(e); }
@@ -107,98 +138,58 @@ router.get('/:id/loan-history', requireAuth(), async (req, res, next) => {
 router.post('/', requireAuth(), async (req, res, next) => {
   try {
     const b = req.body || {};
-    if (!b.firstName || !b.lastName) return badRequest(res, 'FIRST_AND_LAST_NAME_REQUIRED');
-
-    const row = await withTenant(req.tenant.schema_name, async (c) => {
-      // Member numbers are per tenant and generated inside the tenant's own
-      // schema, so two SACCOs can both have member 0001. The digits are
-      // compared as numbers: as text, '0006' sorts after '000007'.
-      const memberNo = b.memberNo || (await c.query(
-        `SELECT 'M' || lpad((COALESCE(MAX(NULLIF(regexp_replace(member_no,'\\D','','g'),'')::bigint),0)+1)::text, 6, '0') AS n
-         FROM members`
-      )).rows[0].n;
-
-      // Branch and centre (the centre must be in the member's branch), the
-      // identification documents the templates ask for, and custom fields.
-      const branch = b.branchId ? await B.resolve(c, b.branchId) : null;
-      if (branch && branch.status !== 'ACTIVE') throw Object.assign(new Error('BRANCH_IS_DEACTIVATED'), { status: 409 });
-      const centre = await B.centreFor(c, b.centreId, branch ? branch.id : null);
-      const branchId = branch ? branch.id : centre ? centre.branch_id : null;
-      const docs = await IDT.forNewMember(c, b.identificationDocuments || []);
-      const values = await CF.prepare(c, 'MEMBER', { patch: b.customFields || {}, user: req.auth, creating: true });
-      const extra = Object.entries(EXTRA).filter(([k]) => b[k] !== undefined && b[k] !== null && b[k] !== '');
-      if (b.priorLoanCycles !== undefined && !(Number.isInteger(Number(b.priorLoanCycles)) && Number(b.priorLoanCycles) >= 0)) {
-        throw Object.assign(new Error('PRIOR_LOAN_CYCLES_MUST_BE_A_WHOLE_NUMBER'), { status: 400 });
-      }
-      const { rows } = await c.query(
-        `INSERT INTO members (member_no, first_name, last_name, national_id, kra_pin,
-                              phone, email, date_of_birth, gender, employer, status, branch_id, centre_id, custom_fields
-                              ${extra.map(([, col]) => `, ${col}`).join('')})
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,'ACTIVE'),$12,$13,$14${extra.map((_, i) => `,$${15 + i}`).join('')})
-         RETURNING ${COLUMNS}`,
-        [memberNo, b.firstName, b.lastName, b.nationalId || null, b.kraPin || null,
-         b.phone || null, b.email || null, b.dateOfBirth || null, b.gender || null,
-         b.employer || null, b.status || null, branchId, centre ? centre.id : null, JSON.stringify(values),
-         ...extra.map(([k]) => b[k])]
-      );
-      await IDT.storeForMember(c, rows[0].id, docs, { createdBy: req.auth.email });
-
-      await c.query(
-        `INSERT INTO audit_log (actor, action, entity, entity_id, after)
-         VALUES ($1,'MEMBER_CREATED','member',$2,$3)`,
-        [req.auth.email, rows[0].id, JSON.stringify(rows[0])]
-      );
-      return rows[0];
-    });
-    res.status(201).json(row);
-  } catch (e) {
-    if (e.code === '23505') return apiError(res, 409, 409, 'DUPLICATE_MEMBER', e.constraint);
-    next(e);
-  }
+    const holderType = String(b.holderType || 'CLIENT').toUpperCase() === 'GROUP' ? 'GROUP' : 'CLIENT';
+    if (holderType === 'GROUP' && !PERMS.can(req.auth, 'CREATE_GROUP')) {
+      const e = new Error('PERMISSION_REQUIRED: CREATE_GROUP'); e.status = 403; throw e;
+    }
+    const out = await withTenant(req.tenant.schema_name, (c) => CL.create(c, b, { user: req.auth, holderType }));
+    res.status(201).json({ ...out.member, duplicateWarnings: out.duplicateWarnings, groupWarnings: out.groupWarnings });
+  } catch (e) { next(e); }
 });
 
 router.patch('/:id', requireAuth(), async (req, res, next) => {
   try {
-    const allowed = ['first_name', 'last_name', 'phone', 'email', 'employer', 'status', 'kra_pin', ...Object.values(EXTRA)];
-    const map = { firstName: 'first_name', lastName: 'last_name', kraPin: 'kra_pin', ...EXTRA };
-    const sets = [];
-    const params = [];
-    for (const [k, v] of Object.entries(req.body || {})) {
-      const col = map[k] || k;
-      if (!allowed.includes(col)) continue;
-      params.push(v);
-      sets.push(`${col} = $${params.length}`);
-    }
-    const extra = req.body?.centreId !== undefined || req.body?.customFields !== undefined;
-    if (!sets.length && !extra) return badRequest(res, 'NO_UPDATABLE_FIELDS');
+    const out = await withTenant(req.tenant.schema_name, (c) => CL.update(c, req.params.id, req.body || {}, { user: req.auth }));
+    res.json({ ...out.member, duplicateWarnings: out.duplicateWarnings, groupWarnings: out.groupWarnings });
+  } catch (e) { next(e); }
+});
 
-    const row = await withTenant(req.tenant.schema_name, async (c) => {
-      const before = (await c.query('SELECT * FROM members WHERE id::text = $1 OR member_no = $1 FOR UPDATE', [req.params.id])).rows[0];
-      if (!before) return null;
-      // The centre, in the member's own branch; custom fields under their edit rights.
-      if (req.body.centreId !== undefined) {
-        const centre = await B.centreFor(c, req.body.centreId, before.branch_id);
-        params.push(centre ? centre.id : null);
-        sets.push(`centre_id = $${params.length}`);
-      }
-      if (req.body.customFields !== undefined) {
-        const values = await CF.prepare(c, 'MEMBER', { patch: req.body.customFields, previous: before.custom_fields, user: req.auth, recordId: before.id });
-        params.push(JSON.stringify(values));
-        sets.push(`custom_fields = $${params.length}`);
-      }
-      params.push(before.id);
-      const { rows } = await c.query(
-        `UPDATE members SET ${sets.join(', ')}, updated_at = now()
-         WHERE id = $${params.length} RETURNING ${COLUMNS}`, params
-      );
-      await c.query(
-        `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-         VALUES ($1,'MEMBER_UPDATED','member',$2,$3,$4)`,
-        [req.auth.email, before.id, JSON.stringify(before), JSON.stringify(rows[0])]
-      );
-      return rows[0];
-    });
-    return row ? res.json(row) : notFound(res, 'member');
+router.delete('/:id', requireAuth(), async (req, res, next) => {
+  try {
+    res.json(await withTenant(req.tenant.schema_name, (c) => CL.remove(c, req.params.id, { user: req.auth })));
+  } catch (e) { next(e); }
+});
+
+// State actions: { action: APPROVE | UNDO_APPROVE | REJECT | UNDO_REJECT | EXIT | UNDO_EXIT | BLACKLIST | UNDO_BLACKLIST, reason }.
+router.post('/:id/state', requireAuth(), async (req, res, next) => {
+  try {
+    const b = req.body || {};
+    res.json(await withTenant(req.tenant.schema_name, (c) => CL.changeState(c, req.params.id, b.action, { reason: b.reason, user: req.auth })));
+  } catch (e) { next(e); }
+});
+
+router.get('/:id/state-history', requireAuth(), async (req, res, next) => {
+  try {
+    res.json(await withTenantRead(req.tenant.schema_name, (c) => CL.stateHistory(c, req.params.id)));
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/association', requireAuth(), async (req, res, next) => {
+  try {
+    const out = await withTenant(req.tenant.schema_name, (c) => CL.reassign(c, [req.params.id], req.body || {}, { user: req.auth }));
+    res.json(out.members[0]);
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/anonymize', requireAuth(), async (req, res, next) => {
+  try {
+    res.json(await withTenant(req.tenant.schema_name, (c) => CL.anonymize(c, req.params.id, { user: req.auth })));
+  } catch (e) { next(e); }
+});
+
+router.get('/:id/groups', requireAuth(), async (req, res, next) => {
+  try {
+    res.json(await withTenantRead(req.tenant.schema_name, async (c) => CL.groupsOf(c, (await CL.find(c, req.params.id)).id)));
   } catch (e) { next(e); }
 });
 
@@ -209,7 +200,7 @@ const txn = (fn, { write = true, status = 200 } = {}) => [requireAuth(), async (
     if (out !== undefined) res.status(status).json(out);
   } catch (e) { next(e); }
 }];
-router.get('/:id/identifications', ...txn((c, req) => IDT.documents(c, req.params.id), [], { write: false }));
+router.get('/:id/identifications', ...txn((c, req) => IDT.documents(c, req.params.id), { write: false }));
 router.post('/:id/identifications', ...txn((c, req) => IDT.addDocument(c, req.params.id, req.body || {}, { createdBy: req.auth.email }), { status: 201 }));
 router.delete('/:id/identifications/:docId', ...txn((c, req) => IDT.removeDocument(c, req.params.id, req.params.docId, { createdBy: req.auth.email })));
 router.get('/:id/identifications/:docId/attachment', requireAuth(), async (req, res, next) => {
@@ -224,3 +215,5 @@ router.get('/:id/identifications/:docId/attachment', requireAuth(), async (req, 
 
 module.exports = router;
 module.exports.searchMembers = searchMembers;
+module.exports.checkDuplicates = checkDuplicates;
+module.exports.reassignMembers = reassignMembers;

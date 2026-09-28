@@ -45,6 +45,13 @@ async function addGuarantor(c, loanId, { memberId, amount, createdBy = null, cus
   const { rows: [again] } = await c.query(
     "SELECT id, status FROM loan_guarantors WHERE loan_id = $1 AND member_id = $2", [l.id, memberId]);
   if (memberId === l.member_id) throw err('MEMBER_CANNOT_GUARANTEE_OWN_LOAN');
+  // The guarantor's state and type (the reference platform's life cycle and "Allow as
+  // guarantor"); the database checks the same when the pledge is stored.
+  const { rows: [gm] } = await c.query(
+    `SELECT m.status, m.member_no, t.can_guarantee, t.name AS type_name FROM members m JOIN client_types t ON t.id = m.client_type_id
+      WHERE m.id::text = $1`, [String(memberId)]);
+  if (gm && !['INACTIVE', 'ACTIVE'].includes(gm.status)) throw err(`GUARANTOR_MAY_NOT_PLEDGE: ${gm.member_no} is ${gm.status}`, 409);
+  if (gm && !gm.can_guarantee) throw err(`TYPE_MAY_NOT_GUARANTEE: ${gm.member_no} is of the type ${gm.type_name}`, 409);
   const amt = round2(amount);
   if (!(amt > 0)) throw err('INVALID_PLEDGE_AMOUNT');
 
