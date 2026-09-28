@@ -21,6 +21,8 @@ const S = {
   user: null,
   sacco: null,
   view: 'members',
+  menu: null,
+  menuItem: null,
   enrolToken: null,
   mfaTicket: null,
   pwToken: null,
@@ -221,7 +223,10 @@ function start(session) {
   el('sacco-name').textContent = S.sacco?.name || S.tenant;
   el('whoami').textContent = `${S.user.name || S.user.email} (${S.user.role})`;
   showHeaderIcon();
-  render();
+  loadAccess().then(() => {
+    if (S.user.roleCode) el('whoami').textContent = `${S.user.name || S.user.email} (${S.user.roleCode}, ${S.user.role})`;
+    render();
+  });
 }
 
 function signOut(silent) {
@@ -244,6 +249,7 @@ el('nav').addEventListener('click', (e) => {
   if (!b) return;
   S.view = b.dataset.view;
   for (const n of el('nav').children) n.classList.toggle('active', n === b);
+  for (const n of el('menu-nav').children) n.classList.remove('active');
   render();
 });
 
@@ -410,6 +416,7 @@ async function scheduleEditor(e, title) {
 function go(name) {
   S.view = name;
   for (const n of el('nav').children) n.classList.toggle('active', n.dataset.view === name);
+  for (const n of el('menu-nav').children) n.classList.remove('active');
   render();
 }
 
@@ -531,6 +538,8 @@ async function memberDetail(m) {
     ${cf.ok ? customFieldsCard(cf.body) : ''}`;
 
   $('#back').addEventListener('click', membersView);
+  memberTasks(m);
+  entityReports('MEMBER', m.member_no);
   wireRows(loans.body || [], loanDetail);
   const reload = () => memberDetail(m);
   if (cf.ok) wireCustomFields(cf.body, 'MEMBER', m.id, reload);
@@ -935,6 +944,7 @@ async function loanDetail(row) {
     ${loanCf.ok ? customFieldsCard(loanCf.body) : ''}`;
 
   $('#back').addEventListener('click', loansView);
+  entityReports('LOAN', id);
   if (loanCf.ok) wireCustomFields(loanCf.body, 'LOAN_ACCOUNT', l.id, () => loanDetail(row));
   view().querySelectorAll('[data-release]').forEach((btn) => btn.addEventListener('click', async () => {
     const d = await ask([{ label: 'Note', name: 'note', required: false }], 'Release collateral');
@@ -1461,11 +1471,14 @@ async function loanDetail(row) {
 // --------------------------------------------------------------------------
 
 async function tellerView() {
+  const mine = can('VIEW_SAVINGS_ACCOUNT_DETAILS', 'VIEW_LOAN_ACCOUNT_DETAILS') ? await api('GET', '/api/tills/mine') : null;
+  const own = mine && mine.ok ? mine.body : null;
   view().innerHTML = `
     <h1>Teller</h1>
     <p class="hint">Postings are immediate and cannot be edited. A mistake is corrected with a reversal,
-      which stays on the record next to the original.</p>
+      which stays on the record next to the original. Cash you post goes through your open till.</p>
     <div class="grid">
+      ${telleringCard(own)}
       ${card('Savings', `
         <label>Account number<input id="t-account" placeholder="SA000001"></label>
         <label>Amount<input id="t-amount" type="number" step="0.01"></label>
@@ -1495,6 +1508,10 @@ async function tellerView() {
     const path = kind === 'deposit' ? 'deposits' : 'withdrawals';
     const r = await api('POST', `/api/savings/${encodeURIComponent(account)}/${path}`, { amount, channelId });
     toast(r.ok ? `${kind} posted: ${r.body.reference}` : r.error, !r.ok);
+    if (r.ok && own?.till && channelId === 'cash') {
+      const t = await api('GET', `/api/tills/${own.till.id}`);
+      if (t.ok && $('#my-till')) $('#my-till').outerHTML = new DOMParser().parseFromString(telleringCard({ till: t.body }), 'text/html').querySelector('#my-till').outerHTML;
+    }
     if (r.ok) {
       const bal = await api('GET', `/api/savings/${encodeURIComponent(account)}/balance`);
       $('#t-result').innerHTML = card('Account after posting',
@@ -1502,6 +1519,7 @@ async function tellerView() {
          <dt>Balance</dt><dd>${money(bal.body?.balance)}</dd></dl>`);
     }
   };
+  if (own?.till) wireTills([own.till], tellerView);
   $('#t-deposit').addEventListener('click', () => post('deposit'));
   $('#t-withdraw').addEventListener('click', () => post('withdrawal'));
   $('#t-reverse').addEventListener('click', async () => {
@@ -1535,8 +1553,11 @@ const REPORTS = [
   ['outreach', 'Outreach', { dates: true, exp: '/api/reports/outreach' }],
   ['write-offs', 'Written-off loans', { dates: true }],
   ['prudential', 'Prudential ratios', { asAt: true }],
+  ['templates', 'Other reports (templates)', {}],
 ];
 const reportDef = (w) => (REPORTS.find(([v]) => v === w) || REPORTS[0])[2];
+const ACCOUNTING_REPORTS = ['trial-balance', 'balance-sheet', 'income-statement', 'prudential'];
+const reportAllowed = ([v]) => (ACCOUNTING_REPORTS.includes(v) ? can('VIEW_ACCOUNTING_REPORTS') : v === 'indicators' ? can('VIEW_INTELLIGENCE') : can('VIEW_REPORTS'));
 
 async function reportsView() {
   const R = reportState;
@@ -1544,11 +1565,14 @@ async function reportsView() {
     const b = await api('GET', '/api/branches');
     branchList = b.ok ? b.body : [];
   }
+  const shown = REPORTS.filter(reportAllowed);
+  if (!shown.length) { view().innerHTML = '<p class="hint">Your role has no reports.</p>'; return; }
+  if (!shown.some(([v]) => v === R.which)) R.which = shown[0][0];
   const d = reportDef(R.which);
   view().innerHTML = `
     <div class="toolbar">
       <label>Report<select id="r-which">
-        ${REPORTS.map(([v, label]) => `<option value="${v}" ${R.which === v ? 'selected' : ''}>${label}</option>`).join('')}
+        ${shown.map(([v, label]) => `<option value="${v}" ${R.which === v ? 'selected' : ''}>${label}</option>`).join('')}
       </select></label>
       ${d.dates ? `<label>From<input id="r-from" type="date" value="${R.from}"></label>` : ''}
       ${d.dates || d.asAt ? `<label>${d.asAt ? 'As at' : 'To'}<input id="r-to" type="date" value="${R.to}"></label>` : ''}
@@ -1604,6 +1628,7 @@ async function runReport() {
   const qs = reportQuery();
   const fail = (r) => void (out.innerHTML = `<p class="error">${esc(r.error)}</p>`);
 
+  if (R.which === 'templates') return templatesReport(out);
   if (R.which === 'trial-balance') {
     qs.set('offset', R.offset); qs.set('limit', R.limit);
     const r = await api('GET', `/api/accounting/trial-balance?${qs}`);
@@ -1866,10 +1891,15 @@ const DASHBOARD_INDICATORS = ['ACTIVE_CLIENTS', 'ACTIVE_BORROWERS', 'GROSS_LOAN_
   'LOANS_IN_ARREARS', 'LOANS_PENDING_APPROVAL', 'DISBURSED_THIS_MONTH'];
 
 async function dashboardView() {
-  const role = S.user.role;
-  const reader = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR'].includes(role);
-  const activityReader = ['TENANT_ADMIN', 'MANAGER', 'AUDITOR'].includes(role);
+  const reader = can('VIEW_INTELLIGENCE');
+  const activityReader = can('AUDIT_TRANSACTIONS', 'VIEW_REPORTS');
   const inWeek = new Date(Date.parse(`${today()}T00:00:00Z`) + 7 * 86400000).toISOString().slice(0, 10);
+  const [tasks, tills, myTill] = await Promise.all([
+    can('VIEW_TASK') ? api('GET', '/api/tasks/mine') : Promise.resolve(null),
+    can('OPEN_TILL') ? api('GET', '/api/tills') : Promise.resolve(null),
+    can('VIEW_SAVINGS_ACCOUNT_DETAILS', 'VIEW_LOAN_ACCOUNT_DETAILS') ? api('GET', '/api/tills/mine') : Promise.resolve(null),
+  ]);
+  const own = myTill && myTill.ok && (myTill.body.till || myTill.body.mustUseTill || S.user.role === 'TELLER') ? myTill.body : null;
   const [ind, act, favs, upcoming, mine] = await Promise.all([
     reader ? api('GET', `/api/reports/indicators?indicators=${DASHBOARD_INDICATORS.join(',')}`) : Promise.resolve(null),
     activityReader ? api('GET', '/api/reports/audit-log?limit=10') : Promise.resolve(null),
@@ -1886,6 +1916,13 @@ async function dashboardView() {
   view().innerHTML = `<h1>Dashboard</h1>
     ${ind && ind.ok ? card('Indicators', indicatorCards(ind.body.indicators)) : ''}
     <div class="grid">
+      ${tasks && tasks.ok ? card('Your tasks', `<p id="your-tasks-counts"><span class="badge ${tasks.body.overdue ? 'bad' : ''}">${tasks.body.overdue} overdue</span>
+        <span class="badge">${tasks.body.today} due today</span> <span class="badge">${tasks.body.upcoming} upcoming</span></p>
+        <div id="your-tasks">${table(TASK_COLUMNS(taskButtons).filter((c) => c.label !== 'Assigned to'), tasks.body.tasks.slice(0, 10), { empty: 'No open tasks' })}</div>
+        <div class="toolbar">${can('CREATE_TASK') ? '<button class="secondary" id="dash-task-new">New task</button>' : ''}<button class="link" id="dash-tasks">All tasks</button></div>`) : ''}
+      ${telleringCard(own)}
+      ${tills && tills.ok ? card('Tellers', `<div id="tellers">${table(TILL_COLUMNS().filter((c) => !['Difference', 'Opening'].includes(c.label)), tills.body, { empty: 'No open tills' })}</div>
+        <div class="toolbar"><button class="secondary" id="dash-till-open">Open a till</button><button class="link" id="dash-tills">All tills</button></div>`) : ''}
       ${card('Upcoming repayments (next 7 days)', upcoming.ok ? table([
     { label: 'Loan', key: 'accountNo' }, { label: 'Member', key: 'memberName' }, { label: 'Due', key: 'nextDueDate' },
     { label: 'Amount', num: true, value: (x) => money(x.nextDueAmount) }], upcoming.body.items, { empty: 'Nothing due this week' }) : `<p class="error">${esc(upcoming.error)}</p>`)}
@@ -1899,6 +1936,12 @@ async function dashboardView() {
   view().querySelectorAll('[data-open-view]').forEach((b) => b.addEventListener('click', () => {
     viewState.open = b.dataset.openView; viewState.offset = 0; go('views');
   }));
+  if (tasks && tasks.ok) wireTasks(tasks.body.tasks, dashboardView);
+  wireTills([...(tills?.body && tills.ok ? tills.body : []), ...(own?.till ? [own.till] : [])], dashboardView);
+  $('#dash-task-new')?.addEventListener('click', async () => { if (await newTask()) dashboardView(); });
+  $('#dash-tasks')?.addEventListener('click', () => go('tasks'));
+  $('#dash-till-open')?.addEventListener('click', () => openTill(dashboardView));
+  $('#dash-tills')?.addEventListener('click', () => go('tills'));
 }
 
 // --------------------------------------------------------------------------
@@ -1910,8 +1953,9 @@ const viewState = { open: null, offset: 0, limit: 50, editing: null };
 async function viewsView() {
   if (viewState.editing) return viewEditor();
   if (viewState.open) return viewRun();
-  const [list, ents] = await Promise.all([api('GET', '/api/views'), api('GET', '/api/views/entities')]);
+  const [list, ents] = await Promise.all([api('GET', '/api/views'), api('GET', '/api/views/entities'), loadMenu()]);
   if (!list.ok) throw new Error(list.error);
+  const menuCard = await menuItemsCard(ents.body);
   view().innerHTML = `<h1>Views</h1>
     <div class="toolbar"><button id="v-new">New view</button></div>
     ${ents.body.map((e) => {
@@ -1923,7 +1967,9 @@ async function viewsView() {
       { label: '', html: true, value: (v) => `<button class="link" data-v-fav="${esc(v.id)}" data-on="${v.favourite ? '' : '1'}">${v.favourite ? 'unfavourite' : 'favourite'}</button>
         <button class="link" data-v-copy="${esc(v.id)}">copy</button>${v.canEdit ? ` <button class="link" data-v-edit="${esc(v.id)}">edit</button> <button class="link" data-v-del="${esc(v.id)}">delete</button>` : ''}` },
     ], vs, { empty: 'No views' }));
-  }).join('')}`;
+  }).join('')}
+    ${menuCard}`;
+  wireMenuItems(ents.body, viewsView);
   $('#v-new').addEventListener('click', () => { viewState.editing = { entity: ents.body[0].entity }; viewsView(); });
   const on = (attr, fn) => view().querySelectorAll(`[${attr}]`).forEach((b) => b.addEventListener('click', () => fn(b.getAttribute(attr), b)));
   on('data-v-open', (id) => { viewState.open = id; viewState.offset = 0; viewsView(); });
@@ -1964,6 +2010,9 @@ async function viewEditor() {
   const admin = S.user.role === 'TENANT_ADMIN';
   const ents = (await api('GET', '/api/views/entities')).body;
   const meta = (await api('GET', `/api/views/fields/${v.entity}`)).body;
+  const codes = admin ? await roleCodes() : [];
+  if (!S.menu) await loadMenu();
+  const menuItems = (S.menu?.items || []).filter((i) => i.type === v.entity);
   const cols = v.columns || meta.defaultColumns;
   const filters = v.filters || [];
   const fieldOpts = (sel) => meta.fields.map((f) => `<option value="${esc(f.key)}" ${f.key === sel ? 'selected' : ''}>${esc(f.label)}</option>`).join('');
@@ -1988,9 +2037,11 @@ async function viewEditor() {
       <label>Direction<select name="sortDir"><option ${v.sortDir !== 'DESC' ? 'selected' : ''}>ASC</option><option ${v.sortDir === 'DESC' ? 'selected' : ''}>DESC</option></select></label>
       <label class="check"><input type="checkbox" name="includeTotals" ${v.includeTotals ? 'checked' : ''}> Include totals</label>
       <label class="check"><input type="checkbox" name="includeTimestamp" ${v.includeTimestamp ? 'checked' : ''}> Include timestamp</label>
+      <label>Menu item<select name="menuItemId"><option value="">(the ${esc(ents.find((e) => e.entity === v.entity)?.label || '')} item)</option>
+        ${menuItems.filter((i) => !i.predefined).map((i) => `<option value="${esc(i.id)}" ${i.id === v.menuItemId ? 'selected' : ''}>${esc(i.name)}</option>`).join('')}</select></label>
       <label>Opens in<select name="display"><option ${v.display !== 'DETAIL' ? 'selected' : ''}>LIST</option><option ${v.display === 'DETAIL' ? 'selected' : ''}>DETAIL</option></select></label>
       ${admin ? `<h2>Usage rights</h2><label class="check"><input type="checkbox" name="allUsers" ${v.usageRights?.allUsers ? 'checked' : ''}> All users</label>
-        <select name="roles" multiple size="5">${['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'].map((x) => `<option ${(v.usageRights?.roles || []).includes(x) ? 'selected' : ''}>${x}</option>`).join('')}</select>` : ''}
+        <select name="roles" multiple size="5">${codes.map((x) => `<option ${(v.usageRights?.roles || []).includes(x) ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>` : ''}
       <div class="toolbar"><button type="submit">Save</button><button type="button" class="secondary" id="v-cancel">Cancel</button></div>
     </form></section>`;
   const form = $('#v-form');
@@ -2015,11 +2066,13 @@ async function viewEditor() {
       entity: v.entity, name: form.name.value, match: form.match.value, filters: readFilters(),
       columns: [...form.columns.selectedOptions].map((o) => o.value), sortBy: form.sortBy.value || null, sortDir: form.sortDir.value,
       includeTotals: form.includeTotals.checked, includeTimestamp: form.includeTimestamp.checked, display: form.display.value,
+      menuItemId: form.menuItemId.value || null,
       ...(admin ? { usageRights: { allUsers: form.allUsers.checked, roles: [...form.roles.selectedOptions].map((o) => o.value) } } : {}),
     };
     const r = v.id ? await api('PATCH', `/api/views/${v.id}`, body) : await api('POST', '/api/views', body);
     if (!r.ok) return toast(r.error, true);
     toast('View saved');
+    loadMenu();
     viewState.editing = null; viewState.open = r.body.id; viewState.offset = 0;
     return viewsView();
   });
@@ -3560,7 +3613,7 @@ async function showImport(id) {
 
 async function usersView() {
   const owner = S.user.role === 'TENANT_ADMIN';
-  const [users, roles, branches] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/users/roles'), api('GET', '/api/branches')]);
+  const [users, roles, branches, rc] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/users/roles'), api('GET', '/api/branches'), rolesCard()]);
   if (!users.ok) throw new Error(users.error);
   const branchCode = new Map((branches.body || []).map((b) => [b.id, b.code]));
   view().innerHTML = `
@@ -3568,13 +3621,16 @@ async function usersView() {
     <p class="hint">Staff who sign in to the back office. A new user, and one whose password is reset, gets a temporary password shown once
     that must be changed at the first sign-in. Suspending a user ends their sessions at once.</p>
     <div id="users-list">${table([
-    { label: 'Email', key: 'email' }, { label: 'Name', key: 'full_name' }, { label: 'Role', key: 'role' }, { label: 'Status', key: 'status' },
+    { label: 'Email', key: 'email' }, { label: 'Name', key: 'full_name' }, { label: 'Role', value: (u) => (u.role_code ? `${u.role_code} (${u.role})` : u.role) },
+    { label: 'Extra permissions', value: (u) => (u.permissions || []).join(', ') }, { label: 'Status', key: 'status' },
     { label: 'Branch', value: (u) => branchCode.get(u.branch_id) || '' },
     { label: 'Second factor', value: (u) => (u.mfa_enabled ? 'on' : '') },
     { label: 'Last sign-in', value: (u) => (u.last_login_at ? String(u.last_login_at).slice(0, 16).replace('T', ' ') : '') },
     { label: '', html: true, value: (u) => (owner ? `<button class="link" data-user="${esc(u.id)}">edit</button> <button class="link" data-reset="${esc(u.id)}">reset password</button>${u.mfa_enabled ? ` <button class="link" data-mfa="${esc(u.id)}">reset second factor</button>` : ''}` : '') },
-  ], users.body)}</div>`;
-  const roleList = roles.body || [];
+  ], users.body)}</div>
+    ${rc.html}`;
+  rc.wire(usersView);
+  const roleList = [...new Set([...(roles.body || []), ...(rc.roles || []).map((r) => r.code)])];
   const branchList = ['', ...(branches.body || []).filter((b) => b.status === 'ACTIVE').map((b) => b.code)];
   const shown = (title, secret) => ask([{ name: 'p', label: 'Temporary password (shown once; give it to the user)', value: secret }], title);
   el('user-add')?.addEventListener('click', async () => {
@@ -3592,7 +3648,8 @@ async function usersView() {
     const u = users.body.find((x) => x.id === b.dataset.user);
     const d = await ask([
       { name: 'fullName', label: 'Name', value: u.full_name || '', required: false },
-      { name: 'role', label: 'Role', options: roleList, value: u.role },
+      { name: 'role', label: 'Role', options: roleList, value: u.role_code || u.role },
+      { name: 'permissions', label: 'Extra permissions (codes, comma separated)', value: (u.permissions || []).join(', '), required: false },
       { name: 'status', label: 'Status', options: ['ACTIVE', 'SUSPENDED'], value: u.status },
       { name: 'branchId', label: 'Branch', options: branchList, value: branchCode.get(u.branch_id) || '' },
       { name: 'approvalLimit', label: 'Approval limit (blank: none)', type: 'number', step: '0.01', value: u.approval_limit ?? '', required: false },
@@ -3600,7 +3657,7 @@ async function usersView() {
     ], `Edit ${u.email}`);
     if (!d) return;
     const r = await api('PATCH', `/api/users/${u.id}`, {
-      ...d, branchId: d.branchId || null,
+      ...d, branchId: d.branchId || null, permissions: d.permissions.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
       approvalLimit: d.approvalLimit === '' ? null : Number(d.approvalLimit),
       disbursementLimit: d.disbursementLimit === '' ? null : Number(d.disbursementLimit),
     });
@@ -3620,7 +3677,591 @@ async function usersView() {
   }));
 }
 
+// --------------------------------------------------------------------------
+// Access: what the signed-in user may do, from GET /api/auth/me
+// --------------------------------------------------------------------------
+
+/** True when the user holds any of the permission codes (an administrator holds them all). */
+const can = (...codes) => S.user?.role === 'TENANT_ADMIN' || codes.some((c) => (S.user?.permissions || []).includes(c));
+
+/** Load the user's permissions, hide the pages they may not open, and build their menu items. */
+async function loadAccess() {
+  const me = await api('GET', '/api/auth/me');
+  if (me.ok) S.user = { ...S.user, ...me.body };
+  for (const b of el('nav').querySelectorAll('button[data-perm]')) b.hidden = !can(...b.dataset.perm.split(' '));
+  await loadMenu();
+}
+
+/** The menu items with views (GET /api/menu), as a second row of the navigation. */
+async function loadMenu() {
+  const m = await api('GET', '/api/menu');
+  S.menu = m.ok ? m.body : { fixed: [], items: [] };
+  el('menu-nav').innerHTML = S.menu.items.map((i) => `<button data-menu-item="${esc(i.id)}" class="${S.view === 'menu' && S.menuItem === i.id ? 'active' : ''}">${esc(i.name)}</button>`).join('');
+}
+
+el('menu-nav').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-menu-item]');
+  if (!b) return;
+  S.view = 'menu';
+  S.menuItem = b.dataset.menuItem;
+  for (const n of el('nav').children) n.classList.remove('active');
+  for (const n of el('menu-nav').children) n.classList.toggle('active', n === b);
+  render();
+});
+
+/** The tenant's role codes (built-in and its own), for usage rights. */
+async function roleCodes() {
+  const r = await api('GET', '/api/roles');
+  return r.ok ? r.body.map((x) => x.code) : ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'];
+}
+
+/** A usage rights editor inside a dialog of its own: all users, or the roles picked. */
+async function usageRightsDialog(title, rights, codes) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement('dialog');
+    dlg.innerHTML = `<form method="dialog" class="card"><h2>${esc(title)}</h2>
+      <label class="check"><input type="checkbox" name="allUsers" ${rights.allUsers ? 'checked' : ''}> All users</label>
+      <label>Or the roles<select name="roles" multiple size="${Math.min(8, codes.length)}">${codes.map((c) => `<option ${rights.roles.includes(c) ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
+      <menu class="dialog-actions"><button value="cancel" class="secondary">Cancel</button><button value="ok">Save</button></menu></form>`;
+    document.body.appendChild(dlg);
+    dlg.addEventListener('close', () => {
+      const f = $('form', dlg);
+      const out = { allUsers: f.allUsers.checked, roles: [...f.roles.selectedOptions].map((o) => o.value) };
+      dlg.remove();
+      resolve(dlg.returnValue === 'ok' ? out : null);
+    });
+    dlg.showModal();
+  });
+}
+
+// --------------------------------------------------------------------------
+// Menu items (the reference platform's Menu Items)
+// --------------------------------------------------------------------------
+
+/** The page of one menu item: the views filed under it. */
+async function menuView() {
+  await loadMenu();
+  const item = S.menu.items.find((i) => i.id === S.menuItem);
+  if (!item) { S.view = 'views'; return viewsView(); }
+  view().innerHTML = `<div class="toolbar"><h1>${esc(item.name)}</h1><span class="hint">${esc(item.type.toLowerCase().replace(/_/g, ' '))}</span></div>
+    ${card('Views', item.views.length ? `<ul id="mi-views">${item.views.map((v) => `<li><button class="link" data-open-view="${esc(v.id)}">${esc(v.name)}</button>${v.favourite ? ' <span class="hint">favourite</span>' : ''}</li>`).join('')}</ul>`
+    : '<p class="hint">No views are filed here yet. Make one under Views and choose this menu item for it.</p>')}`;
+  view().querySelectorAll('[data-open-view]').forEach((b) => b.addEventListener('click', () => {
+    viewState.open = b.dataset.openView; viewState.offset = 0; go('views');
+  }));
+}
+
+/** Menu items, managed on the Views page: add, rename, share, move and delete. */
+async function menuItemsCard(ents) {
+  const admin = S.user.role === 'TENANT_ADMIN';
+  const items = (S.menu?.items || []);
+  const rows = items.map((i, k) => ({ ...i, k }));
+  return card('Menu items', `<p class="hint">Views are filed under menu items, which show as the second row of the navigation.
+    ${admin ? 'An administrator shares items with roles and puts them in order.' : 'Items you make are yours until an administrator shares them.'}</p>
+    <div id="mi-list">${table([
+    { label: 'Name', key: 'name' }, { label: 'Kind', value: (i) => (ents.find((e) => e.entity === i.type)?.label || i.type) },
+    { label: 'Views', num: true, value: (i) => i.views.length },
+    { label: 'Shared', value: (i) => (i.usageRights.allUsers ? 'all users' : i.usageRights.roles.join(', ')) },
+    { label: '', html: true, value: (i) => [
+      admin && i.k > 0 ? `<button class="link" data-mi-up="${esc(i.id)}">up</button>` : '',
+      admin && i.k < rows.length - 1 ? `<button class="link" data-mi-down="${esc(i.id)}">down</button>` : '',
+      i.canEdit ? `<button class="link" data-mi-edit="${esc(i.id)}">rename</button>` : '',
+      admin ? `<button class="link" data-mi-share="${esc(i.id)}">share</button>` : '',
+      i.canEdit && !i.predefined ? `<button class="link" data-mi-del="${esc(i.id)}">delete</button>` : ''].filter(Boolean).join(' ') },
+  ], rows, { empty: 'No menu items' })}</div>
+    <button class="secondary" id="mi-new">New menu item</button>`);
+}
+
+function wireMenuItems(ents, reload) {
+  const items = S.menu?.items || [];
+  const on = (attr, fn) => view().querySelectorAll(`[${attr}]`).forEach((b) => b.addEventListener('click', () => fn(b.getAttribute(attr))));
+  const done = async (r, msg) => { toast(r.ok ? msg : r.error, !r.ok); if (r.ok) { await loadMenu(); reload(); } };
+  $('#mi-new')?.addEventListener('click', async () => {
+    const d = await ask([{ name: 'name', label: 'Name (at most 32 characters)' },
+      { name: 'type', label: 'Kind of record', options: ents.map((e) => e.entity), value: ents[0]?.entity }], 'New menu item');
+    if (!d) return;
+    done(await api('POST', '/api/menu-items', d), 'Menu item added');
+  });
+  on('data-mi-edit', async (id) => {
+    const i = items.find((x) => x.id === id);
+    const d = await ask([{ name: 'name', label: 'Name', value: i.name }], `Rename ${i.name}`);
+    if (d) done(await api('PATCH', `/api/menu-items/${id}`, d), 'Renamed');
+  });
+  on('data-mi-share', async (id) => {
+    const i = items.find((x) => x.id === id);
+    const rights = await usageRightsDialog(`Who sees ${i.name}`, i.usageRights, await roleCodes());
+    if (rights) done(await api('PATCH', `/api/menu-items/${id}`, { usageRights: rights }), 'Usage rights saved');
+  });
+  on('data-mi-del', async (id) => {
+    if (!window.confirm('Delete this menu item? Its views stay.')) return;
+    done(await api('DELETE', `/api/menu-items/${id}`), 'Menu item deleted');
+  });
+  const move = async (id, by) => {
+    const ids = items.map((x) => x.id);
+    const k = ids.indexOf(id);
+    [ids[k], ids[k + by]] = [ids[k + by], ids[k]];
+    done(await api('PUT', '/api/menu-items/order', { ids }), 'Moved');
+  };
+  on('data-mi-up', (id) => move(id, -1));
+  on('data-mi-down', (id) => move(id, 1));
+}
+
+// --------------------------------------------------------------------------
+// Tasks (the reference platform's Tasks and the Your Tasks widget)
+// --------------------------------------------------------------------------
+
+const taskState = { status: 'OPEN', due: '', mine: true, offset: 0, limit: 25 };
+
+async function newTask(prefill = {}) {
+  const [tpl, users] = await Promise.all([api('GET', '/api/tasks/templates'),
+    can('VIEW_USER_DETAILS') ? api('GET', '/api/users') : Promise.resolve({ ok: false })]);
+  const templates = tpl.ok ? tpl.body : [];
+  const emails = users.ok ? users.body.filter((u) => u.status === 'ACTIVE').map((u) => u.email) : [S.user.email];
+  if (!emails.includes(S.user.email)) emails.unshift(S.user.email);
+  const d = await ask([
+    ...(templates.length ? [{ name: 'template', label: 'Template', options: ['', ...templates.map((t) => t.name)], value: '' }] : []),
+    { name: 'title', label: 'Title', hint: 'Leave blank to take the template\'s title', required: !templates.length },
+    { name: 'description', label: 'Description', type: 'textarea', rows: 3, required: false },
+    { name: 'memberId', label: 'Member number', value: prefill.memberNo || '', required: false },
+    { name: 'assignedTo', label: 'Assigned to', options: emails, value: S.user.email },
+    { name: 'dueDate', label: 'Due', type: 'date', value: today() },
+  ], 'New task');
+  if (!d) return false;
+  const body = { ...d };
+  for (const k of ['template', 'title', 'description', 'memberId']) if (!body[k]) delete body[k];
+  const r = await api('POST', '/api/tasks', body);
+  toast(r.ok ? `Task added: ${r.body.title}` : r.error, !r.ok);
+  return r.ok;
+}
+
+async function taskAction(t, action) {
+  const r = action === 'delete' ? await api('DELETE', `/api/tasks/${t.id}`) : await api('POST', `/api/tasks/${t.id}/${action}`);
+  toast(r.ok ? (action === 'complete' ? 'Task completed' : action === 'reopen' ? 'Task reopened' : 'Task deleted') : r.error, !r.ok);
+  return r.ok;
+}
+
+const TASK_COLUMNS = (actions) => [
+  { label: 'Task', key: 'title' }, { label: 'Member', value: (t) => (t.member ? `${t.member.memberNo} ${t.member.name}` : '') },
+  { label: 'Assigned to', key: 'assignedTo' }, { label: 'Due', key: 'dueDate' },
+  { label: 'State', html: true, value: (t) => `<span class="badge ${t.state === 'OVERDUE' ? 'bad' : ''}">${esc(t.state)}</span>` },
+  { label: '', html: true, value: actions },
+];
+
+function wireTasks(list, reload) {
+  view().querySelectorAll('[data-task]').forEach((b) => b.addEventListener('click', async () => {
+    const t = list.find((x) => x.id === b.dataset.task);
+    if (b.dataset.act === 'delete' && !window.confirm('Delete this task?')) return;
+    if (await taskAction(t, b.dataset.act)) reload();
+  }));
+}
+
+const taskButtons = (t) => [
+  can('EDIT_TASK') && t.status === 'OPEN' ? `<button class="link" data-task="${esc(t.id)}" data-act="complete">complete</button>` : '',
+  can('EDIT_TASK') && t.status === 'COMPLETED' ? `<button class="link" data-task="${esc(t.id)}" data-act="reopen">reopen</button>` : '',
+  can('DELETE_TASK') ? `<button class="link" data-task="${esc(t.id)}" data-act="delete">delete</button>` : ''].filter(Boolean).join(' ');
+
+async function tasksView() {
+  const T = taskState;
+  const qs = new URLSearchParams({ offset: T.offset, limit: T.limit });
+  if (T.status) qs.set('status', T.status);
+  if (T.due) qs.set('due', T.due);
+  if (T.mine) qs.set('assignedTo', S.user.email);
+  const [list, tpl] = await Promise.all([api('GET', `/api/tasks?${qs}`), api('GET', '/api/tasks/templates')]);
+  if (!list.ok) throw new Error(list.error);
+  const total = list.total;
+  const templates = tpl.ok ? tpl.body : [];
+  view().innerHTML = `<div class="toolbar"><h1>Tasks</h1>${can('CREATE_TASK') ? '<button id="task-new">New task</button>' : ''}</div>
+    <div class="toolbar">
+      <label>Status<select id="task-status">${['', 'OPEN', 'COMPLETED'].map((s) => `<option value="${s}" ${T.status === s ? 'selected' : ''}>${s || 'Any'}</option>`).join('')}</select></label>
+      <label>Due<select id="task-due">${['', 'OVERDUE', 'TODAY', 'UPCOMING'].map((s) => `<option value="${s}" ${T.due === s ? 'selected' : ''}>${s || 'Any time'}</option>`).join('')}</select></label>
+      <label class="check"><input type="checkbox" id="task-mine" ${T.mine ? 'checked' : ''}> Assigned to me</label>
+    </div>
+    <div id="task-list">${table(TASK_COLUMNS(taskButtons), list.body, { empty: 'No tasks' })}</div>
+    ${pager(T, total)}
+    ${card('Task templates', `<p class="hint">A template fills a task's title and description. Placeholders such as {MEMBER_NAME} take the linked member's details.</p>
+      ${table([{ label: 'Name', key: 'name' }, { label: 'Title', key: 'title' }, { label: 'Content', key: 'content' },
+    { label: '', html: true, value: (t) => (can('EDIT_COMMUNICATION_TEMPLATES') ? `<button class="link" data-tpl-edit="${esc(t.id)}">edit</button> <button class="link" data-tpl-del="${esc(t.id)}">delete</button>` : '') }], templates, { empty: 'No templates' })}
+      ${can('CREATE_COMMUNICATION_TEMPLATES') ? '<button class="secondary" id="tpl-new">New template</button>' : ''}`)}`;
+  wirePager(T, tasksView);
+  wireTasks(list.body, tasksView);
+  $('#task-status').addEventListener('change', (e) => { T.status = e.target.value; T.offset = 0; tasksView(); });
+  $('#task-due').addEventListener('change', (e) => { T.due = e.target.value; T.offset = 0; tasksView(); });
+  $('#task-mine').addEventListener('change', (e) => { T.mine = e.target.checked; T.offset = 0; tasksView(); });
+  $('#task-new')?.addEventListener('click', async () => { if (await newTask()) tasksView(); });
+  const tplForm = async (t = {}) => ask([{ name: 'name', label: 'Name', value: t.name || '' }, { name: 'title', label: 'Task title', value: t.title || '' },
+    { name: 'content', label: 'Task description', type: 'textarea', rows: 4, value: t.content || '', required: false }], t.id ? `Edit ${t.name}` : 'New task template');
+  $('#tpl-new')?.addEventListener('click', async () => {
+    const d = await tplForm();
+    if (!d) return;
+    const r = await api('POST', '/api/tasks/templates', d);
+    toast(r.ok ? 'Template saved' : r.error, !r.ok);
+    if (r.ok) tasksView();
+  });
+  view().querySelectorAll('[data-tpl-edit]').forEach((b) => b.addEventListener('click', async () => {
+    const d = await tplForm(templates.find((t) => t.id === b.dataset.tplEdit));
+    if (!d) return;
+    const r = await api('PATCH', `/api/tasks/templates/${b.dataset.tplEdit}`, d);
+    toast(r.ok ? 'Template saved' : r.error, !r.ok);
+    if (r.ok) tasksView();
+  }));
+  view().querySelectorAll('[data-tpl-del]').forEach((b) => b.addEventListener('click', async () => {
+    if (!window.confirm('Delete this template?')) return;
+    const r = await api('DELETE', `/api/tasks/templates/${b.dataset.tplDel}`);
+    toast(r.ok ? 'Template deleted' : r.error, !r.ok);
+    if (r.ok) tasksView();
+  }));
+}
+
+/** The member page's tasks: open tasks linked to the member, and a new one. */
+async function memberTasks(m) {
+  if (!can('VIEW_TASK')) return;
+  const r = await api('GET', `/api/tasks?memberId=${encodeURIComponent(m.id)}&status=OPEN&limit=20`);
+  if (!r.ok) return;
+  const box = document.createElement('div');
+  box.id = 'member-tasks';
+  box.innerHTML = card('Tasks', `${table(TASK_COLUMNS(taskButtons).filter((c) => c.label !== 'Member'), r.body, { empty: 'No open tasks' })}
+    ${can('CREATE_TASK') ? '<button class="secondary" id="mt-new">New task</button>' : ''}`);
+  view().appendChild(box);
+  const again = () => memberDetail(m);
+  wireTasks(r.body, again);
+  $('#mt-new')?.addEventListener('click', async () => { if (await newTask({ memberNo: m.member_no })) again(); });
+}
+
+// --------------------------------------------------------------------------
+// Tills (the reference platform's Tellers and Tellering widgets)
+// --------------------------------------------------------------------------
+
+const tillState = { includeClosed: false, open: null };
+
+async function tillCash(t, direction, reload) {
+  const d = await ask([{ name: 'amount', label: 'Amount', type: 'number', step: '0.01' },
+    { name: 'note', label: 'Note', required: false }], `${direction === 'IN' ? 'Add cash to' : 'Remove cash from'} ${t.tillId}`);
+  if (!d) return;
+  const r = await api('POST', `/api/tills/${t.id}/${direction === 'IN' ? 'add-cash' : 'remove-cash'}`, { amount: Number(d.amount), note: d.note || null });
+  toast(r.ok ? `${t.tillId}: expected cash ${money(r.body.expectedCash)}` : r.error, !r.ok);
+  if (r.ok) reload();
+}
+
+async function tillClose(t, reload) {
+  const d = await ask([{ name: 'countedCash', label: 'Cash counted in the till', type: 'number', step: '0.01', value: t.expectedCash },
+    { name: 'note', label: 'Note', required: false }], `Close ${t.tillId} (expected ${money(t.expectedCash)})`);
+  if (!d) return;
+  const r = await api('POST', `/api/tills/${t.id}/close`, { countedCash: Number(d.countedCash), note: d.note || null });
+  if (!r.ok) return toast(r.error, true);
+  const diff = r.body.difference;
+  toast(diff ? `${t.tillId} closed ${diff < 0 ? 'short' : 'over'} by ${money(Math.abs(diff))}; the difference is posted to cash over and short` : `${t.tillId} closed and balanced`);
+  return reload();
+}
+
+const tillButtons = (t) => {
+  const own = t.teller.email.toLowerCase() === String(S.user.email).toLowerCase();
+  const b = [];
+  if (t.status === 'OPEN') {
+    if (can('ADD_CASH')) b.push(`<button class="link" data-till="${esc(t.id)}" data-act="in">add cash</button>`);
+    if (can('REMOVE_CASH')) b.push(`<button class="link" data-till="${esc(t.id)}" data-act="out">remove cash</button>`);
+    if (can('CLOSE_TILL') && (own || can('OPEN_TILL'))) b.push(`<button class="link" data-till="${esc(t.id)}" data-act="close">close</button>`);
+    if (can('OPEN_TILL')) b.push(`<button class="link" data-till="${esc(t.id)}" data-act="undo-open">undo open</button>`);
+  } else {
+    if (can('CLOSE_TILL')) b.push(`<button class="link" data-till="${esc(t.id)}" data-act="undo-close">undo close</button>`);
+    if (can('OPEN_TILL')) b.push(`<button class="link" data-till="${esc(t.id)}" data-act="reopen">reopen</button>`);
+  }
+  b.push(`<button class="link" data-till="${esc(t.id)}" data-act="log">log</button>`);
+  return b.join(' ');
+};
+
+function wireTills(list, reload) {
+  view().querySelectorAll('[data-till]').forEach((b) => b.addEventListener('click', async () => {
+    const t = list.find((x) => x.id === b.dataset.till);
+    const act = b.dataset.act;
+    if (act === 'in' || act === 'out') return tillCash(t, act === 'in' ? 'IN' : 'OUT', reload);
+    if (act === 'close') return tillClose(t, reload);
+    if (act === 'log') { tillState.open = t.id; return go('tills'); }
+    if (act === 'undo-open' && !window.confirm(`Undo opening ${t.tillId}? Only a till with no transactions can be undone.`)) return null;
+    const r = act === 'undo-open' ? await api('DELETE', `/api/tills/${t.id}`) : await api('POST', `/api/tills/${t.id}/${act}`);
+    toast(r.ok ? `${t.tillId}: ${act.replace('-', ' ')} done` : r.error, !r.ok);
+    return r.ok ? reload() : null;
+  }));
+}
+
+const TILL_COLUMNS = (actions = tillButtons) => [
+  { label: 'Till', key: 'tillId' }, { label: 'Teller', value: (t) => t.teller.name || t.teller.email },
+  { label: 'Branch', value: (t) => t.branch?.code || '' }, { label: 'Status', key: 'status' },
+  { label: 'Opening', num: true, value: (t) => money(t.openingAmount) },
+  { label: 'Expected cash', num: true, html: true, value: (t) => `${money(t.expectedCash)}${t.outsideLimits ? ' <span class="badge bad">outside limits</span>' : ''}` },
+  { label: 'Difference', num: true, value: (t) => (t.difference === null ? '' : money(t.difference)) },
+  { label: '', html: true, value: actions },
+];
+
+async function openTill(reload) {
+  const [users, next, channels] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/tills/next-id'), api('GET', '/api/transaction-channels')]);
+  const tellers = (users.body || []).filter((u) => u.status === 'ACTIVE' && (u.role === 'TELLER' || u.role_code)).map((u) => u.email);
+  const chans = (channels.body || []).filter((c) => c.active !== false).map((c) => c.id).filter(Boolean);
+  const d = await ask([
+    { name: 'tellerEmail', label: 'Teller', options: tellers.length ? tellers : [''] },
+    { name: 'tillId', label: 'Till ID', value: next.body?.tillId || '' },
+    { name: 'openingAmount', label: 'Opening cash', type: 'number', step: '0.01', value: 0 },
+    ...(chans.length ? [{ name: 'channelId', label: 'Channel', options: chans, value: chans.includes('cash') ? 'cash' : chans[0] }] : []),
+    { name: 'glAccount', label: 'Till GL account (blank: the channel\'s)', required: false },
+    { name: 'balanceConstraint', label: 'Balance limits', options: ['NONE', 'SOFT', 'HARD'], value: 'NONE' },
+    { name: 'minBalance', label: 'Minimum', type: 'number', step: '0.01', required: false },
+    { name: 'maxBalance', label: 'Maximum', type: 'number', step: '0.01', required: false },
+  ], 'Open a till');
+  if (!d) return;
+  const body = { ...d, openingAmount: Number(d.openingAmount || 0) };
+  for (const k of ['glAccount', 'minBalance', 'maxBalance']) if (body[k] === '') delete body[k];
+  if (body.minBalance !== undefined) body.minBalance = Number(body.minBalance);
+  if (body.maxBalance !== undefined) body.maxBalance = Number(body.maxBalance);
+  const r = await api('POST', '/api/tills', body);
+  toast(r.ok ? `${r.body.tillId} opened for ${r.body.teller.email}` : r.error, !r.ok);
+  if (r.ok) reload();
+}
+
+async function tillsView() {
+  if (tillState.open) return tillLog();
+  const r = await api('GET', `/api/tills${tillState.includeClosed ? '?includeClosed=true' : ''}`);
+  if (!r.ok) throw new Error(r.error);
+  view().innerHTML = `<div class="toolbar"><h1>Tills</h1>${can('OPEN_TILL') ? '<button id="till-open">Open a till</button>' : ''}
+      <label class="check"><input type="checkbox" id="till-closed" ${tillState.includeClosed ? 'checked' : ''}> Closed tills too</label></div>
+    <p class="hint">A till holds a teller's cash for the day. Cash deposits, withdrawals and repayments the teller posts go through it.
+      Closing it takes the cash counted; a difference from the expected cash is posted to cash over and short.</p>
+    <div id="till-list">${table(TILL_COLUMNS(), r.body, { empty: 'No open tills' })}</div>`;
+  wireTills(r.body, tillsView);
+  $('#till-open')?.addEventListener('click', () => openTill(tillsView));
+  $('#till-closed').addEventListener('change', (e) => { tillState.includeClosed = e.target.checked; tillsView(); });
+}
+
+async function tillLog() {
+  const r = await api('GET', `/api/tills/${tillState.open}`);
+  if (!r.ok) { tillState.open = null; toast(r.error, true); return tillsView(); }
+  const t = r.body;
+  view().innerHTML = `<button class="secondary" id="back">← Tills</button>
+    <h1>${esc(t.tillId)} <span class="badge">${esc(t.status)}</span></h1>
+    <dl class="kv"><dt>Teller</dt><dd>${esc(t.teller.email)}</dd><dt>GL account</dt><dd>${esc(t.glAccount)}</dd>
+      <dt>Opening cash</dt><dd>${money(t.openingAmount)}</dd><dt>Expected cash</dt><dd id="till-expected">${money(t.expectedCash)}</dd>
+      ${t.countedCash !== null ? `<dt>Counted</dt><dd>${money(t.countedCash)}</dd><dt>Difference</dt><dd>${money(t.difference)}</dd>` : ''}</dl>
+    <div class="toolbar">${tillButtons(t).replace(/<button class="link" data-till="[^"]+" data-act="log">log<\/button>/, '')}</div>
+    ${card('Log', table([{ label: 'When', value: (m) => String(m.createdAt).replace('T', ' ').slice(0, 16) }, { label: 'What', key: 'kind' },
+    { label: 'Reference', value: (m) => m.reference || m.note || '' }, { label: 'Account', key: 'accountNo' },
+    { label: 'Amount', num: true, value: (m) => money(m.amount) }, { label: 'Till cash', num: true, value: (m) => money(m.balance) }], t.log, { empty: 'Nothing through this till yet' }))}`;
+  $('#back').addEventListener('click', () => { tillState.open = null; tillsView(); });
+  wireTills([t], tillLog);
+}
+
+/** The Tellering widget: the teller's own till, if they have one open. */
+function telleringCard(mine) {
+  if (!mine) return '';
+  const t = mine.till;
+  if (!t) {
+    return card('Your till', `<p class="hint" id="my-till">${mine.mustUseTill ? 'You have no open till. Cash transactions are refused until a supervisor opens one for you.'
+      : 'You have no open till. Cash you post is not counted in a till.'}</p>`);
+  }
+  return card(`Your till ${t.tillId}`, `<dl class="kv" id="my-till"><dt>Opening cash</dt><dd>${money(t.openingAmount)}</dd>
+    <dt>Expected cash</dt><dd>${money(t.expectedCash)}${t.outsideLimits ? ' <span class="badge bad">outside limits</span>' : ''}</dd>
+    <dt>Transactions</dt><dd>${t.log.filter((m) => m.kind === 'TRANSACTION').length}</dd></dl>
+    <div class="toolbar">${can('CLOSE_TILL') ? `<button class="secondary" data-till="${esc(t.id)}" data-act="close">Close till</button>` : ''}
+      <button class="link" data-till="${esc(t.id)}" data-act="log">log</button></div>`);
+}
+
+// --------------------------------------------------------------------------
+// Roles (the reference platform's Roles), managed on the Users page
+// --------------------------------------------------------------------------
+
+async function roleEditor(role, catalog) {
+  return new Promise((resolve) => {
+    const has = new Set(role.permissions || []);
+    const dlg = document.createElement('dialog');
+    dlg.innerHTML = `<form method="dialog" class="card wide" id="role-form"><h2>${esc(role.code ? `Role ${role.code}` : 'New role')}</h2>
+      ${role.code ? '' : '<label>Code<input name="code" required pattern="[A-Z][A-Z0-9_]{1,31}" placeholder="LOAN_OFFICER"></label>'}
+      <label>Name<input name="name" value="${esc(role.name || '')}" required></label>
+      <label>Base role<select name="baseRole" ${role.builtin ? 'disabled' : ''}>${['MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR', 'TENANT_ADMIN'].map((b) => `<option ${b === (role.baseRole || 'TELLER') ? 'selected' : ''}>${b}</option>`).join('')}</select>
+        <span class="hint">The pages and actions not yet on permissions follow the base role.</span></label>
+      <label>User type<select name="userType" ${role.builtin ? 'disabled' : ''}>${['', 'ADMINISTRATOR', 'TELLER', 'CREDIT_OFFICER'].map((u) => `<option value="${u}" ${u === (role.userType || '') ? 'selected' : ''}>${u || '(none)'}</option>`).join('')}</select></label>
+      <div class="perm-groups">${catalog.map((g) => `<fieldset><legend>${esc(g.group)}</legend>${g.permissions.map((p) => `<label class="check" title="${esc(p.code)}">
+        <input type="checkbox" name="perm" value="${esc(p.code)}" ${has.has(p.code) ? 'checked' : ''} ${role.code === 'TENANT_ADMIN' ? 'disabled' : ''}> ${esc(p.label)}${p.enforced ? '' : ' <span class="hint">(not yet enforced)</span>'}</label>`).join('')}</fieldset>`).join('')}</div>
+      <label>Notes<input name="notes" value="${esc(role.notes || '')}"></label>
+      <menu class="dialog-actions"><button value="cancel" class="secondary">Cancel</button><button value="ok">Save role</button></menu></form>`;
+    document.body.appendChild(dlg);
+    dlg.addEventListener('close', () => {
+      const f = $('form', dlg);
+      const out = {
+        ...(role.code ? {} : { code: f.code.value.trim().toUpperCase() }), name: f.name.value, notes: f.notes.value || null,
+        ...(role.builtin ? {} : { baseRole: f.baseRole.value, userType: f.userType.value || null }),
+        ...(role.code === 'TENANT_ADMIN' ? {} : { permissions: [...f.querySelectorAll('input[name=perm]:checked')].map((i) => i.value) }),
+      };
+      dlg.remove();
+      resolve(dlg.returnValue === 'ok' ? out : null);
+    });
+    dlg.showModal();
+  });
+}
+
+async function rolesCard() {
+  if (!can('VIEW_ROLE')) return { html: '', wire: () => {} };
+  const [roles, cat] = await Promise.all([api('GET', '/api/roles'), api('GET', '/api/roles/permissions')]);
+  if (!roles.ok) return { html: '', wire: () => {} };
+  const html = card('Roles', `<p class="hint">A role is a set of permissions. The five built-in roles can be edited, not deleted; a SACCO's own roles sit on a base role.
+    A user's own extra permissions are added to their role's.</p>
+    <div id="roles-list">${table([{ label: 'Code', key: 'code' }, { label: 'Name', key: 'name' }, { label: 'Base role', key: 'baseRole' },
+    { label: 'User type', key: 'userType' }, { label: 'Permissions', num: true, value: (r) => r.permissions.length }, { label: 'Users', num: true, key: 'users' },
+    { label: '', html: true, value: (r) => `${can('EDIT_ROLE') ? `<button class="link" data-role="${esc(r.code)}">edit</button>` : ''}${can('DELETE_ROLE') && !r.builtin && !r.users ? ` <button class="link" data-role-del="${esc(r.code)}">delete</button>` : ''}` }], roles.body)}</div>
+    ${can('CREATE_ROLE') ? '<button class="secondary" id="role-add">New role</button>' : ''}`);
+  const wire = (reload) => {
+    $('#role-add')?.addEventListener('click', async () => {
+      const d = await roleEditor({ permissions: [] }, cat.body);
+      if (!d) return;
+      const r = await api('POST', '/api/roles', d);
+      toast(r.ok ? `Role ${r.body.code} added` : r.error, !r.ok);
+      if (r.ok) reload();
+    });
+    view().querySelectorAll('[data-role]').forEach((b) => b.addEventListener('click', async () => {
+      const role = roles.body.find((x) => x.code === b.dataset.role);
+      const d = await roleEditor(role, cat.body);
+      if (!d) return;
+      const r = await api('PATCH', `/api/roles/${role.code}`, d);
+      toast(r.ok ? 'Role saved' : r.error, !r.ok);
+      if (r.ok) reload();
+    }));
+    view().querySelectorAll('[data-role-del]').forEach((b) => b.addEventListener('click', async () => {
+      if (!window.confirm(`Delete role ${b.dataset.roleDel}?`)) return;
+      const r = await api('DELETE', `/api/roles/${b.dataset.roleDel}`);
+      toast(r.ok ? 'Role deleted' : r.error, !r.ok);
+      if (r.ok) reload();
+    }));
+  };
+  return { html, wire, roles: roles.body };
+}
+
+// --------------------------------------------------------------------------
+// Report templates (in place of the reference platform's Jasper reports)
+// --------------------------------------------------------------------------
+
+/** Ask for a template's parameters, then run it and show the result. */
+async function runTemplate(t, recordId = null) {
+  let parameters = {};
+  if (t.parameters.length) {
+    const d = await ask(t.parameters.map((p) => ({
+      name: p.name, label: p.label || p.name, required: Boolean(p.required),
+      type: p.type === 'DATE' ? 'date' : p.type === 'NUMBER' ? 'number' : 'text',
+      ...(p.type === 'SELECTION' ? { options: ['', ...(p.options || [])] } : {}),
+      ...(p.type === 'BOOLEAN' ? { options: ['', 'true', 'false'] } : {}),
+      value: ['TODAY', 'MONTH_START', 'YEAR_START'].includes(p.default) ? '' : (p.default ?? ''),
+      hint: p.default && ['TODAY', 'MONTH_START', 'YEAR_START'].includes(p.default) ? `Blank: ${p.default.toLowerCase().replace('_', ' ')}` : undefined,
+    })), `Run ${t.name}`);
+    if (!d) return;
+    parameters = Object.fromEntries(Object.entries(d).filter(([, v]) => v !== ''));
+  }
+  const body = { parameters, recordId };
+  const r = await api('POST', `/api/report-templates/${t.id}/run`, body);
+  if (!r.ok) return toast(r.error, true);
+  const x = r.body;
+  const dlg = document.createElement('dialog');
+  dlg.id = 'report-run';
+  const show = (v, c) => (c.num && typeof v === 'number' ? money(v) : v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : v);
+  dlg.innerHTML = `<div class="card wide"><h2>${esc(x.title)}</h2>
+    <p class="hint">${Object.entries(x.parameters || {}).map(([k, v]) => `${esc(k)}: ${esc(v ?? '')}`).join(' · ')}</p>
+    ${x.sections.map((s) => `${s.title ? `<h3>${esc(s.title)}</h3>` : ''}${s.type === 'TEXT' ? `<p>${esc(s.text)}</p>`
+    : s.type === 'FIELDS' ? `<dl class="kv">${s.columns.map((c) => `<dt>${esc(c.label)}</dt><dd>${esc(show((s.rows[0] || {})[c.key], c))}</dd>`).join('')}</dl>`
+      : table(s.columns.map((c) => ({ label: c.label, num: c.num, value: (row) => show(row[c.key], c) })), s.totals ? [...s.rows, Object.fromEntries(s.columns.map((c, i) => [c.key, s.totals[c.key] ?? (i === 0 ? 'Total' : '')]))] : s.rows)}
+      ${s.truncated ? `<p class="hint">First ${s.rows.length} of ${s.total} rows.</p>` : ''}`).join('')}
+    ${x.footer ? `<p class="hint">${esc(x.footer)}</p>` : ''}
+    <menu class="dialog-actions">${['pdf', 'html', ...(can('EXPORT_TO_EXCEL') ? ['xlsx', 'csv'] : [])].map((f) => `<button class="secondary" data-rt-fmt="${f}">${f.toUpperCase()}</button>`).join('')}
+      <button id="rt-close">Close</button></menu></div>`;
+  document.body.appendChild(dlg);
+  $('#rt-close', dlg).addEventListener('click', () => { dlg.close(); dlg.remove(); });
+  dlg.querySelectorAll('[data-rt-fmt]').forEach((b) => b.addEventListener('click', async () => {
+    const fmt = b.dataset.rtFmt;
+    const res = await fetch(`/api/report-templates/${t.id}/run?format=${fmt}`, {
+      method: 'POST', headers: { authorization: `Bearer ${S.access}`, 'x-tenant': S.tenant, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!res.ok) return toast(`Could not make the ${fmt.toUpperCase()}`, true);
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    if (fmt === 'html') a.target = '_blank'; else a.download = `${String(t.name).replace(/\s+/g, '-').toLowerCase()}.${fmt}`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    return null;
+  }));
+  dlg.showModal();
+}
+
+/** Other reports: the templates not tied to a record, and managing all templates. */
+async function templatesReport(out) {
+  const r = await api('GET', '/api/report-templates');
+  if (!r.ok) { out.innerHTML = `<p class="error">${esc(r.error)}</p>`; return; }
+  const list = r.body;
+  const manage = can('CREATE_REPORTS', 'EDIT_REPORTS', 'DELETE_REPORTS');
+  out.innerHTML = `<p class="hint">Report templates are JSON files: sections built from custom views and the built-in reports, with parameters.
+    Member, loan, deposit, branch and centre templates run from their record's page; Other templates run here. Each runs with the reader's own permissions.</p>
+    <div id="rt-list">${table([{ label: 'Name', key: 'name' }, { label: 'On', value: (t) => t.reportType.toLowerCase() }, { label: 'Description', key: 'description' },
+    { label: 'Shared', value: (t) => (t.usageRights.allUsers ? 'all users' : t.usageRights.roles.join(', ')) },
+    { label: '', html: true, value: (t) => [t.reportType === 'OTHER' ? `<button class="link" data-rt-run="${esc(t.id)}">run</button>` : '',
+      `<button class="link" data-rt-dl="${esc(t.id)}">template</button>`,
+      can('EDIT_REPORTS') ? `<button class="link" data-rt-edit="${esc(t.id)}">replace</button> <button class="link" data-rt-share="${esc(t.id)}">share</button>` : '',
+      can('DELETE_REPORTS') ? `<button class="link" data-rt-del="${esc(t.id)}">delete</button>` : ''].filter(Boolean).join(' ') }], list, { empty: 'No report templates yet' })}</div>
+    ${manage && can('CREATE_REPORTS') ? `<div class="toolbar"><label>Upload a template<input type="file" id="rt-file" accept=".json,application/json"></label>
+      <label>On<select id="rt-type">${['OTHER', 'MEMBER', 'LOAN', 'DEPOSIT', 'BRANCH', 'CENTRE'].map((x) => `<option>${x}</option>`).join('')}</select></label></div>` : ''}`;
+  const reload = () => templatesReport(out);
+  const on = (attr, fn) => out.querySelectorAll(`[${attr}]`).forEach((b) => b.addEventListener('click', () => fn(list.find((t) => t.id === b.getAttribute(attr)))));
+  on('data-rt-run', (t) => runTemplate(t));
+  on('data-rt-dl', (t) => openFile(`/api/report-templates/${t.id}/template`, `${t.fileName || t.name}.json`.replace(/\.json\.json$/, '.json'), { save: true }));
+  on('data-rt-del', async (t) => {
+    if (!window.confirm(`Delete ${t.name}?`)) return;
+    const d = await api('DELETE', `/api/report-templates/${t.id}`);
+    toast(d.ok ? 'Template deleted' : d.error, !d.ok);
+    if (d.ok) reload();
+  });
+  on('data-rt-share', async (t) => {
+    const rights = await usageRightsDialog(`Who sees ${t.name}`, t.usageRights, await roleCodes());
+    if (!rights) return;
+    const d = await api('PATCH', `/api/report-templates/${t.id}`, { usageRights: rights });
+    toast(d.ok ? 'Usage rights saved' : d.error, !d.ok);
+    if (d.ok) reload();
+  });
+  const pick = () => new Promise((resolve) => {
+    const i = document.createElement('input');
+    i.type = 'file'; i.accept = '.json,application/json';
+    i.addEventListener('change', () => resolve(i.files[0] || null));
+    i.click();
+  });
+  const readJson = async (file) => { try { return JSON.parse(await file.text()); } catch { toast('That file is not JSON', true); return null; } };
+  on('data-rt-edit', async (t) => {
+    const file = await pick();
+    const def = file && await readJson(file);
+    if (!def) return;
+    const d = await api('PATCH', `/api/report-templates/${t.id}`, { definition: def, fileName: file.name });
+    toast(d.ok ? 'Template replaced' : d.error, !d.ok);
+    if (d.ok) reload();
+  });
+  $('#rt-file', out)?.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    const def = file && await readJson(file);
+    if (!def) return;
+    const d = await api('POST', '/api/report-templates', {
+      name: def.name || def.title || file.name.replace(/\.json$/i, ''), reportType: $('#rt-type', out).value,
+      description: def.description || null, definition: def, fileName: file.name,
+    });
+    toast(d.ok ? `Template ${d.body.name} added` : d.error, !d.ok);
+    if (d.ok) reload();
+  });
+}
+
+/** The Reports card on a record's page: the templates for that kind of record. */
+async function entityReports(type, recordId) {
+  if (!can('VIEW_REPORTS')) return;
+  const r = await api('GET', `/api/report-templates?type=${type}`);
+  if (!r.ok || !r.body.length) return;
+  const box = document.createElement('div');
+  box.id = 'entity-reports';
+  box.innerHTML = card('Reports', `<ul>${r.body.map((t) => `<li><button class="link" data-er="${esc(t.id)}">${esc(t.name)}</button>${t.description ? ` <span class="hint">${esc(t.description)}</span>` : ''}</li>`).join('')}</ul>`);
+  view().appendChild(box);
+  box.querySelectorAll('[data-er]').forEach((b) => b.addEventListener('click', () => runTemplate(r.body.find((t) => t.id === b.dataset.er), recordId)));
+}
+
 const VIEWS = {
+  menu: menuView,
+  tasks: tasksView,
+  tills: tillsView,
   dashboard: dashboardView,
   views: viewsView,
   members: membersView,

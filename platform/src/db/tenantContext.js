@@ -2,6 +2,7 @@
 
 const { pool } = require('./pool');
 const { orgToday } = require('../lib/orgDate');
+const requestContext = require('../lib/requestContext');
 
 /**
  * Tenant selection.
@@ -40,11 +41,20 @@ function assertSchemaName(schemaName) {
  * organization's calendar day rather than the server's: in Nairobi between
  * midnight and 03:00 the UTC day is still yesterday. Both settings are LOCAL
  * and revert when the transaction ends. A tenant without a row (a schema made
- * by hand in a test) keeps the server's zone.
+ * by hand in a test) keeps the server's zone. The request's user goes in
+ * app.actor and app.till_required, for the till triggers (031).
  */
 const BIND_SQL = `SELECT set_config('search_path', format('%I, public', $1::text), true),
   set_config('TimeZone', COALESCE(
-    (SELECT timezone FROM platform.tenants WHERE schema_name = $1::text), current_setting('TimeZone')), true)`;
+    (SELECT timezone FROM platform.tenants WHERE schema_name = $1::text), current_setting('TimeZone')), true),
+  set_config('app.actor', $2::text, true),
+  set_config('app.till_required', $3::text, true)`;
+
+/** The request's user for the session settings (lib/requestContext). */
+function actorParams() {
+  const ctx = requestContext.current();
+  return [ctx?.email || '', ctx?.tillRequired ? 'true' : 'false'];
+}
 
 /**
  * Run fn inside a transaction bound to one tenant's schema.
@@ -57,7 +67,7 @@ async function withTenant(schemaName, fn) {
     await client.query('BEGIN');
     // format('%I') applies quote_ident server-side; the regex above already
     // guarantees the value is a bare lowercase identifier. Belt and braces.
-    await client.query(BIND_SQL, [schemaName]);
+    await client.query(BIND_SQL, [schemaName, ...actorParams()]);
 
     // Prove the schema exists rather than silently falling through to public,
     // which would read the wrong tables or none at all.
@@ -85,7 +95,7 @@ async function withTenantRead(schemaName, fn) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN READ ONLY');
-    await client.query(BIND_SQL, [schemaName]);
+    await client.query(BIND_SQL, [schemaName, ...actorParams()]);
     const out = await fn(client);
     await client.query('COMMIT');
     return out;

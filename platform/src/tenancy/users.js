@@ -7,6 +7,8 @@ const { hashPassword } = require('../auth/passwords');
 const tokens = require('../auth/tokens');
 const { forgetUser } = require('./resolve');
 const B = require('../domain/branches');
+const ROLE = require('../domain/roles');
+const PERMS = require('../lib/permissions');
 
 /**
  * Staff users of one tenant (the reference platform's Users and Access Control, for the
@@ -30,7 +32,7 @@ const ROLES = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'];
 const STATUSES = ['ACTIVE', 'SUSPENDED'];
 const err = (m, status = 400) => Object.assign(new Error(m), { status });
 
-const COLUMNS = `id, email, full_name, role, status, branch_id, phone, mfa_enabled, mfa_enrolled_at, must_change_password,
+const COLUMNS = `id, email, full_name, role, role_code, permissions, status, branch_id, phone, mfa_enabled, mfa_enrolled_at, must_change_password,
                  approval_limit, disbursement_limit, custom_fields, last_login_at, created_at, created_by, updated_at`;
 
 /** A temporary password: 16 characters people can read aloud without confusion. */
@@ -81,8 +83,8 @@ function limit(v, name) {
 async function create(tenant, body, { actor }) {
   const email = String(body.email || '').trim().toLowerCase();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw err('VALID_EMAIL_REQUIRED');
-  const role = String(body.role || 'TELLER').toUpperCase();
-  if (!ROLES.includes(role)) throw err(`ROLE_MUST_BE_ONE_OF: ${ROLES.join(', ')}`);
+  const { role, roleCode } = await roleOf(tenant, body.role || 'TELLER');
+  const permissions = permissionsOf(body.permissions || []);
   const branchId = await branchOf(tenant, body.branchId);
   // A password the administrator chose is still temporary: the user replaces it.
   const given = body.password !== undefined && body.password !== null && body.password !== '';
@@ -90,17 +92,41 @@ async function create(tenant, body, { actor }) {
   const password = given ? String(body.password) : temporaryPassword();
   try {
     const { rows: [u] } = await pool.query(
-      `INSERT INTO platform.users (tenant_id, email, password_hash, full_name, role, status, branch_id, phone,
+      `INSERT INTO platform.users (tenant_id, email, password_hash, full_name, role, role_code, permissions, status, branch_id, phone,
           approval_limit, disbursement_limit, must_change_password, created_by)
-       VALUES ($1,$2,$3,$4,$5,'ACTIVE',$6,$7,$8,$9,true,$10) RETURNING ${COLUMNS}`,
+       VALUES ($1,$2,$3,$4,$5,$11,$12,'ACTIVE',$6,$7,$8,$9,true,$10) RETURNING ${COLUMNS}`,
       [tenant.id, email, await hashPassword(password, { minLength: 12 }), body.fullName || null, role, branchId ?? null,
-        body.phone || null, limit(body.approvalLimit, 'APPROVAL_LIMIT') ?? null, limit(body.disbursementLimit, 'DISBURSEMENT_LIMIT') ?? null, actor]);
-    await audit(tenant, actor, 'USER_CREATED', { userId: u.id, email, role, branchId });
+        body.phone || null, limit(body.approvalLimit, 'APPROVAL_LIMIT') ?? null, limit(body.disbursementLimit, 'DISBURSEMENT_LIMIT') ?? null, actor,
+        roleCode, permissions]);
+    await audit(tenant, actor, 'USER_CREATED', { userId: u.id, email, role, roleCode, permissions, branchId });
     return { ...u, ...(given ? {} : { temporaryPassword: password }) };
   } catch (e) {
     if (e.code === '23505') throw err('EMAIL_ALREADY_IN_USE', 409);
     throw e;
   }
+}
+
+/**
+ * A role given as a built-in role or one of the tenant's roles: the built-in
+ * role it is based on (what the token carries) and the tenant role's code.
+ */
+async function roleOf(tenant, value) {
+  const v = String(value || '');
+  if (ROLES.includes(v.toUpperCase())) return { role: v.toUpperCase(), roleCode: null };
+  const r = await withTenantRead(tenant.schema_name, (c) => ROLE.assignable(c, v)).catch((e) => {
+    if (e.status === 404) throw err(`ROLE_MUST_BE_ONE_OF: ${ROLES.join(', ')} or one of the tenant's roles`);
+    throw e;
+  });
+  return { role: r.role, roleCode: r.roleCode };
+}
+
+/** Permissions given to a user beyond their role's. */
+function permissionsOf(list) {
+  if (!Array.isArray(list)) throw err('PERMISSIONS_MUST_BE_A_LIST');
+  const codes = [...new Set(list.map(String))];
+  const bad = PERMS.unknown(codes);
+  if (bad.length) throw err(`UNKNOWN_PERMISSIONS: ${bad.join(', ')}`);
+  return codes;
 }
 
 async function activeAdmins(c, tenant) {
@@ -122,9 +148,13 @@ async function update(tenant, id, body, { actor, actorId }) {
     if (!before) throw err('USER_NOT_FOUND', 404);
     const sets = {};
     if (body.role !== undefined) {
-      const role = String(body.role).toUpperCase();
-      if (!ROLES.includes(role)) throw err(`ROLE_MUST_BE_ONE_OF: ${ROLES.join(', ')}`);
+      const { role, roleCode } = await roleOf(tenant, body.role);
       if (role !== before.role) sets.role = role;
+      if (roleCode !== (before.role_code || null)) sets.role_code = roleCode;
+    }
+    if (body.permissions !== undefined) {
+      const permissions = permissionsOf(body.permissions);
+      if (JSON.stringify([...permissions].sort()) !== JSON.stringify([...(before.permissions || [])].sort())) sets.permissions = permissions;
     }
     if (body.status !== undefined) {
       const status = String(body.status).toUpperCase();
@@ -132,7 +162,7 @@ async function update(tenant, id, body, { actor, actorId }) {
       if (status !== before.status) sets.status = status;
     }
     const self = before.id === actorId;
-    if (self && (sets.role || sets.status)) throw err('YOU_CANNOT_CHANGE_YOUR_OWN_ROLE_OR_STATUS', 409);
+    if (self && (sets.role || sets.role_code !== undefined || sets.permissions || sets.status)) throw err('YOU_CANNOT_CHANGE_YOUR_OWN_ROLE_OR_STATUS', 409);
     const losesAdmin = before.role === 'TENANT_ADMIN' && before.status === 'ACTIVE'
       && ((sets.role && sets.role !== 'TENANT_ADMIN') || sets.status === 'SUSPENDED');
     if (losesAdmin && (await activeAdmins(client, tenant)) <= 1) throw err('LAST_ACTIVE_TENANT_ADMIN', 409);

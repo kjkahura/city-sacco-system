@@ -131,7 +131,7 @@ router.post('/logout', async (req, res, next) => {
 });
 
 router.get('/me', requireAuth(), (req, res) =>
-  res.json({ ...req.auth, tenant: req.tenant?.slug }));
+  res.json({ ...req.auth, permissions: [...(req.auth.permissions || [])].sort(), tenant: req.tenant?.slug }));
 
 router.get('/sessions', requireAuth(), async (req, res, next) => {
   try {

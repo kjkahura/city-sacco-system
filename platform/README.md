@@ -1913,9 +1913,10 @@ reads the installment's.
 
 ## Staff users
 
-After the reference platform's Users and Access Control, for the roles this platform has
-(`TENANT_ADMIN`, `MANAGER`, `ACCOUNTANT`, `TELLER`, `AUDITOR`). The
-console's Users page covers it.
+After the reference platform's Users and Access Control. Every user has a base role
+(`TENANT_ADMIN`, `MANAGER`, `ACCOUNTANT`, `TELLER`, `AUDITOR`), may hold one
+of the tenant's own roles, and may have extra permissions of their own. The
+console's Users page covers users and roles.
 
 - `/api/users`: tenant admins create users and change their name, role,
   branch, status and approval and disbursement limits; managers and
@@ -1938,6 +1939,105 @@ console's Users page covers it.
   15 minute access token stops working immediately.
 - Every change is written to `platform.audit_log`; `GET /api/users/audit`
   shows the tenant's.
+
+### Roles and permissions
+
+```
+GET  /api/roles/permissions           the catalogue, by group
+GET  /api/roles                       POST /api/roles
+GET|PATCH|PUT|DELETE /api/roles/{code}
+PATCH /api/users/{id}  { role: "LOAN_OFFICER", permissions: ["VIEW_ACCOUNTING_REPORTS"] }
+GET  /api/auth/me                     the signed-in user's permissions
+```
+
+A role is a set of permissions named with the reference platform's codes (`VIEW_REPORTS`,
+`EXPORT_TO_EXCEL`, `OPEN_TILL`, `VIEW_TASK` and the rest). The five built-in
+roles come with default sets and can be edited but not deleted; the
+administrator role always holds every permission. A tenant adds its own
+roles, each with a code, a name, a user type (administrator, teller, credit
+officer) and a base role. Assigning a user a tenant role sets their base role
+to that role's; moving a role to another base role moves its users and ends
+their sessions.
+
+A user's access is their role's permissions plus any extra permissions set on
+the user. The extras are a deviation from the reference platform, which has permissions on
+roles only; they cover the one person who needs one more report without a
+role of their own. Nobody changes their own role or permissions. Changes take
+effect on the next request, because each request reads the user's role and
+permissions (cached for ten seconds and cleared when this process changes
+them), not the token.
+
+The permission model is platform-wide, but not every route uses it yet. The
+catalogue marks each permission as enforced or not. Enforced now: reports and
+indicators (`VIEW_REPORTS`, `VIEW_ACCOUNTING_REPORTS`, `VIEW_INTELLIGENCE`,
+`CREATE_REPORTS`, `EDIT_REPORTS`, `DELETE_REPORTS`, `MANAGE_EOD_PROCESSING`
+for positions, `AUDIT_TRANSACTIONS` for the audit log), exports
+(`EXPORT_TO_EXCEL`), custom views and menu items by the entity's view
+permission, report templates, tills, tasks and roles. Members, loans,
+deposits and administration still check the base role; they move over one
+area at a time.
+
+The built-in `TELLER` role keeps `POST_TRANSACTIONS_WITHOUT_OPENED_TILL` by
+default so that tellers are not blocked on the day tills arrive. Remove it
+from the role to make every teller post cash through an open till.
+
+## Tills
+
+```
+GET  /api/tills[?includeClosed=true]  GET /api/tills/mine   GET /api/tills/next-id
+POST /api/tills { tellerEmail, tillId, openingAmount, channelId, glAccount,
+                  balanceConstraint: NONE|SOFT|HARD, minBalance, maxBalance }
+GET  /api/tills/{id}                  the till and its log
+POST /api/tills/{id}/add-cash         POST /api/tills/{id}/remove-cash   { amount, note }
+POST /api/tills/{id}/close { countedCash }   POST /api/tills/{id}/undo-close
+POST /api/tills/{id}/reopen           DELETE /api/tills/{id}   (undo open)
+```
+
+After the reference platform's tills. A supervisor with `OPEN_TILL` opens a till for a
+teller (a user whose role is `TELLER` or has the teller user type), with an
+ID of three letters and three digits, the opening cash and optional balance
+limits. A teller has one open till at a time. Each till has a GL cash
+account: by default the cash channel's, or an account of its own.
+
+While a till is open, every cash-channel transaction the teller posts
+(deposit, withdrawal, repayment, disbursement paid in cash) is linked to it
+in the database, and the till's expected cash moves with it. A reversal of
+a linked transaction moves the till back, and is refused once the till is
+closed. A hard limit refuses a transaction that would take the till outside
+its limits; a soft limit lets it through and flags the till. A till never
+goes below zero. When the till has an account of its own, the ledger entry
+posts to that account in place of the channel's.
+
+A teller whose role lacks `POST_TRANSACTIONS_WITHOUT_OPENED_TILL` cannot post
+cash without an open till (409 `NO_OPEN_TILL`). Adding or removing cash posts
+an entry between the till's account and the account it came from or went to,
+when the two differ. Closing takes the cash counted (the expected cash when
+none is given); the difference is posted to Cash Over and Short (500-330,
+settable in the accounting settings) against the till's account. Undoing a
+close reverses that entry and opens the same till again; reopening starts a
+new session of the till with the counted cash as its opening cash. Opening a
+till by mistake can be undone while nothing has gone through it. Only the teller, or a supervisor with
+`OPEN_TILL`, closes a till.
+
+## Tasks
+
+```
+GET  /api/tasks[?assignedTo=&status=OPEN|COMPLETED&due=OVERDUE|TODAY|UPCOMING&memberId=]
+GET  /api/tasks/mine                  counts for Your Tasks
+POST /api/tasks { title, description, dueDate, assignedTo, memberId, template }
+GET|PATCH|PUT|DELETE /api/tasks/{id}  POST /api/tasks/{id}/complete   POST /api/tasks/{id}/reopen
+GET|POST /api/tasks/templates         PATCH|DELETE /api/tasks/templates/{id}
+GET  /api/tasks?viewfilter={view id}  (a custom view of tasks)
+```
+
+After the reference platform's Tasks. A task has a title, a description, a due date, an
+assignee and optionally a member; the reference platform's field names (`assignedUserKey`,
+`taskLinkType: CLIENT`, `taskLinkKey`) are accepted too. Links to groups
+are refused, since the platform has no groups. A task template fills a
+task's title and description, with placeholders such as `{MEMBER_NAME}` and
+`{CREDIT_OFFICER}` taking the linked member's details. A user sees the tasks
+assigned to them or made by them, and, with `EDIT_TASK`, their branch's
+tasks; administrators see all. Tasks are also a custom view entity.
 
 ## Rate limiting
 
@@ -2262,19 +2362,84 @@ managers and auditors. `?viewfilter=` on a list endpoint returns what the
 view matches: its columns (BASIC), the whole records (FULL_DETAILS) or the
 count and totals (SUMMARY).
 
+### Grouped custom fields in views
+
+A grouped custom field set (several entries of the same fields on one
+record, such as references or next of kin) can be used in a view. Each field
+of the set is a column showing every entry, joined with a semicolon in entry
+order. A filter on a grouped field matches a record when any entry matches,
+and for "is empty" and "different than" when no entry matches.
+
+### Menu items
+
+```
+GET  /api/menu                        the signed-in user's navigation
+GET  /api/menu-items                  POST /api/menu-items { name, type }
+PATCH|DELETE /api/menu-items/{id}     PUT /api/menu-items/order { ids }
+PATCH /api/views/{id} { menuItemId }
+```
+
+After the reference platform's Menu Items. The navigation has fixed items (Dashboard,
+Reporting, Accounting, Products, Administration) and items with views. Six
+items with views come predefined: Clients, Loans, Deposits, Loan
+Transactions, Deposit Transactions and Activities. A user adds items of any
+view kind (at most 32 characters to a name) and files views under them; a
+view filed under nothing shows under the predefined item of its kind. As
+with views, users see their own items and the ones shared with them, and
+only an administrator shares items and puts them in order. A predefined item
+can be renamed, moved and hidden from roles, not deleted. Deleting an item
+leaves its views. The console shows the items as a second row of the
+navigation and manages them on the Views page.
+
+### Report templates
+
+```
+GET  /api/report-templates[?type=MEMBER|LOAN|DEPOSIT|BRANCH|CENTRE|OTHER]
+POST /api/report-templates            { name, reportType, description, definition, usageRights }
+GET|PATCH|DELETE /api/report-templates/{id}
+GET  /api/report-templates/{id}/template        the JSON file
+POST /api/report-templates/{id}/run?format=json|html|pdf|xlsx|csv  { parameters, recordId }
+PUT  /api/report-templates/order
+```
+
+In place of the reference platform's Jasper reports, which the reference platform is retiring. A template is a
+JSON file, uploaded and downloaded as a file as Jasper's are, with a title,
+parameters and sections. A section is a table, a set of fields or text, and
+takes its data from a custom view definition or from one of the built-in
+reports (balance sheet, income statement, trial balance, portfolio at risk,
+risk, indicators). There is no place for SQL in a template, so a template
+can show only what its reader could already see: every section runs with the
+reader's permissions, and a section needing a permission the reader lacks
+refuses the whole report.
+
+Placeholders fill the template: `{{record.x}}` from the record a template
+runs on, `{{param.x}}`, `{{today}}`, `{{user.email}}` and
+`{{organization.name}}`. A filter whose placeholder comes to nothing is
+dropped, so optional parameters work. Parameters are dates (with defaults
+such as today or the start of the month), text, numbers, yes or no, a fixed
+selection, a branch, or a loan or deposit product.
+
+A member, loan, deposit, branch or centre template runs from that record's
+page, as the reference platform's entity reports do; an Other template runs from Reports. The
+output is HTML (a page with no scripts), PDF, Excel (a sheet per section),
+CSV or JSON. Excel and CSV need `EXPORT_TO_EXCEL`. Usage rights work as they
+do for views.
+
 ### The dashboard
 
 The console opens a Dashboard page with the reference platform's widgets that have a
 counterpart here: indicators, upcoming repayments (the next seven days),
-your clients (members whose credit officer you are), your favourite views
-and the latest activity. Your Tasks, Tellers and Tellering are not built: the
-platform has no tasks and no teller tills.
+your clients (members whose credit officer you are), your favourite views,
+the latest activity, Your Tasks (overdue, due today and upcoming, with
+complete and new task), Tellering (the teller's own till and its expected
+cash) and Tellers (the open tills, for users with `OPEN_TILL`). Each widget
+shows only when the user holds its permission.
 
-### Not planned here
+### Not built yet
 
-Jasper reports (the reference platform is retiring them; return templates, the extract API
-and the Singer tap cover the same ground), configurable menu items, and
-fine-grained report permissions (Users and Access Control).
+Indicators for groups and lines of credit. The platform has neither groups
+nor lines of credit; both wait for an audit against the reference platform's Groups and
+Credit Arrangements before they are designed.
 
 All built from posted journal lines, so they cannot drift from the ledger.
 

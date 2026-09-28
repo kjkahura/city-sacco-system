@@ -87,8 +87,13 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwA
     const login = await call('POST', '/api/auth/login', { email: 'admin@orgsetup.local', password: PASSWORD }, { auth: null });
     token = login.body.accessToken;
     const { rows: [admin] } = await pool.query("SELECT id FROM platform.users WHERE email = 'admin@orgsetup.local'");
-    const manager = signToken({ sub: admin.id, email: 'manager@orgsetup.local', role: 'MANAGER', tid: SLUG, name: 'Manager' });
-    const teller = signToken({ sub: admin.id, email: 'teller@orgsetup.local', role: 'TELLER', tid: SLUG, name: 'Teller' });
+    // A real staff user of the role: the role a request carries is read from the database, not the token.
+    const staff = async (email, role) => (await pool.query(
+      `INSERT INTO platform.users (tenant_id, email, password_hash, full_name, role)
+       SELECT id, $2, 'x', $3, $4 FROM platform.tenants WHERE slug = $1 RETURNING id`, [SLUG, email, role.toLowerCase(), role])).rows[0].id;
+    const manager = signToken({ sub: await staff('manager@orgsetup.local', 'MANAGER'), email: 'manager@orgsetup.local', role: 'MANAGER', tid: SLUG, name: 'Manager' });
+    const teller = signToken({ sub: await staff('teller@orgsetup.local', 'TELLER'), email: 'teller@orgsetup.local', role: 'TELLER', tid: SLUG, name: 'Teller' });
+    void admin;
     const made = await Promise.all([mk('FX'), mk('FXN', { nonWorkingDays: 'DO_NOT_RESCHEDULE' }), mk('OTHER')]);
     check('products', made.every((r) => r.status === 201), made.map((r) => `${r.status} ${r.reason}`).join('|'));
 

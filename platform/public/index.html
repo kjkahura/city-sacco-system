@@ -43,8 +43,10 @@
       <button data-view="dashboard">Dashboard</button>
       <button data-view="members" class="active">Members</button>
       <button data-view="loans">Loans</button>
-      <button data-view="teller">Teller</button>
-      <button data-view="reports">Reports</button>
+      <button data-view="teller" data-perm="VIEW_SAVINGS_ACCOUNT_DETAILS VIEW_LOAN_ACCOUNT_DETAILS">Teller</button>
+      <button data-view="tills" data-perm="OPEN_TILL CLOSE_TILL ADD_CASH REMOVE_CASH">Tills</button>
+      <button data-view="tasks" data-perm="VIEW_TASK">Tasks</button>
+      <button data-view="reports" data-perm="VIEW_REPORTS VIEW_ACCOUNTING_REPORTS VIEW_INTELLIGENCE">Reports</button>
       <button data-view="views">Views</button>
       <button data-view="finance">Period &amp; provisions</button>
       <button data-view="returns">Returns</button>
@@ -59,6 +61,7 @@
     <span id="whoami" class="hint"></span>
     <button id="logout" class="link">Sign out</button>
   </header>
+  <nav id="menu-nav" class="menu-nav" aria-label="Menu items"></nav>
 
   <main id="view"></main>
   <div id="toast" class="toast" hidden></div>

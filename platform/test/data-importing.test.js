@@ -348,7 +348,12 @@ function templateWorkbook() {
     const apv = await call('POST', `/api/data/import/events/${st2.body.eventKey}:action`, { action: 'APPROVE' }, { headers: { 'idempotency-key': 'approve-api-2' } });
     check('and approves one', apv.status === 200 && apv.body.importState === 'APPROVED' && (await q1("SELECT count(*)::int AS n FROM members WHERE member_no = 'API2'")).n === 1, apv.text);
     const { rows: [adm] } = await pool.query("SELECT id FROM platform.users WHERE email = 'admin@dataimp.local'");
-    const teller = signToken({ sub: adm.id, email: 'teller@dataimp.local', role: 'TELLER', tid: SLUG });
+    // A real staff user of the role: the role a request carries is read from the database, not the token.
+    const staff = async (email, role) => (await pool.query(
+      `INSERT INTO platform.users (tenant_id, email, password_hash, full_name, role)
+       SELECT id, $2, 'x', $3, $4 FROM platform.tenants WHERE slug = $1 RETURNING id`, [SLUG, email, role.toLowerCase(), role])).rows[0].id;
+    const teller = signToken({ sub: await staff('teller@dataimp.local', 'TELLER'), email: 'teller@dataimp.local', role: 'TELLER', tid: SLUG });
+    void adm;
     check('a teller cannot act on imports', (await call('POST', `/api/data/import/events/${st2.body.eventKey}:action`, { action: 'REJECT' }, { auth: teller })).status === 403);
 
     // ---------------------------------------------------------------------

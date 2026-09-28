@@ -5,6 +5,7 @@ const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const X = require('../lib/export');
 const V = require('../domain/customViews');
+const PERMS = require('../lib/permissions');
 
 /**
  * Custom views (the reference platform's Custom Views), mounted under /api/views, and the
@@ -27,12 +28,14 @@ router.get('/entities', requireAuth(), (req, res) => res.json(V.entities(req.aut
 router.get('/fields/:entity', ...read((c, req) => V.describe(c, req.params.entity, req.auth)));
 router.get('/', ...read((c, req) => V.list(c, req.auth, {
   entity: req.query.entity || null, favouritesOnly: ['true', '1'].includes(String(req.query.favourites || '')),
+  menuItemId: req.query.menuItemId || null,
 })));
 router.post('/', ...write((c, req) => V.create(c, req.body, req.auth), 201));
 
 async function sendExport(req, res, out, title) {
   const fmt = X.format(req.query.format || 'xlsx');
   if (!fmt) throw Object.assign(new Error('FORMAT_MUST_BE_CSV_OR_XLSX'), { status: 400 });
+  if (!PERMS.can(req.auth, 'EXPORT_TO_EXCEL')) throw Object.assign(new Error('PERMISSION_REQUIRED: EXPORT_TO_EXCEL'), { status: 403 });
   const e = V.exportOf(out, title);
   e.header = [['Organization', req.tenant.name], ...e.header];
   if (out.truncated) res.set('x-export-truncated', 'true');

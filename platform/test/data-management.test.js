@@ -122,7 +122,12 @@ const hooks = [];
     token = login.body.accessToken;
     check('admin signed in', !!token, login.text);
     const { rows: [admin] } = await pool.query("SELECT id FROM platform.users WHERE email = 'admin@datamgmt.local'");
-    const teller = signToken({ sub: admin.id, email: 'teller@datamgmt.local', role: 'TELLER', tid: SLUG, name: 'Teller' });
+    // A real staff user of the role: the role a request carries is read from the database, not the token.
+    const staff = async (email, role) => (await pool.query(
+      `INSERT INTO platform.users (tenant_id, email, password_hash, full_name, role)
+       SELECT id, $2, 'x', $3, $4 FROM platform.tenants WHERE slug = $1 RETURNING id`, [SLUG, email, role.toLowerCase(), role])).rows[0].id;
+    const teller = signToken({ sub: await staff('teller@datamgmt.local', 'TELLER'), email: 'teller@datamgmt.local', role: 'TELLER', tid: SLUG, name: 'Teller' });
+    const auditorId = await staff('auditor@datamgmt.local', 'AUDITOR');
     const tenant = await provision.getTenantBySlug(SLUG);
 
     // ---------------------------------------------------------------------
@@ -223,7 +228,7 @@ const hooks = [];
     const { rows: [mu] } = await pool.query('SELECT mfa_enabled, mfa_secret FROM platform.users WHERE id = $1', [tellerNew.body.id]);
     check('a second factor is reset', mfa.status === 200 && mu.mfa_enabled === false && mu.mfa_secret === null);
     const list = await call('GET', '/api/users');
-    check('users are listed for the tenant only', list.status === 200 && list.body.length === 2 && list.body.every((u) => u.email.endsWith('@datamgmt.local')));
+    check('users are listed for the tenant only', list.status === 200 && list.body.length === 4 && list.body.every((u) => u.email.endsWith('@datamgmt.local')));
     check('without password hashes or secrets', !list.body.some((u) => 'password_hash' in u || 'mfa_secret' in u));
     const trail = await call('GET', '/api/users/audit');
     check('every change is in the audit log',
@@ -328,7 +333,7 @@ const hooks = [];
     check('the subledgers match the trial balance, so there are no warnings', up3.body.warnings.length === 0, JSON.stringify(up3.body.warnings));
     check('before approval nothing is in the live tables', (await q1("SELECT count(*)::int AS n FROM members WHERE member_no LIKE 'IM00%'")).n === 0
       && (await q1("SELECT count(*)::int AS n FROM loan_accounts WHERE account_no LIKE 'LNIMP%'")).n === 0);
-    check('an auditor may look at it', (await call('GET', `/api/data-imports/${up3.body.id}`, null, { auth: signToken({ sub: admin.id, email: 'a@x', role: 'AUDITOR', tid: SLUG }) })).status === 200);
+    check('an auditor may look at it', (await call('GET', `/api/data-imports/${up3.body.id}`, null, { auth: signToken({ sub: auditorId, email: 'auditor@datamgmt.local', role: 'AUDITOR', tid: SLUG }) })).status === 200);
     check('a teller may not upload', (await call('POST', '/api/data-imports?wait=true', null, { binary: goodWorkbook(), auth: teller })).status === 403);
     await T((c) => c.query('UPDATE lending_controls SET two_man_rule = true'));
     const four = await call('POST', `/api/data-imports/${up3.body.id}/approve`);

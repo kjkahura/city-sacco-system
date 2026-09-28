@@ -1,6 +1,8 @@
 'use strict';
 
 const { pageParams } = require('../lib/page');
+const PERMS = require('../lib/permissions');
+const ROLES = require('./roles');
 const CF = require('./customFields');
 
 /**
@@ -25,7 +27,6 @@ const CF = require('./customFields');
 function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
 
 const ADMIN = 'TENANT_ADMIN';
-const ALL_ROLES = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'];
 const EXPORT_MAX = 100000;
 
 // Field types and the operators each takes (the reference platform's search operators).
@@ -50,7 +51,7 @@ const LOAN_STATES = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACT
  */
 const ENTITIES = {
   MEMBERS: {
-    label: 'Members', reference: 'CLIENTS', table: 'members', idSql: 'm.id',
+    label: 'Members', reference: 'CLIENTS', table: 'members', idSql: 'm.id', permission: 'VIEW_CLIENT_DETAILS',
     from: 'members m LEFT JOIN branches b ON b.id = m.branch_id LEFT JOIN centres ce ON ce.id = m.centre_id',
     cf: { alias: 'm', entity: 'MEMBER' },
     defaults: ['memberNo', 'fullName', 'status', 'branch', 'phone'],
@@ -85,7 +86,7 @@ const ENTITIES = {
     },
   },
   LOANS: {
-    label: 'Loans', reference: 'LOANS', table: 'loan_accounts', idSql: 'l.id',
+    label: 'Loans', reference: 'LOANS', table: 'loan_accounts', idSql: 'l.id', permission: 'VIEW_LOAN_ACCOUNT_DETAILS',
     from: `loan_accounts l JOIN members m ON m.id = l.member_id LEFT JOIN branches b ON b.id = l.branch_id
       LEFT JOIN loan_products p ON p.id = l.product_id
       LEFT JOIN LATERAL (SELECT GREATEST(0, MAX(current_date - i.due_date))::int AS days_late FROM loan_installments i
@@ -129,7 +130,7 @@ const ENTITIES = {
     },
   },
   LOAN_TRANSACTIONS: {
-    label: 'Loan transactions', reference: 'LOAN_TRANSACTIONS', table: 'transactions', idSql: 't.id',
+    label: 'Loan transactions', reference: 'LOAN_TRANSACTIONS', table: 'transactions', idSql: 't.id', permission: 'VIEW_LOAN_ACCOUNT_DETAILS',
     from: 'transactions t JOIN loan_accounts l ON l.id = t.loan_account_id JOIN members m ON m.id = l.member_id LEFT JOIN branches b ON b.id = t.branch_id',
     cf: { alias: 't', entity: 'TRANSACTION_CHANNEL' },
     defaults: ['reference', 'valueDate', 'kind', 'accountNo', 'amount'],
@@ -155,7 +156,7 @@ const ENTITIES = {
     },
   },
   DEPOSITS: {
-    label: 'Deposit accounts', reference: 'DEPOSITS', table: 'savings_accounts', idSql: 'a.id',
+    label: 'Deposit accounts', reference: 'DEPOSITS', table: 'savings_accounts', idSql: 'a.id', permission: 'VIEW_SAVINGS_ACCOUNT_DETAILS',
     from: 'savings_accounts a JOIN members m ON m.id = a.member_id LEFT JOIN branches b ON b.id = a.branch_id LEFT JOIN savings_products sp ON sp.id = a.product_id',
     cf: { alias: 'a', entity: 'SAVINGS_ACCOUNT' },
     defaults: ['accountNo', 'memberName', 'productName', 'status', 'balance'],
@@ -177,7 +178,7 @@ const ENTITIES = {
     },
   },
   DEPOSIT_TRANSACTIONS: {
-    label: 'Deposit transactions', reference: 'DEPOSIT_TRANSACTIONS', table: 'transactions', idSql: 't.id',
+    label: 'Deposit transactions', reference: 'DEPOSIT_TRANSACTIONS', table: 'transactions', idSql: 't.id', permission: 'VIEW_SAVINGS_ACCOUNT_DETAILS',
     from: 'transactions t JOIN savings_accounts a ON a.id = t.savings_account_id JOIN members m ON m.id = a.member_id LEFT JOIN branches b ON b.id = t.branch_id',
     cf: { alias: 't', entity: 'TRANSACTION_CHANNEL' },
     defaults: ['reference', 'valueDate', 'kind', 'accountNo', 'amount'],
@@ -199,8 +200,7 @@ const ENTITIES = {
     },
   },
   JOURNAL_ENTRIES: {
-    label: 'Journal entries', reference: 'JOURNAL_ENTRIES', table: 'journal_lines', idSql: 'jl.id',
-    roles: ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR'],
+    label: 'Journal entries', reference: 'JOURNAL_ENTRIES', table: 'journal_lines', idSql: 'jl.id', permission: 'VIEW_ACCOUNTING_REPORTS',
     from: 'journal_lines jl JOIN journal_entries e ON e.id = jl.entry_id JOIN gl_accounts g ON g.code = jl.gl_code LEFT JOIN branches b ON b.id = jl.branch_id',
     defaults: ['bookingDate', 'glCode', 'glName', 'debit', 'credit', 'narration'],
     fields: {
@@ -221,8 +221,7 @@ const ENTITIES = {
     },
   },
   ACTIVITIES: {
-    label: 'System activities', reference: 'ACTIVITIES', table: 'audit_log', idSql: 'x.id',
-    roles: ['TENANT_ADMIN', 'MANAGER', 'AUDITOR'],
+    label: 'System activities', reference: 'ACTIVITIES', table: 'audit_log', idSql: 'x.id', permission: 'AUDIT_TRANSACTIONS',
     from: 'audit_log x',
     defaults: ['createdAt', 'actor', 'action', 'entity', 'entityId'],
     fields: {
@@ -232,6 +231,29 @@ const ENTITIES = {
       entityId: f('Record id', 'x.entity_id'),
       ip: f('IP address', 'host(x.ip)'),
       createdAt: f('When', 'x.created_at', 'TIMESTAMP'),
+    },
+  },
+  TASKS: {
+    label: 'Tasks', reference: 'TASKS', table: 'tasks', idSql: 'k.id', permission: 'VIEW_TASK',
+    from: 'tasks k LEFT JOIN members m ON m.id = k.member_id LEFT JOIN branches b ON b.id = k.branch_id',
+    // A user's task views list the tasks they may see (./tasks).
+    scope: (user, p) => (user.role === 'TENANT_ADMIN' ? null
+      : `(lower(k.assigned_email) = lower(${p(user.email)}) OR lower(k.created_by) = lower(${p(user.email)})${user.branchId && PERMS.can(user, 'EDIT_TASK') ? ` OR k.branch_id = ${p(user.branchId)}::uuid` : ''})`),
+    defaults: ['title', 'assignedTo', 'dueDate', 'state', 'memberNo'],
+    fields: {
+      title: f('Title', 'k.title'),
+      description: f('Notes', 'k.description'),
+      assignedTo: f('Assigned to', 'k.assigned_email'),
+      dueDate: f('Due date', 'k.due_date', 'DATE'),
+      status: f('Status', 'k.status', 'SELECTION', { values: ['OPEN', 'COMPLETED'] }),
+      state: f('State', "CASE WHEN k.status = 'OPEN' AND k.due_date < current_date THEN 'OVERDUE' ELSE k.status END", 'SELECTION', { values: ['OPEN', 'OVERDUE', 'COMPLETED'] }),
+      memberNo: f('Member number', 'm.member_no'),
+      memberName: f('Member', "concat_ws(' ', m.first_name, m.last_name)"),
+      branch: f('Branch', 'b.code'),
+      completedAt: f('Completed', 'k.completed_at', 'TIMESTAMP'),
+      completedBy: f('Completed by', 'k.completed_by'),
+      createdBy: f('Created by', 'k.created_by'),
+      createdAt: f('Created', 'k.created_at', 'TIMESTAMP'),
     },
   },
 };
@@ -245,9 +267,10 @@ function entityOf(name) {
   return { key: ENTITIES[key] ? key : API_NAME_FOR[key], ...e };
 }
 
-const rolesFor = (e) => e.roles || ALL_ROLES;
+/** Whether a user may see an entity's records (the reference platform: the menu item type's permission). */
+const allowed = (e, user) => PERMS.can(user, e.permission);
 function assertEntityAllowed(e, user) {
-  if (!rolesFor(e).includes(user.role)) throw err(`VIEW_ENTITY_NOT_ALLOWED_FOR_ROLE: ${e.key}`, 403);
+  if (!allowed(e, user)) throw err(`PERMISSION_REQUIRED: ${e.permission} for ${e.key}`, 403);
 }
 
 // --------------------------------------------------------------------------
@@ -257,26 +280,43 @@ function assertEntityAllowed(e, user) {
 const IDENT = /^[A-Za-z0-9_]+$/;
 const CF_TYPES = { FREE_TEXT: 'TEXT', SELECTION: 'SELECTION', NUMBER: 'NUMBER', CHECKBOX: 'BOOLEAN', DATE: 'DATE', DATE_TIME: 'TIMESTAMP', MEMBER_LINK: 'TEXT', USER_LINK: 'TEXT' };
 
+/** A custom field's text as its type. */
+function typed(type, raw) {
+  return type === 'NUMBER' ? `(CASE WHEN ${raw} ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN ${raw}::numeric END)`
+    : type === 'BOOLEAN' ? `(CASE WHEN lower(${raw}) IN ('true', 'false') THEN ${raw}::boolean END)`
+      : type === 'DATE' ? `(CASE WHEN ${raw} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' THEN left(${raw}, 10)::date END)`
+        : type === 'TIMESTAMP' ? `(CASE WHEN ${raw} ~ '^[0-9]{4}-' THEN (${raw})::timestamptz END)`
+          : raw;
+}
+
 /** Every field of an entity the user may use: { key: {label, sql, type, values?} }. */
 async function fieldsFor(c, e, user) {
   const out = { ...e.fields };
   if (!e.cf) return out;
   const { rows } = await c.query(
-    `SELECT d.id, d.set_id, d.name, d.field_type, d.options, d.view_roles, s.name AS set_name
+    `SELECT d.id, d.set_id, d.name, d.field_type, d.options, d.view_roles, s.name AS set_name, s.set_type
      FROM custom_field_definitions d JOIN custom_field_sets s ON s.id = d.set_id
-     WHERE d.entity = $1 AND s.set_type = 'STANDARD' AND d.is_active ORDER BY s.sort_order, d.sort_order, d.id`, [e.cf.entity]);
+     WHERE d.entity = $1 AND s.set_type IN ('STANDARD', 'GROUPED') AND d.is_active ORDER BY s.sort_order, d.sort_order, d.id`, [e.cf.entity]);
   for (const d of rows) {
     if (!IDENT.test(d.id) || !IDENT.test(d.set_id)) continue;
     if (user && d.view_roles && !d.view_roles.includes(user.role)) continue;
     const type = CF_TYPES[d.field_type] || 'TEXT';
-    const raw = `(${e.cf.alias}.custom_fields -> '${d.set_id}' ->> '${d.id}')`;
-    const sql = type === 'NUMBER' ? `(CASE WHEN ${raw} ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN ${raw}::numeric END)`
-      : type === 'BOOLEAN' ? `(${raw})::boolean`
-        : type === 'DATE' ? `(CASE WHEN ${raw} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' THEN left(${raw}, 10)::date END)`
-          : type === 'TIMESTAMP' ? `(CASE WHEN ${raw} ~ '^[0-9]{4}-' THEN (${raw})::timestamptz END)`
-            : raw;
     const values = type === 'SELECTION' && Array.isArray(d.options) ? d.options.map((o) => (typeof o === 'object' ? o.value ?? o.id ?? o.name : o)) : undefined;
-    out[`cf:${d.set_id}.${d.id}`] = { label: `${d.set_name}: ${d.name}`, sql, type, custom: true, ...(values ? { values } : {}) };
+    const key = `cf:${d.set_id}.${d.id}`;
+    const label = `${d.set_name}: ${d.name}`;
+    if (d.set_type === 'GROUPED') {
+      // A grouped set holds a list of entries, each with the set's fields. The
+      // column shows every entry's value; a filter matches when any entry does.
+      const arr = `(CASE WHEN jsonb_typeof(${e.cf.alias}.custom_fields -> '${d.set_id}') = 'array' THEN ${e.cf.alias}.custom_fields -> '${d.set_id}' ELSE '[]'::jsonb END)`;
+      out[key] = {
+        label, type, outputType: 'TEXT', custom: true, grouped: true, arraySql: arr, elemSql: typed(type, `(ge.value ->> '${d.id}')`),
+        sql: `(SELECT string_agg(ge.value ->> '${d.id}', ', ' ORDER BY ge.ordinality) FROM jsonb_array_elements(${arr}) WITH ORDINALITY ge WHERE COALESCE(ge.value ->> '${d.id}', '') <> '')`,
+        ...(values ? { values } : {}),
+      };
+      continue;
+    }
+    const raw = `(${e.cf.alias}.custom_fields -> '${d.set_id}' ->> '${d.id}')`;
+    out[key] = { label, sql: typed(type, raw), type, custom: true, ...(values ? { values } : {}) };
   }
   return out;
 }
@@ -288,12 +328,15 @@ async function describe(c, entity, user) {
   const fields = await fieldsFor(c, e, user);
   return {
     entity: e.key, label: e.label, apiType: e.reference, defaultColumns: e.defaults,
-    fields: Object.entries(fields).map(([key, x]) => ({ key, label: x.label, type: x.type, operators: OPS[x.type], ...(x.values ? { values: x.values } : {}), custom: Boolean(x.custom) })),
+    fields: Object.entries(fields).map(([key, x]) => ({
+      key, label: x.label, type: x.type, operators: OPS[x.type], ...(x.values ? { values: x.values } : {}),
+      custom: Boolean(x.custom), grouped: Boolean(x.grouped),
+    })),
   };
 }
 
 function entities(user) {
-  return Object.entries(ENTITIES).filter(([, e]) => rolesFor(e).includes(user.role))
+  return Object.entries(ENTITIES).filter(([, e]) => allowed(e, user))
     .map(([key, e]) => ({ entity: key, label: e.label, apiType: e.reference }));
 }
 
@@ -303,8 +346,23 @@ function entities(user) {
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
-/** One filter condition to SQL, pushing its values onto params. */
+/**
+ * One filter condition to SQL, pushing its values onto params. A grouped
+ * custom field matches when any of its entries does (EMPTY: none has a value).
+ */
 function condition(field, flt, params) {
+  if (field.grouped) {
+    const op = String(flt.operator || 'EQUALS').toUpperCase();
+    const inner = { ...field, grouped: false, sql: field.elemSql };
+    const each = `FROM jsonb_array_elements(${field.arraySql}) ge`;
+    if (op === 'EMPTY') return `NOT EXISTS (SELECT 1 ${each} WHERE ${condition(inner, { ...flt, operator: 'NOT_EMPTY' }, params)})`;
+    if (op === 'DIFFERENT_THAN') return `NOT EXISTS (SELECT 1 ${each} WHERE ${condition(inner, { ...flt, operator: 'EQUALS' }, params)})`;
+    return `EXISTS (SELECT 1 ${each} WHERE ${condition(inner, flt, params)})`;
+  }
+  return conditionOf(field, flt, params);
+}
+
+function conditionOf(field, flt, params) {
   const op = String(flt.operator || 'EQUALS').toUpperCase();
   if (!OPS[field.type].includes(op)) throw err(`OPERATOR_NOT_ALLOWED: ${op} on ${flt.field} (${field.type}; use ${OPS[field.type].join(', ')})`);
   const p = (v) => { params.push(v); return `$${params.length}`; };
@@ -395,12 +453,18 @@ function normalise(def, e, fields) {
 }
 
 /** SELECT list, FROM, WHERE and ORDER BY for a normalised definition. */
-function build(d, e, fields) {
+function build(d, e, fields, user = null) {
   const params = [];
+  const p = (v) => { params.push(v); return `$${params.length}`; };
   const conds = d.filters.map((x) => condition(fields[x.field], x, params));
-  const where = conds.length ? `WHERE ${conds.map((s) => `(${s})`).join(d.match === 'ANY' ? ' OR ' : ' AND ')}` : '';
+  let where = conds.length ? `(${conds.map((s) => `(${s})`).join(d.match === 'ANY' ? ' OR ' : ' AND ')})` : '';
+  // Some records are seen in part: a user's tasks, for one.
+  const scoped = e.scope && user ? e.scope(user, p) : null;
+  if (scoped) where = where ? `${scoped} AND ${where}` : scoped;
+  where = where ? `WHERE ${where}` : '';
   const out = (k) => {
     const x = fields[k];
+    if (x.outputType === 'TEXT') return `(${x.sql})`;
     if (x.type === 'TIMESTAMP') {
       return d.includeTimestamp ? `to_char((${x.sql}) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')` : `((${x.sql})::date)::text`;
     }
@@ -414,6 +478,7 @@ function build(d, e, fields) {
 }
 
 const numericType = (t) => t === 'NUMBER' || t === 'MONEY';
+const shownAs = (f) => f.outputType || f.type;
 
 /**
  * Run a definition. Returns the columns, one page of rows keyed by field,
@@ -425,19 +490,19 @@ async function execute(c, def, user, { offset = 0, limit = 50, all = false } = {
   assertEntityAllowed(e, user);
   const fields = await fieldsFor(c, e, user);
   const d = normalise(def, e, fields);
-  const q = build(d, e, fields);
+  const q = build(d, e, fields, user);
   const page = all ? { offset: 0, limit: EXPORT_MAX } : pageParams({ offset, limit });
   const n = q.params.length;
   const { rows } = await c.query(
     `SELECT ${e.idSql}::text AS "_id", ${q.select} FROM ${q.from} ${q.where} ${q.order} LIMIT $${n + 1} OFFSET $${n + 2}`,
     [...q.params, all ? EXPORT_MAX + 1 : page.limit, page.offset]);
-  const numCols = d.columns.map((k, i) => [k, i]).filter(([k]) => numericType(fields[k].type));
+  const numCols = d.columns.map((k, i) => [k, i]).filter(([k]) => numericType(shownAs(fields[k])));
   const aggs = [`count(*)::bigint AS n`, ...(d.includeTotals ? numCols.map(([k, i]) => `SUM((${fields[k].sql})::numeric) AS "t${i}"`) : [])];
   const { rows: [t] } = await c.query(`SELECT ${aggs.join(', ')} FROM ${q.from} ${q.where}`, q.params);
   const truncated = all && rows.length > EXPORT_MAX;
   const items = (truncated ? rows.slice(0, EXPORT_MAX) : rows).map((r) => {
     const o = { id: r._id };
-    d.columns.forEach((k, i) => { o[k] = numericType(fields[k].type) && r[`c${i}`] !== null ? Number(r[`c${i}`]) : r[`c${i}`]; });
+    d.columns.forEach((k, i) => { o[k] = numericType(shownAs(fields[k])) && r[`c${i}`] !== null ? Number(r[`c${i}`]) : r[`c${i}`]; });
     return o;
   });
   const totals = d.includeTotals
@@ -445,7 +510,7 @@ async function execute(c, def, user, { offset = 0, limit = 50, all = false } = {
     : null;
   return {
     definition: d,
-    columns: d.columns.map((k) => ({ key: k, label: fields[k].label, type: fields[k].type })),
+    columns: d.columns.map((k) => ({ key: k, label: fields[k].label, type: shownAs(fields[k]) })),
     items, totals, total: Number(t.n), offset: page.offset, limit: all ? EXPORT_MAX : page.limit, truncated,
   };
 }
@@ -456,7 +521,7 @@ async function fullDetails(c, def, user, { offset = 0, limit = 50 } = {}) {
   assertEntityAllowed(e, user);
   const fields = await fieldsFor(c, e, user);
   const d = normalise(def, e, fields);
-  const q = build(d, e, fields);
+  const q = build(d, e, fields, user);
   const page = pageParams({ offset, limit });
   const n = q.params.length;
   const { rows: ids } = await c.query(
@@ -489,13 +554,17 @@ function shape(v, user, favourites = new Set()) {
     owner: v.owner_email, match: v.match, filters: v.filters, columns: v.columns,
     sortBy: v.sort_by, sortDir: v.sort_dir, includeTotals: v.include_totals, includeTimestamp: v.include_timestamp,
     display: v.display, usageRights: { allUsers: v.all_users, roles: v.roles },
+    menuItemId: v.menu_item_id || null,
     position: v.position, favourite: favourites.has(v.id),
     canEdit: Boolean(user) && (user.role === ADMIN || v.owner_email.toLowerCase() === String(user.email).toLowerCase()),
     createdAt: v.created_at, updatedAt: v.updated_at,
   };
 }
 
-const VISIBLE = `(v.owner_email = lower($1) OR $2 = '${ADMIN}' OR v.all_users OR $2 = ANY(v.roles))`;
+// A user sees their own views, all of them if an administrator, and those
+// shared with every user or with their role ($2: the tenant role code).
+const VISIBLE = `(v.owner_email = lower($1) OR $3::boolean OR v.all_users OR $2 = ANY(v.roles))`;
+const who = (user) => [user.email, user.roleCode || user.role, user.role === ADMIN];
 
 async function favouritesOf(c, email) {
   const { rows } = await c.query('SELECT view_id FROM custom_view_favourites WHERE user_email = lower($1)', [email]);
@@ -503,22 +572,22 @@ async function favouritesOf(c, email) {
 }
 
 /** The saved views a user can see, optionally of one kind; favourites first when asked. */
-async function list(c, user, { entity = null, favouritesOnly = false } = {}) {
+async function list(c, user, { entity = null, favouritesOnly = false, menuItemId = null } = {}) {
   const e = entity ? entityOf(entity) : null;
   const { rows } = await c.query(
     `SELECT v.* FROM custom_views v
-     WHERE ${VISIBLE} AND ($3::text IS NULL OR v.entity = $3::text)
-     ORDER BY v.entity, v.position, lower(v.name)`, [user.email, user.role, e ? e.key : null]);
+     WHERE ${VISIBLE} AND ($4::text IS NULL OR v.entity = $4::text) AND ($5::uuid IS NULL OR v.menu_item_id = $5::uuid)
+     ORDER BY v.entity, v.position, lower(v.name)`, [...who(user), e ? e.key : null, menuItemId]);
   const fav = await favouritesOf(c, user.email);
-  return rows.filter((v) => rolesFor(ENTITIES[v.entity]).includes(user.role))
+  return rows.filter((v) => allowed(ENTITIES[v.entity], user))
     .filter((v) => !favouritesOnly || fav.has(v.id))
     .map((v) => shape(v, user, fav));
 }
 
 async function find(c, id, user) {
   if (!/^[0-9a-f-]{36}$/i.test(String(id))) throw err('VIEW_NOT_FOUND', 404);
-  const { rows: [v] } = await c.query(`SELECT v.* FROM custom_views v WHERE v.id = $3::uuid AND ${VISIBLE}`, [user.email, user.role, id]);
-  if (!v || !rolesFor(ENTITIES[v.entity]).includes(user.role)) throw err('VIEW_NOT_FOUND', 404);
+  const { rows: [v] } = await c.query(`SELECT v.* FROM custom_views v WHERE v.id = $4::uuid AND ${VISIBLE}`, [...who(user), id]);
+  if (!v || !allowed(ENTITIES[v.entity], user)) throw err('VIEW_NOT_FOUND', 404);
   return v;
 }
 
@@ -527,15 +596,30 @@ async function get(c, id, user) {
   return shape(v, user, await favouritesOf(c, user.email));
 }
 
-/** Usage rights from a body; only an administrator may give any. */
-function rightsOf(body, user, before = null) {
+/**
+ * Usage rights from a body: every user, or the roles listed (built-in roles
+ * and the tenant's own). Only an administrator may give any.
+ */
+async function rightsOf(c, body, user, before = null) {
   const r = body.usageRights || {};
   const allUsers = r.allUsers !== undefined ? Boolean(r.allUsers) : body.allUsers !== undefined ? Boolean(body.allUsers) : before ? before.all_users : false;
   const roles = r.roles !== undefined ? r.roles : body.roles !== undefined ? body.roles : before ? before.roles : [];
-  if (!Array.isArray(roles) || roles.some((x) => !ALL_ROLES.includes(x))) throw err(`INVALID_ROLES: use ${ALL_ROLES.join(', ')}`);
+  const known = await ROLES.codes(c);
+  if (!Array.isArray(roles) || roles.some((x) => !known.includes(x))) throw err(`INVALID_ROLES: use ${known.join(', ')}`);
   const changed = before ? (allUsers !== before.all_users || JSON.stringify([...roles].sort()) !== JSON.stringify([...before.roles].sort())) : (allUsers || roles.length);
   if (changed && user.role !== ADMIN) throw err('ONLY_AN_ADMINISTRATOR_SETS_USAGE_RIGHTS', 403);
   return { allUsers, roles: [...new Set(roles)] };
+}
+
+/** The menu item a view goes under: of the view's kind, and one the user can see. */
+async function menuItemOf(c, id, entity, user) {
+  if (id === undefined || id === null || id === '') return null;
+  if (!/^[0-9a-f-]{36}$/i.test(String(id))) throw err('MENU_ITEM_NOT_FOUND', 404);
+  const { rows: [m] } = await c.query(
+    `SELECT * FROM menu_items v WHERE v.id = $4::uuid AND ${VISIBLE}`, [...who(user), id]);
+  if (!m) throw err('MENU_ITEM_NOT_FOUND', 404);
+  if (m.type !== entity) throw err(`MENU_ITEM_IS_FOR_${m.type}_NOT_${entity}`, 400);
+  return m.id;
 }
 
 function nameOf(body, before) {
@@ -552,15 +636,16 @@ async function create(c, body, user) {
   const fields = await fieldsFor(c, e, user);
   const d = normalise({ ...b, entity: e.key }, e, fields);
   const name = nameOf(b);
-  const rights = rightsOf(b, user);
+  const rights = await rightsOf(c, b, user);
+  const menuItemId = await menuItemOf(c, b.menuItemId, e.key, user);
   const { rows: [pos] } = await c.query('SELECT COALESCE(max(position), 0) + 1 AS n FROM custom_views WHERE entity = $1', [e.key]);
   const { rows: [v] } = await c.query(
     `INSERT INTO custom_views (entity, name, description, owner_id, owner_email, match, filters, columns, sort_by, sort_dir,
-       include_totals, include_timestamp, display, all_users, roles, position)
-     VALUES ($1,$2,$3,$4,lower($5),$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+       include_totals, include_timestamp, display, all_users, roles, position, menu_item_id)
+     VALUES ($1,$2,$3,$4,lower($5),$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
      ON CONFLICT (entity, lower(name), owner_email) DO NOTHING RETURNING *`,
     [e.key, name, b.description || null, user.sub || null, user.email, d.match, JSON.stringify(d.filters), JSON.stringify(d.columns),
-      d.sortBy, d.sortDir, d.includeTotals, d.includeTimestamp, d.display, rights.allUsers, rights.roles, pos.n]);
+      d.sortBy, d.sortDir, d.includeTotals, d.includeTimestamp, d.display, rights.allUsers, rights.roles, pos.n, menuItemId]);
   if (!v) throw err(`VIEW_NAME_TAKEN: you already have a ${e.label.toLowerCase()} view called ${name}`, 409);
   return shape(v, user);
 }
@@ -585,7 +670,8 @@ async function update(c, id, body, user) {
   };
   const d = normalise(merged, e, fields);
   const name = nameOf(b, before);
-  const rights = rightsOf(b, user, before);
+  const rights = await rightsOf(c, b, user, before);
+  const menuItemId = b.menuItemId !== undefined ? await menuItemOf(c, b.menuItemId, e.key, user) : before.menu_item_id;
   const position = b.position !== undefined ? Number(b.position) : before.position;
   if (!Number.isInteger(position) || position < 0) throw err('POSITION_MUST_BE_A_WHOLE_NUMBER');
   const { rows: [clash] } = await c.query(
@@ -594,10 +680,10 @@ async function update(c, id, body, user) {
   if (clash) throw err(`VIEW_NAME_TAKEN: ${name}`, 409);
   const { rows: [v] } = await c.query(
     `UPDATE custom_views SET name = $2, description = $3, match = $4, filters = $5, columns = $6, sort_by = $7, sort_dir = $8,
-       include_totals = $9, include_timestamp = $10, display = $11, all_users = $12, roles = $13, position = $14
+       include_totals = $9, include_timestamp = $10, display = $11, all_users = $12, roles = $13, position = $14, menu_item_id = $15
      WHERE id = $1 RETURNING *`,
     [before.id, name, b.description !== undefined ? (b.description || null) : before.description, d.match, JSON.stringify(d.filters),
-      JSON.stringify(d.columns), d.sortBy, d.sortDir, d.includeTotals, d.includeTimestamp, d.display, rights.allUsers, rights.roles, position]);
+      JSON.stringify(d.columns), d.sortBy, d.sortDir, d.includeTotals, d.includeTimestamp, d.display, rights.allUsers, rights.roles, position, menuItemId]);
   return shape(v, user, await favouritesOf(c, user.email));
 }
 

@@ -2,7 +2,8 @@
 
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
-const { requireAuth } = require('../tenancy/resolve');
+const { requirePermission } = require('../tenancy/resolve');
+const PERMS = require('../lib/permissions');
 const { pageParams, pageQuery, sendPage } = require('../lib/page');
 const X = require('../lib/export');
 const { once } = require('../lib/idempotency');
@@ -23,8 +24,12 @@ const runner = require('../ops/reportRunner');
  */
 
 const router = express.Router();
-const READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR'];
-const REPORT_EDITORS = ['TENANT_ADMIN', 'MANAGER'];
+// The reference platform's permissions: the statements need VIEW_ACCOUNTING_REPORTS, the
+// portfolio and management reports VIEW_REPORTS, indicators VIEW_INTELLIGENCE,
+// and a download EXPORT_TO_EXCEL as well.
+const ACCOUNTING = 'VIEW_ACCOUNTING_REPORTS';
+const REPORTS = 'VIEW_REPORTS';
+const INTELLIGENCE = 'VIEW_INTELLIGENCE';
 
 const scopeOf = (q) => ({
   branchId: q.branchId || null, centreId: q.centreId || null, productId: q.productId || null, creditOfficer: q.creditOfficer || null,
@@ -35,11 +40,12 @@ const branchLabel = (b) => (b ? `${b.code || ''} ${b.name || ''}`.trim() : 'All 
  * A report route: fn(c, query, req) returns the report; exp(report, req),
  * when given, turns it into an export for ?format=.
  */
-function report(fn, exp = null, roles = READER) {
-  return [requireAuth(...roles), async (req, res, next) => {
+function report(fn, exp = null, perm = REPORTS) {
+  return [requirePermission(perm), async (req, res, next) => {
     try {
       const fmt = X.format(req.query.format);
       if (req.query.format && !fmt) return next(Object.assign(new Error('FORMAT_MUST_BE_CSV_OR_XLSX'), { status: 400 }));
+      if (fmt && !PERMS.can(req.auth, 'EXPORT_TO_EXCEL')) return next(Object.assign(new Error('PERMISSION_REQUIRED: EXPORT_TO_EXCEL'), { status: 403 }));
       const out = await withTenantRead(req.tenant.schema_name, (c) => fn(c, req.query, req, Boolean(fmt)));
       if (fmt && exp) {
         const e = exp(out, req);
@@ -70,7 +76,7 @@ router.get('/balance-sheet', ...report((c, q, _r, whole) =>
     ...b.liabilities.map((r) => ({ section: 'Liabilities', ...r })), { section: 'Liabilities', name: 'Total liabilities', amount: b.totalLiabilities },
     ...b.equity.map((r) => ({ section: 'Equity', ...r })), { section: 'Equity', name: 'Total equity', amount: b.totalEquity },
   ],
-})));
+}), ACCOUNTING));
 
 router.get('/income-statement', ...report((c, q, _r, whole) =>
   R.incomeStatement(c, { from: q.from || null, to: q.to || null, branchId: q.branchId || null, ...lines(q, whole) }),
@@ -83,9 +89,9 @@ router.get('/income-statement', ...report((c, q, _r, whole) =>
     ...s.expenses.map((r) => ({ section: 'Expenses', ...r })), { section: 'Expenses', name: 'Total expenses', amount: s.totalExpenses },
     { section: '', name: 'Surplus', amount: s.surplus },
   ],
-})));
+}), ACCOUNTING));
 
-router.get('/prudential', ...report((c, q) => R.prudentialRatios(c, { asAt: q.asAt || null })));
+router.get('/prudential', ...report((c, q) => R.prudentialRatios(c, { asAt: q.asAt || null }), null, ACCOUNTING));
 
 // --- portfolio at risk ---------------------------------------------------------
 
@@ -147,7 +153,7 @@ router.get('/positions', ...report(async (c, q) => {
   return { ...range, asAt: p.asAt, source: p.source, takenAt: p.takenAt, scope: p.scope, positions: p.rows };
 }));
 // Take today's positions now (the end of day does this itself).
-router.post('/positions', requireAuth('TENANT_ADMIN'), async (req, res, next) => {
+router.post('/positions', requirePermission('MANAGE_EOD_PROCESSING'), async (req, res, next) => {
   try {
     res.status(201).json(await withTenant(req.tenant.schema_name, (c) => PF.snapshot(c, { takenBy: req.auth.email })));
   } catch (e) { next(e); }
@@ -161,21 +167,21 @@ const indicatorExport = (o, title) => ({
   columns: [{ key: 'group', label: 'Group' }, { key: 'label', label: 'Indicator' }, { key: 'code', label: 'Code' }, { key: 'value', label: 'Value', num: true }, { key: 'kind', label: 'Kind' }],
   rows: o.indicators,
 });
-router.get('/indicators/catalog', requireAuth(...READER), (req, res) => res.json({ groups: IND.GROUPS, entityTypes: IND.ENTITY_TYPES, indicators: IND.catalog() }));
+router.get('/indicators/catalog', requirePermission(INTELLIGENCE), (req, res) => res.json({ groups: IND.GROUPS, entityTypes: IND.ENTITY_TYPES, indicators: IND.catalog() }));
 router.get('/indicators', ...report((c, q) => IND.compute(c, {
   entityType: q.entityType || 'ORGANIZATION', entityId: q.entityId || null,
   codes: q.indicators ? String(q.indicators).split(',').filter(Boolean) : null,
-}), (o) => indicatorExport(o)));
+}), (o) => indicatorExport(o), INTELLIGENCE));
 
-router.get('/indicator-reports', ...report((c) => IND.list(c)));
-router.get('/indicator-reports/:id', ...report((c, _q, req) => IND.run(c, req.params.id), (o) => indicatorExport(o, o.report.name)));
-const write = (fn, status = 200) => [requireAuth(...REPORT_EDITORS), async (req, res, next) => {
+router.get('/indicator-reports', ...report((c) => IND.list(c), null, INTELLIGENCE));
+router.get('/indicator-reports/:id', ...report((c, _q, req) => IND.run(c, req.params.id), (o) => indicatorExport(o, o.report.name), INTELLIGENCE));
+const write = (fn, status = 200, perm = 'EDIT_REPORTS') => [requirePermission(perm), async (req, res, next) => {
   try { res.status(status).json(await withTenant(req.tenant.schema_name, (c) => fn(c, req))); } catch (e) { next(e); }
 }];
-router.post('/indicator-reports', ...write((c, req) => IND.create(c, req.body, { createdBy: req.auth.email }), 201));
+router.post('/indicator-reports', ...write((c, req) => IND.create(c, req.body, { createdBy: req.auth.email }), 201, 'CREATE_REPORTS'));
 router.put('/indicator-reports/:id', ...write((c, req) => IND.update(c, req.params.id, req.body)));
 router.patch('/indicator-reports/:id', ...write((c, req) => IND.update(c, req.params.id, req.body)));
-router.delete('/indicator-reports/:id', ...write((c, req) => IND.remove(c, req.params.id)));
+router.delete('/indicator-reports/:id', ...write((c, req) => IND.remove(c, req.params.id), 200, 'DELETE_REPORTS'));
 
 // --- management reports ------------------------------------------------------------
 
@@ -252,14 +258,14 @@ router.get('/outreach', ...report((c, q) => MR.outreach(c, { from: q.from || nul
 
 // --- reference ---------------------------------------------------------------------
 
-router.get('/limits', requireAuth(...READER), async (req, res, next) => {
+router.get('/limits', requirePermission(ACCOUNTING), async (req, res, next) => {
   try {
     res.json(await withTenantRead(req.tenant.schema_name, async (c) =>
       (await c.query('SELECT * FROM prudential_limits ORDER BY code')).rows));
   } catch (e) { next(e); }
 });
 
-router.get('/audit-log', requireAuth(...READER), async (req, res, next) => {
+router.get('/audit-log', requirePermission('AUDIT_TRANSACTIONS', REPORTS), async (req, res, next) => {
   try {
     const page = await withTenantRead(req.tenant.schema_name, (c) => pageQuery(
       c,
@@ -282,8 +288,7 @@ router.get('/audit-log', requireAuth(...READER), async (req, res, next) => {
 // GET  /accounting/reports/{reportKey} -> { reportKey, status, items: [{ glAccount, amounts }] }
 
 const accountingReports = express.Router();
-const LEDGER_READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR'];
-accountingReports.post('/', requireAuth(...LEDGER_READER), async (req, res, next) => {
+accountingReports.post('/', requirePermission(ACCOUNTING), async (req, res, next) => {
   try {
     const out = await withTenant(req.tenant.schema_name, (c) => once(c, req, 'accounting-report', async () =>
       ({ status: 202, body: await AR.create(c, req.body || {}, { createdBy: req.auth.email }) })));
@@ -297,7 +302,7 @@ accountingReports.post('/', requireAuth(...LEDGER_READER), async (req, res, next
     res.status(out.status).json(out.body);
   } catch (e) { next(e); }
 });
-accountingReports.get('/:reportKey', requireAuth(...LEDGER_READER), async (req, res, next) => {
+accountingReports.get('/:reportKey', requirePermission(ACCOUNTING), async (req, res, next) => {
   try {
     res.json(await withTenantRead(req.tenant.schema_name, (c) => AR.get(c, req.params.reportKey)));
   } catch (e) { next(e); }
@@ -323,6 +328,7 @@ async function trialBalance(req, res, next) {
   try {
     const fmt = X.format(req.query.format);
     if (req.query.format && !fmt) return next(Object.assign(new Error('FORMAT_MUST_BE_CSV_OR_XLSX'), { status: 400 }));
+    if (fmt && !PERMS.can(req.auth, 'EXPORT_TO_EXCEL')) return next(Object.assign(new Error('PERMISSION_REQUIRED: EXPORT_TO_EXCEL'), { status: 403 }));
     // Unlike the statements, the trial balance pages by default: it is the
     // one report that lists every account that moved, and a mature chart of
     // accounts is long. An export holds every row.

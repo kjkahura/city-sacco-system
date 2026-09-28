@@ -128,7 +128,15 @@ tenantApi.get('/savings', ...views.viewfilter('DEPOSITS'));
 tenantApi.get('/savings/transactions', ...views.viewfilter('DEPOSIT_TRANSACTIONS', { required: true }));
 tenantApi.get('/accounting/journal', ...views.viewfilter('JOURNAL_ENTRIES'));
 tenantApi.get('/activities', ...views.viewfilter('ACTIVITIES', { required: true }));
+tenantApi.get('/tasks', ...views.viewfilter('TASKS'));
 tenantApi.use('/views', views);
+const menus = require('./routes/menus');
+tenantApi.use('/menu', menus.menu);
+tenantApi.use('/menu-items', menus.items);
+tenantApi.use('/roles', require('./routes/roles'));
+tenantApi.use('/tasks', require('./routes/tasks'));
+tenantApi.use('/tills', require('./routes/tills'));
+tenantApi.use('/report-templates', require('./routes/reportTemplates'));
 
 const members = require('./routes/members');
 tenantApi.post('/members:search', ...members.searchMembers);

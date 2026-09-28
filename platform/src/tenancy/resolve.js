@@ -3,6 +3,8 @@
 const jwt = require('jsonwebtoken');
 const { pool } = require('../db/pool');
 const { TenantError } = require('../db/tenantContext');
+const PERMS = require('../lib/permissions');
+const requestContext = require('../lib/requestContext');
 
 const SECRET = process.env.JWT_SECRET;
 if (!SECRET && process.env.NODE_ENV === 'production') {
@@ -103,18 +105,50 @@ function resolveTenant({ required = true } = {}) {
 // moment it changes them.
 const userCache = new Map();
 const USER_TTL_MS = 10_000;
-async function userState(id) {
-  const hit = userCache.get(id);
+const SCHEMA_RE = /^tenant_[a-z][a-z0-9_]{2,40}$/;
+
+/**
+ * The user's status and access: their role (a tenant role code, or the
+ * built-in role), the role's permissions (the tenant's edits, or the
+ * platform's defaults) and any given to the user directly. A tenant
+ * administrator holds every permission.
+ */
+async function userState(id, schema) {
+  const key = `${schema || ''}:${id}`;
+  const hit = userCache.get(key);
   if (hit && hit.expires > Date.now()) return hit.state;
   let state = null;
   if (/^[0-9a-f-]{36}$/i.test(String(id))) {
-    const { rows } = await pool.query('SELECT status FROM platform.users WHERE id = $1', [id]);
-    state = rows[0] ? rows[0].status : null;
+    const { rows: [u] } = await pool.query(
+      'SELECT status, role, role_code, permissions, branch_id FROM platform.users WHERE id = $1', [id]);
+    if (u) {
+      let row = null;
+      if (schema && SCHEMA_RE.test(schema)) {
+        const { rows } = await pool.query(
+          `SELECT code, name, base_role, user_type, permissions FROM "${schema}".roles WHERE code = $1`,
+          [u.role_code || u.role]).catch(() => ({ rows: [] }));
+        row = rows[0] || null;
+      }
+      const base = row ? row.permissions : (PERMS.DEFAULTS[u.role] || []);
+      const held = u.role === 'TENANT_ADMIN' ? PERMS.CATALOG.map((p) => p.code) : [...new Set([...base, ...(u.permissions || [])])];
+      state = {
+        status: u.status,
+        role: u.role,
+        roleCode: u.role_code || u.role,
+        userType: row ? row.user_type : (PERMS.USER_TYPES[u.role] || null),
+        branchId: u.branch_id,
+        permissions: new Set(held),
+      };
+    }
   }
-  userCache.set(id, { state, expires: Date.now() + USER_TTL_MS });
+  userCache.set(key, { state, expires: Date.now() + USER_TTL_MS });
   return state;
 }
-const forgetUser = (id) => userCache.delete(id);
+/** Forget a user's cached access (every tenant); with no id, forget everyone's. */
+function forgetUser(id = null) {
+  if (id === null) { userCache.clear(); return; }
+  for (const k of userCache.keys()) if (k.endsWith(`:${id}`)) userCache.delete(k);
+}
 
 /** Require a signed-in user, optionally with one of the given roles. */
 function requireAuth(...roles) {
@@ -136,18 +170,47 @@ function requireAuth(...roles) {
     if (req.auth.role === 'MEMBER' && !roles.includes('MEMBER')) {
       return next(new TenantError('member tokens cannot use staff endpoints', 403));
     }
+    if (req.auth.role === 'MEMBER') {
+      if (roles.length && !roles.includes('MEMBER')) return next(new TenantError('role MEMBER is not permitted here', 403));
+      return next();
+    }
+    let state;
+    try {
+      state = await userState(req.auth.sub, req.tenant?.schema_name);
+    } catch (e) { return next(e); }
+    if (state === null) return next(new TenantError('USER_NOT_FOUND', 401));
+    if (state.status !== 'ACTIVE') return next(new TenantError(`USER_${state.status}`, 401));
+    // The role as it stands, not as the token was issued with: a role an
+    // administrator changed takes effect within seconds, like a suspension.
+    req.auth.role = state.role;
     if (roles.length && !roles.includes(req.auth.role)) {
       return next(new TenantError(`role ${req.auth.role} is not permitted here`, 403));
     }
-    if (req.auth.role !== 'MEMBER') {
-      try {
-        const state = await userState(req.auth.sub);
-        if (state === null) return next(new TenantError('USER_NOT_FOUND', 401));
-        if (state !== 'ACTIVE') return next(new TenantError(`USER_${state}`, 401));
-      } catch (e) { return next(e); }
-    }
-    next();
+    req.auth.permissions = state.permissions;
+    req.auth.roleCode = state.roleCode;
+    req.auth.userType = state.userType;
+    req.auth.branchId = state.branchId;
+    // The rest of the request knows who it serves (lib/requestContext).
+    return requestContext.run({
+      userId: req.auth.sub, email: req.auth.email, role: req.auth.role,
+      tillRequired: !PERMS.can(req.auth, 'POST_TRANSACTIONS_WITHOUT_OPENED_TILL'),
+    }, () => next());
   };
+}
+
+/**
+ * Require a signed-in staff user holding at least one of the permissions
+ * (lib/permissions: the reference platform's codes). A tenant administrator holds all.
+ */
+function requirePermission(...codes) {
+  const auth = requireAuth();
+  return (req, res, next) => auth(req, res, (e) => {
+    if (e) return next(e);
+    if (!codes.some((code) => PERMS.can(req.auth, code))) {
+      return next(new TenantError(`PERMISSION_REQUIRED: ${codes.join(' or ')}`, 403));
+    }
+    return next();
+  });
 }
 
 /** Require a signed-in member. Populates req.member = { id, memberNo }. */
@@ -169,4 +232,4 @@ function requireMember() {
 const signToken = (payload, expiresIn = '12h') =>
   jwt.sign(payload, signingKey, { algorithm: 'HS256', expiresIn });
 
-module.exports = { resolveTenant, requireAuth, requireMember, signToken, tenantFromRequest, lookupTenant, invalidate, forgetUser, signingKey };
+module.exports = { userState, resolveTenant, requireAuth, requirePermission, requireMember, signToken, tenantFromRequest, lookupTenant, invalidate, forgetUser, signingKey };

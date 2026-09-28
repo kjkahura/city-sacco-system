@@ -4,7 +4,7 @@ const reportRoutes = require('./reports');
 const { orgToday } = require('../lib/orgDate');
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
-const { requireAuth } = require('../tenancy/resolve');
+const { requireAuth, requirePermission } = require('../tenancy/resolve');
 const { notFound } = require('../lib/http');
 const { pageQuery, sendPage, pageParams } = require('../lib/page');
 const S = require('../domain/savings');
@@ -140,7 +140,7 @@ const LEDGER_READER = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'AUDITOR'];
 
 // Trial balance: opening balance, debits, credits, net change and closing
 // balance per account; ?zeroBalances=true, ?glTypes=, ?branchId=, ?format=.
-accounting.get('/trial-balance', requireAuth(...LEDGER_READER), reportRoutes.trialBalance);
+accounting.get('/trial-balance', requirePermission('VIEW_ACCOUNTING_REPORTS'), reportRoutes.trialBalance);
 
 accounting.get('/journal', requireAuth(...LEDGER_READER), async (req, res, next) => {
   try {

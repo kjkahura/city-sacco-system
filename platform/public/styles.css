@@ -74,6 +74,12 @@ nav button {
   background: none; border: 1px solid transparent; color: var(--muted); padding: 6px 10px;
 }
 nav button.active { color: var(--ink); border-color: var(--line); background: var(--bg); }
+nav button[hidden] { display: none; }
+.menu-nav { padding: 4px 20px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 13px; }
+.menu-nav:empty { display: none; }
+.perm-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; max-height: 50vh; overflow: auto; }
+.perm-groups fieldset { border: 1px solid var(--line); padding: 6px 8px; }
+.perm-groups label.check { display: block; font-size: 13px; }
 
 main { padding: 20px; max-width: 1200px; }
 

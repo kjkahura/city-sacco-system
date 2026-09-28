@@ -92,6 +92,20 @@ async function cutoffDay(c) {
   return r ? r.d : null;
 }
 
+// Entries for the transaction kinds that move a till's cash (031 till_sign).
+const TILL_SOURCES = ['SAVINGS_DEPOSIT', 'SAVINGS_WITHDRAWAL', 'LOAN_REPAYMENT', 'LOAN_DISBURSEMENT', 'SHARE_PURCHASE',
+  'LOAN_RECOVERY', 'CREDIT_BALANCE_DEPOSIT', 'DIVIDEND_PAYOUT'];
+
+/** The channel's account swapped for the till's, for the request's teller's open till. */
+async function tillAccount(c, lines, channelId) {
+  const { rows: [t] } = await c.query(
+    `SELECT t.gl_code, ch.gl_account_code FROM tills t JOIN transaction_channels ch ON ch.id = t.channel_id
+     WHERE t.status = 'OPEN' AND t.channel_id = $1 AND lower(t.teller_email) = lower(nullif(current_setting('app.actor', true), ''))`,
+    [channelId]);
+  if (!t || !t.gl_account_code || t.gl_code === t.gl_account_code) return lines;
+  return lines.map((l) => (l.glCode === t.gl_account_code ? { ...l, glCode: t.gl_code } : l));
+}
+
 /**
  * @param {import('pg').PoolClient} c  open client with search_path on a tenant
  * @param {object} p
@@ -114,6 +128,8 @@ async function post(c, {
     .filter((l) => Number(l.amount) > 0)
     .map((l) => ({ ...l, branchId: l.branchId === undefined ? branchId : l.branchId }));
   lines = await balanceBranches(c, lines, branchId);
+  // A teller's cash goes to their till's own account, when the till has one (./tills).
+  if (channelId && TILL_SOURCES.includes(sourceType)) lines = await tillAccount(c, lines, channelId);
 
   // With no booking date given, the day is today, or tomorrow once the
   // organization's accounting cutoff time has passed (the reference platform's Accounting

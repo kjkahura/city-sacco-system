@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { requireAuth } = require('../tenancy/resolve');
+const { requireAuth, userState } = require('../tenancy/resolve');
 const U = require('../tenancy/users');
 const { withTenantRead } = require('../db/tenantContext');
 const V = require('../domain/customViews');
@@ -31,7 +31,12 @@ router.get('/:id/views', requireAuth(), async (req, res, next) => {
   try {
     const self = ['me', req.auth.sub, String(req.auth.email).toLowerCase()].includes(String(req.params.id).toLowerCase());
     if (!self && req.auth.role !== 'TENANT_ADMIN') throw Object.assign(new Error('ONLY_YOUR_OWN_VIEWS'), { status: 403 });
-    const target = self ? req.auth : await U.get(req.tenant, req.params.id).then((u) => ({ sub: u.id, email: u.email, role: u.role }));
+    let target = req.auth;
+    if (!self) {
+      const u = await U.get(req.tenant, req.params.id);
+      const st = await userState(u.id, req.tenant.schema_name);
+      target = { sub: u.id, email: u.email, role: st.role, roleCode: st.roleCode, permissions: st.permissions, branchId: st.branchId };
+    }
     res.json(await withTenantRead(req.tenant.schema_name, (c) => V.forUser(c, target, { for: req.query.for || null })));
   } catch (e) { next(e); }
 });
