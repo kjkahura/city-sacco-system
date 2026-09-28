@@ -14,6 +14,10 @@ npm test                      # 240 assertions across five suites
 npm start
 ```
 
+## Audits and build logs
+
+Each section is audited against the reference platform's documentation before it is built. The audits and build logs are in [docs/audits](docs/audits/README.md), and each one is committed with the code it describes.
+
 ## Why schema per tenant
 
 | | Shared schema + RLS | **Schema per tenant** | Database per tenant |
