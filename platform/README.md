@@ -2825,6 +2825,60 @@ The reference platform's: `FIELD[operator]=value` with `eq`, `ne`, `gt`, `gte`, 
 Events older than `auditRetentionDays` are removed at the end of day. The
 member portal is not in it.
 
+- `GET /api/v1/events` is the reference platform's path for the same query.
+- A failed request (status 400 and above) also keeps its response body, with
+  the same details removed, and `response_payload` can be filtered. A
+  successful response is not kept.
+- Group, loan and asset names are removed from bodies, as the reference platform does.
+- `requireUserAgent` in the access preferences (off by default) refuses a
+  request without a User-Agent header, as the reference platform does with its audit trail on.
+- Neither `audit_events` nor `audit_log` can be changed, deleted from or
+  emptied (migration 042). The two exceptions each set a session flag only
+  they use: the retention prune, and member anonymization clearing a
+  member's details from the change log.
+
+### Activities
+
+```
+GET /api/activities?from=&to=&branchID=&clientID=&groupID=&centreID=&userID=&loanAccountID=
+                   &savingsAccountID=&loanProductID=&savingsProductID=&creditArrangementID=&type=
+                   &offset=&limit=                                          (AUDIT_TRANSACTIONS)
+GET /api/{members|clients|groups|loans|savings|deposits|creditarrangements}/{id}/activities
+GET /api/activities/feed      the dashboard's Latest Activity      GET /api/activities/types
+```
+
+After the reference platform's Tracking Activities and its API v1 activities. An activity
+comes from one of three places:
+
+- the change log (`audit_log`);
+- a loan's state history, as `LOAN_<action>` (for example `LOAN_DISBURSE`);
+- a member's state changes, as `MEMBER_<action>`.
+
+A state change that is also in the change log shows once. Deposits,
+withdrawals and repayments are in their transaction lists, not here.
+
+- **The activity object** is the reference platform's Activity:
+  - `type`, `timestamp`, `userKey` and `notes`;
+  - the keys of its client or group, branch, centre, loan or deposit account,
+    products and credit arrangement;
+  - `fieldChanges`, worked out from the before and after values.
+- **Links:** migration 042 links each change log row to its member, loan,
+  deposit account, credit arrangement and branch when the row is written,
+  and backfilled the rows already there. The request's IP address and
+  channel go on each row.
+- **One record's activities** need the permission that views the record.
+  A member's include those of their accounts.
+- **Branch access:** a user limited to some branches reads the activities of
+  those branches, in the API and in the ACTIVITIES custom view.
+- **The dashboard feed:**
+  - every staff user sees the activities in their branches;
+  - activities with no branch (products, settings, the chart of accounts)
+    show only to holders of AUDIT_TRANSACTIONS or VIEW_REPORTS;
+  - each user picks the types their feed shows (`activityTypes` on
+    `PATCH /api/profile`).
+- **Console:** member, group, loan, deposit account and credit arrangement
+  pages have an Activity card with Show more.
+
 ## Tills
 
 ```

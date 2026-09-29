@@ -6,34 +6,49 @@ const { pool } = require('../db/pool');
  * The audit trail (the reference platform's Audit Trail): every request to a tenant's API
  * by its staff or its API consumers, with who, from where, what and the
  * answer's status. The request body is kept with passwords, secrets and
- * personal details taken out, as the reference platform does; files are not kept.
+ * personal details taken out, as the reference platform does; files are not kept. The
+ * response body is kept the same way for a failed request (status 400 and
+ * above), not for a successful one: that would store every list of members
+ * and balances the API returns.
  *
  * GET /api/audit-trail/events takes the reference platform's filters: FIELD[operator]=value
  * (eq, ne, gt, gte, lt, lte, startsWith, in, contains), from, size (from +
- * size at most 10,000), sort_by and sort_order.
+ * size at most 10,000), sort_by and sort_order. GET /api/v1/events is
+ * The reference platform's path for the same query.
  */
 
 const SCHEMA_RE = /^tenant_[a-z][a-z0-9_]{2,40}$/;
 const SECRET = /pass|secret|token|apikey|api_key|pin|code|otp/i;
-const PERSONAL = /phone|mobile|email|address|birth|firstname|lastname|middlename|first_name|last_name|middle_name|fullname|full_name|^name$|notes|description|title|text|iban|national|gender|postcode|post_code|country|region|city|latitude|longitude/i;
+const PERSONAL = /phone|mobile|email|address|birth|firstname|lastname|middlename|first_name|last_name|middle_name|fullname|full_name|^name$|groupname|group_name|loanname|loan_name|assetname|asset_name|notes|description|title|text|iban|national|gender|postcode|post_code|country|region|city|latitude|longitude/i;
 
 function scrub(v, depth = 0) {
   if (depth > 6) return '...';
   if (Array.isArray(v)) return v.slice(0, 50).map((x) => scrub(x, depth + 1));
   if (v && typeof v === 'object') {
     const out = {};
-    for (const [k, x] of Object.entries(v)) out[k] = SECRET.test(k) || PERSONAL.test(k) ? '***' : scrub(x, depth + 1);
+    // errorCode is the API's own status code in an error body, not a secret.
+    for (const [k, x] of Object.entries(v)) out[k] = (SECRET.test(k) && k !== 'errorCode') || PERSONAL.test(k) ? '***' : scrub(x, depth + 1);
     return out;
   }
   return v;
 }
 
+const clip = (v) => {
+  const s = JSON.stringify(scrub(v));
+  return s.length > 4000 ? `${s.slice(0, 4000)}...` : s;
+};
+
 function payloadOf(req) {
   const type = String(req.get('content-type') || '');
   if (!type.includes('json') || !req.body || typeof req.body !== 'object' || Buffer.isBuffer(req.body)) return null;
   if (!Object.keys(req.body).length) return null;
-  const s = JSON.stringify(scrub(req.body));
-  return s.length > 4000 ? `${s.slice(0, 4000)}...` : s;
+  return clip(req.body);
+}
+
+/** The response body of a failed request, or null. */
+function responseOf(res) {
+  if (res.statusCode < 400 || res.locals.auditBody === undefined || res.locals.auditBody === null) return null;
+  return clip(res.locals.auditBody);
 }
 
 /** Record each tenant request after it is answered. The portal is not staff and is left out. */
@@ -44,6 +59,9 @@ function recorder() {
     // Taken now: the routers below rewrite req.url while they route.
     const path = req.path;
     const fragment = req.originalUrl.split('?')[0];
+    // The body a JSON response is sent with, kept for a failed request.
+    const json = res.json.bind(res);
+    res.json = (body) => { res.locals.auditBody = body; return json(body); };
     res.on('finish', () => {
       const schema = req.tenant.schema_name;
       if (!SCHEMA_RE.test(schema)) return;
@@ -52,9 +70,9 @@ function recorder() {
       const username = req.auth?.email || (path.startsWith('/auth/') ? String(req.body?.email || '').toLowerCase() || null : null);
       pool.query(
         `INSERT INTO "${schema}".audit_events (event_source, request_method, request_uri, resource, resource_fragment, username, client_ip,
-           user_agent, response_code, request_payload, duration_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+           user_agent, response_code, request_payload, duration_ms, response_payload) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
         [api ? 'API' : 'UI', req.method, `/api${path}`, seg[0] || null, fragment, username, req.ip,
-          req.get('user-agent') || null, res.statusCode, payloadOf(req), Date.now() - started]).catch(() => {});
+          req.get('user-agent') || null, res.statusCode, payloadOf(req), Date.now() - started, responseOf(res)]).catch(() => {});
     });
     return next();
   };
@@ -72,6 +90,7 @@ const FIELDS = {
   client_ip: { col: 'client_ip', ops: ['eq', 'ne', 'startsWith', 'in'] },
   response_code: { col: 'response_code', ops: ['eq', 'ne', 'in', 'gt', 'gte', 'lt', 'lte'], num: true },
   occurred_at: { col: 'occurred_at', ops: ['eq', 'ne', 'in', 'gt', 'gte', 'lt', 'lte'], time: true },
+  response_payload: { col: 'response_payload', ops: ['eq', 'ne', 'startsWith', 'in', 'contains'] },
 };
 const SQL_OP = { eq: '=', ne: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 const err = (m, status = 400) => Object.assign(new Error(m), { status });
@@ -110,14 +129,34 @@ async function events(c, query = {}) {
   const { rows: [{ n }] } = await c.query(`SELECT count(*)::int AS n FROM audit_events ${cond}`, vals);
   const { rows } = await c.query(
     `SELECT occurred_at, response_code, resource, event_source, client_ip, request_method, request_payload, resource_fragment, request_uri,
-            user_agent, username FROM audit_events ${cond} ORDER BY ${FIELDS[sortBy].col} ${order}, id ${order} OFFSET ${from} LIMIT ${size}`, vals);
+            user_agent, username, response_payload FROM audit_events ${cond} ORDER BY ${FIELDS[sortBy].col} ${order}, id ${order} OFFSET ${from} LIMIT ${size}`, vals);
   return { events: rows, from, size, totalItemsCount: n };
 }
 
 /** Drop events past the tenant's retention (an end of day job). */
 async function prune(c, days) {
+  // The one deletion the audit tables allow (migration 042), for this transaction only.
+  await c.query("SELECT set_config('app.audit_maintenance', 'prune', true)");
   const { rowCount } = await c.query("DELETE FROM audit_events WHERE occurred_at < now() - make_interval(days => $1::int)", [days]);
+  await c.query("SELECT set_config('app.audit_maintenance', '', true)");
   return { pruned: rowCount };
 }
 
-module.exports = { recorder, events, prune, scrub };
+/**
+ * The reference platform's rule with the audit trail on: a request without a User-Agent
+ * header is refused. Only when the tenant's access preferences say so
+ * (requireUserAgent); off by default, so clients that send none keep working.
+ */
+function requireUserAgent() {
+  const AP = require('../lib/accessPreferences');
+  const { apiError } = require('../lib/http');
+  return async (req, res, next) => {
+    try {
+      if (!req.tenant || req.get('user-agent') || req.path.startsWith('/portal/')) return next();
+      if (!(await AP.of(req.tenant.id)).requireUserAgent) return next();
+      return apiError(res, 400, 400, 'The user agent cannot be null when the Audit Trail feature is enabled', 'User-Agent');
+    } catch (e) { return next(e); }
+  };
+}
+
+module.exports = { recorder, events, prune, scrub, requireUserAgent };

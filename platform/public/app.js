@@ -616,6 +616,33 @@ const STATE_ACTIONS = [
   ['UNDO_BLACKLIST', 'Undo blacklist', ['BLACKLISTED'], 'UNDO_CLIENT_STATE_CHANGED'],
 ];
 
+// --------------------------------------------------------------------------
+// Activity on a record (GET /api/{kind}/:id/activities), ten at a time
+// --------------------------------------------------------------------------
+
+const activityCard = () => card('Activity', '<div id="activity-list"><p class="hint">Loading…</p></div><button class="link" id="activity-more" hidden>Show more</button>');
+
+const ACTIVITY_COLUMNS = [
+  { label: 'When', value: (x) => String(x.timestamp).replace('T', ' ').slice(0, 16) },
+  { label: 'What', value: (x) => x.type.replace(/_/g, ' ').toLowerCase() },
+  { label: 'By', key: 'userKey' },
+  { label: 'Changes', value: (x) => x.fieldChanges.slice(0, 3).map((f) => `${f.fieldChangeName}: ${f.originalValue ?? '—'} → ${f.newValue ?? '—'}`).join('; ') },
+  { label: 'Notes', key: 'notes' },
+];
+
+async function loadActivity(kind, id, shown = []) {
+  const list = el('activity-list');
+  if (!list) return;
+  const r = await api('GET', `/api/${kind}/${encodeURIComponent(id)}/activities?limit=10&offset=${shown.length}`);
+  if (!el('activity-list')) return;
+  if (!r.ok) { list.innerHTML = `<p class="hint">${esc(r.error)}</p>`; return; }
+  const all = [...shown, ...r.body];
+  list.innerHTML = table(ACTIVITY_COLUMNS, all, { empty: 'No activity yet' });
+  const more = el('activity-more');
+  more.hidden = all.length >= r.total;
+  more.onclick = () => loadActivity(kind, id, all);
+}
+
 async function memberDetail(m0) {
   const fresh = await api('GET', `/api/members/${m0.id}`);
   if (!fresh.ok) throw new Error(fresh.error);
@@ -731,7 +758,8 @@ async function memberDetail(m0) {
   ], ids.body || [], { empty: 'No identification documents' })}
       ${m.expiredIdDocuments ? `<p class="notice">${m.expiredIdDocuments} document(s) past their valid-until date.</p>` : ''}
       <button class="secondary" id="id-add">Add document</button>`)}</div>`}
-    ${cf.ok ? customFieldsCard(cf.body) : ''}`;
+    ${cf.ok ? customFieldsCard(cf.body) : ''}${activityCard()}`;
+  loadActivity(isGroup ? 'groups' : 'members', m.id);
 
   $('#back').addEventListener('click', isGroup ? groupsView : membersView);
   memberTasks(m);
@@ -964,7 +992,8 @@ async function creditArrangementDetail(id, holder = null) {
     { label: 'Overdraft limit', num: true, value: (x) => money(x.overdraftLimit) }, { label: 'Balance', num: true, value: (x) => money(x.balance) },
     { label: 'Overdraft expires', value: (x) => day(x.overdraftExpiryDate) }, { label: '', html: true, value: drop('DEPOSIT') },
   ], a.depositAccounts, { empty: 'No deposit accounts' }))}
-    ${open && can('ADD_ACCOUNTS_TO_LINE_OF_CREDIT') ? '<button class="secondary" id="ca-add">Add an account</button>' : ''}`;
+    ${open && can('ADD_ACCOUNTS_TO_LINE_OF_CREDIT') ? '<button class="secondary" id="ca-add">Add an account</button>' : ''}${activityCard()}`;
+  loadActivity('creditarrangements', id);
   const reload = () => creditArrangementDetail(ca.encodedKey, holder);
   $('#back').addEventListener('click', () => (holder ? memberDetail(holder) : membersView()));
   view().querySelectorAll('[data-ca-action]').forEach((b) => b.addEventListener('click', async () => {
@@ -1078,7 +1107,8 @@ async function depositDetail(a, holder = null) {
     ${card('Transactions', table([
     { label: 'Date', value: (t) => day(t.value_date || t.created_at) }, { label: 'Kind', key: 'kind' }, { label: 'Reference', key: 'reference' },
     { label: 'Amount', num: true, value: (t) => money(t.amount) },
-  ], tx.body || [], { empty: 'No transactions' }))}`;
+  ], tx.body || [], { empty: 'No transactions' }))}${activityCard()}`;
+  loadActivity('savings', a.id);
   $('#back').addEventListener('click', () => (holder ? memberDetail(holder) : membersView()));
   const again = () => depositDetail(a, holder);
   const onDep = (sel, fn) => { const x = $(sel); if (x) x.addEventListener('click', fn); };
@@ -1691,7 +1721,8 @@ async function loanDetail(row) {
     { label: 'By', key: 'actor' },
     { label: 'Note', value: (h) => h.note || '' },
   ], hist.body || [], { empty: 'None' }))}
-    ${loanCf.ok ? customFieldsCard(loanCf.body) : ''}`;
+    ${loanCf.ok ? customFieldsCard(loanCf.body) : ''}${activityCard()}`;
+  loadActivity('loans', id);
 
   $('#back').addEventListener('click', loansView);
   entityReports('LOAN', id);
@@ -2644,7 +2675,6 @@ const DASHBOARD_INDICATORS = ['ACTIVE_CLIENTS', 'ACTIVE_BORROWERS', 'GROSS_LOAN_
 
 async function dashboardView() {
   const reader = can('VIEW_INTELLIGENCE');
-  const activityReader = can('AUDIT_TRANSACTIONS', 'VIEW_REPORTS');
   const inWeek = new Date(Date.parse(`${today()}T00:00:00Z`) + 7 * 86400000).toISOString().slice(0, 10);
   const [tasks, tills, myTill] = await Promise.all([
     can('VIEW_TASK') ? api('GET', '/api/tasks/mine') : Promise.resolve(null),
@@ -2654,7 +2684,7 @@ async function dashboardView() {
   const own = myTill && myTill.ok && (myTill.body.till || myTill.body.mustUseTill || S.user.role === 'TELLER') ? myTill.body : null;
   const [ind, act, favs, upcoming, mine] = await Promise.all([
     reader ? api('GET', `/api/reports/indicators?indicators=${DASHBOARD_INDICATORS.join(',')}`) : Promise.resolve(null),
-    activityReader ? api('GET', '/api/reports/audit-log?limit=10') : Promise.resolve(null),
+    api('GET', '/api/activities/feed?limit=10'),
     api('GET', '/api/views?favourites=true'),
     api('POST', '/api/views/run?limit=10', {
       entity: 'LOANS', columns: ['accountNo', 'memberName', 'nextDueDate', 'nextDueAmount'], sortBy: 'nextDueDate',
@@ -2682,8 +2712,10 @@ async function dashboardView() {
     { label: 'Loans', num: true, key: 'runningLoans' }, { label: 'Owed', num: true, value: (x) => money(x.loanBalance) }], mine.body.items, { empty: 'No members assigned to you' }) : '')}
       ${card('Your favourite views', favs.ok && favs.body.length ? `<ul id="fav-views">${favs.body.map((v) => `<li><button class="link" data-open-view="${esc(v.id)}">${esc(v.name)}</button> <span class="hint">${esc(v.entity.toLowerCase())}</span></li>`).join('')}</ul>`
     : '<p class="hint">Mark a view as a favourite under Views and it appears here.</p>')}
-      ${act && act.ok ? card('Latest activity', table([{ label: 'When', value: (x) => String(x.created_at).replace('T', ' ').slice(0, 16) },
-    { label: 'Who', key: 'actor' }, { label: 'What', key: 'action' }], act.body || [])) : ''}
+      ${act && act.ok ? card('Latest activity', `<div id="latest-activity">${table([{ label: 'When', value: (x) => String(x.timestamp).replace('T', ' ').slice(0, 16) },
+    { label: 'Who', key: 'userKey' }, { label: 'What', value: (x) => x.type.replace(/_/g, ' ').toLowerCase() },
+    { label: 'Record', value: (x) => x.loanAccountId || x.savingsAccountId || x.memberNo || x.entityId || '' }, { label: 'Branch', key: 'branchId' }], act.body || [], { empty: 'No activity in your branches yet' })}</div>
+        <button class="link" id="dash-activity-types">Choose activity types</button>`) : ''}
     </div>`;
   view().querySelectorAll('[data-open-view]').forEach((b) => b.addEventListener('click', () => {
     viewState.open = b.dataset.openView; viewState.offset = 0; go('views');
@@ -2694,6 +2726,24 @@ async function dashboardView() {
   $('#dash-tasks')?.addEventListener('click', () => go('tasks'));
   $('#dash-till-open')?.addEventListener('click', () => openTill(dashboardView));
   $('#dash-tills')?.addEventListener('click', () => go('tills'));
+  $('#dash-activity-types')?.addEventListener('click', chooseActivityTypes);
+}
+
+/** The activity types the dashboard's Latest Activity shows (kept with the user's profile). */
+async function chooseActivityTypes() {
+  const [types, me] = await Promise.all([api('GET', '/api/activities/types'), api('GET', '/api/profile')]);
+  if (!types.ok) return toast(types.error, true);
+  const chosen = new Set(me.body?.activityTypes || []);
+  const dlg = showDialog('Latest activity: types to show', `<p class="hint">None ticked shows every type.</p>
+    <div id="activity-types">${types.body.map((t) => `<label class="check"><input type="checkbox" value="${esc(t)}" ${chosen.has(t) ? 'checked' : ''}> ${esc(t.replace(/_/g, ' ').toLowerCase())}</label>`).join('')}</div>
+    <div class="toolbar"><button id="activity-types-save">Save</button></div>`);
+  $('#activity-types-save', dlg).addEventListener('click', async () => {
+    const picked = [...dlg.querySelectorAll('#activity-types input:checked')].map((i) => i.value);
+    const r = await api('PATCH', '/api/profile', { activityTypes: picked.length ? picked : null });
+    toast(r.ok ? 'Saved' : r.error, !r.ok);
+    if (r.ok) { dlg.close(); dlg.remove(); dashboardView(); }
+  });
+  return null;
 }
 
 // --------------------------------------------------------------------------
@@ -5418,6 +5468,7 @@ async function accessView() {
       <label>Roles that need a second factor<select name="mfaRoles" multiple size="5">${codes.map((x) => `<option ${p.mfaRequiredRoles.includes(x) ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
       <label>Grace period for rotated API keys, seconds<input name="grace" type="number" min="0" value="${p.apiKeys.rotationGraceSeconds}"></label>
       <label>Keep the audit trail for days<input name="retention" type="number" min="30" value="${p.auditRetentionDays}"></label>
+      <label class="check"><input type="checkbox" name="requireUserAgent" ${p.requireUserAgent ? 'checked' : ''}> Refuse requests without a User-Agent header</label>
       <div class="toolbar"><button type="submit">Save preferences</button></div></form>`) : ''}
     ${ips?.ok ? card('Blocked addresses', `<p class="hint">An address that sends ten requests with a bad API key is blocked for API keys until it is reset here.</p>
       <div id="ap-ips">${table([{ label: 'Address', key: 'ip' }, { label: 'Bad keys', num: true, key: 'failures' },
@@ -5452,7 +5503,7 @@ async function accessView() {
       reauthenticate: f.reauthenticate.checked,
       ipAllowlist: { enabled: f.ipEnabled.checked, entries: f.ipEntries.value.split(/\s+/).filter(Boolean), applyTo: [...f.applyTo.selectedOptions].map((o) => o.value) },
       mfaRequiredRoles: [...f.mfaRoles.selectedOptions].map((o) => o.value),
-      apiKeys: { rotationGraceSeconds: Number(f.grace.value) }, auditRetentionDays: Number(f.retention.value),
+      apiKeys: { rotationGraceSeconds: Number(f.grace.value) }, auditRetentionDays: Number(f.retention.value), requireUserAgent: f.requireUserAgent.checked,
     });
     toast(r.ok ? 'Access preferences saved' : r.error, !r.ok);
     if (r.ok) reload();
@@ -5518,7 +5569,8 @@ async function accessView() {
     if (!r.ok) { out.innerHTML = `<p class="error">${esc(r.error)}</p>`; return; }
     out.innerHTML = table([{ label: 'When', value: (x) => String(x.occurred_at).replace('T', ' ').slice(0, 19) }, { label: 'Source', key: 'event_source' },
       { label: 'User', key: 'username' }, { label: 'Request', value: (x) => `${x.request_method} ${x.request_uri}` }, { label: 'Status', num: true, key: 'response_code' },
-      { label: 'From', key: 'client_ip' }, { label: 'Body', value: (x) => String(x.request_payload || '').slice(0, 80) }], r.body.events, { empty: 'Nothing matches' })
+      { label: 'From', key: 'client_ip' }, { label: 'Body', value: (x) => String(x.request_payload || '').slice(0, 80) },
+      { label: 'Response', value: (x) => String(x.response_payload || '').slice(0, 80) }], r.body.events, { empty: 'Nothing matches' })
       + `<p class="hint">${r.body.totalItemsCount} event(s)</p>`;
   };
   $('#at-run')?.addEventListener('click', () => {

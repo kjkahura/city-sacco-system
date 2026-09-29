@@ -54,7 +54,7 @@ const RULES = [
 
   // --- custom-view list endpoints (?viewfilter=) --------------------------------
   ['GET', '/clients', V_MEMBER],
-  ['GET', '/activities', 'AUDIT_TRANSACTIONS'],
+  ['GET', '/activities', 'AUDIT_TRANSACTIONS'], ['GET', '/activities/feed', OPEN], ['GET', '/activities/types', OPEN],
   ['GET', '/accounting/journal', V_ACC],
 
   // --- roles, users, access ------------------------------------------------------
@@ -75,7 +75,7 @@ const RULES = [
   ['PATCH', '/consumers/:id', 'EDIT_API_CONSUMERS_AND_KEYS'],
   ['DELETE', '/consumers/:id', 'DELETE_API_CONSUMERS_AND_KEYS'], ['DELETE', '/consumers/:id/keys/:keyId', 'DELETE_API_CONSUMERS_AND_KEYS'],
   ['POST', '/consumers/keys/rotation', NONE],
-  ['GET', '/audit-trail/events', 'MANAGE_AUDIT_TRAIL'],
+  ['GET', '/audit-trail/events', 'MANAGE_AUDIT_TRAIL'], ['GET', '/v1/events', 'MANAGE_AUDIT_TRAIL'],
 
   // --- members and groups (the domain checks which of a list a change needs) --------
   ['GET', '/members', V_MEMBER], ['POST', '/members:search', V_MEMBER], ['GET', '/members/*', V_MEMBER],

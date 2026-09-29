@@ -573,9 +573,12 @@ const REDACTED = { redacted: true };
 
 /** Take a member's personal details out of the audit log's copies of it. */
 async function redactAudit(c, m) {
+  // The one change the change log allows (migration 042), for this statement only.
+  await c.query("SELECT set_config('app.audit_maintenance', 'anonymize', true)");
   await c.query(`UPDATE audit_log SET before = CASE WHEN before IS NULL THEN NULL ELSE $2::jsonb END,
                                        after = CASE WHEN after IS NULL THEN NULL ELSE $2::jsonb END
                   WHERE entity = 'member' AND entity_id = $1`, [String(m.id), JSON.stringify({ ...REDACTED, memberNo: m.member_no })]);
+  await c.query("SELECT set_config('app.audit_maintenance', '', true)");
 }
 
 async function removePortal(c, memberId) {

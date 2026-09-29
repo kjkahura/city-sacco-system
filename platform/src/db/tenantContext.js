@@ -44,7 +44,8 @@ function assertSchemaName(schemaName) {
  * by hand in a test) keeps the server's zone. The request's user goes in
  * app.actor, app.till_required, app.till_add and app.till_remove for the till
  * triggers (031, 032), and its branch access in app.branches and app.officer
- * for row security (032).
+ * for row security (032), and its IP address and channel (UI or API) in
+ * app.ip and app.channel for the change log (042).
  */
 const BIND_SQL = `SELECT set_config('search_path', format('%I, public', $1::text), true),
   set_config('TimeZone', COALESCE(
@@ -54,14 +55,16 @@ const BIND_SQL = `SELECT set_config('search_path', format('%I, public', $1::text
   set_config('app.till_add', $4::text, true),
   set_config('app.till_remove', $5::text, true),
   set_config('app.branches', $6::text, true),
-  set_config('app.officer', $7::text, true)`;
+  set_config('app.officer', $7::text, true),
+  set_config('app.ip', $8::text, true),
+  set_config('app.channel', $9::text, true)`;
 
 /** The request's user for the session settings (lib/requestContext). */
 function actorParams() {
   const ctx = requestContext.current();
   return [ctx?.email || '', ctx?.tillRequired ? 'true' : 'false',
     ctx && ctx.tillAdd === false ? 'false' : 'true', ctx && ctx.tillRemove === false ? 'false' : 'true',
-    ctx?.branches || '', ctx?.officer || ''];
+    ctx?.branches || '', ctx?.officer || '', ctx?.ip || '', ctx?.channel || ''];
 }
 
 /**

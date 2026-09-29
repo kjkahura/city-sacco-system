@@ -264,6 +264,7 @@ function requireAuth(...roles) {
       tillRequired: !PERMS.can(req.auth, 'POST_TRANSACTIONS_WITHOUT_OPENED_TILL'),
       tillAdd: PERMS.can(req.auth, 'ADD_CASH'), tillRemove: PERMS.can(req.auth, 'REMOVE_CASH'),
       branches: limited, officer: req.auth.officer || '',
+      ip: req.ip || '', channel: req.auth.apiConsumer || req.get('apikey') ? 'API' : 'UI',
     }, () => next());
   };
 }

@@ -114,6 +114,8 @@ const tenantApi = express.Router();
 tenantApi.use(nullHandling());
 tenantApi.use(resolveTenant({ required: true }));
 tenantApi.use(auditTrail.recorder());
+// The reference platform's User-Agent rule, when the tenant's access preferences turn it on.
+tenantApi.use(auditTrail.requireUserAgent());
 tenantApi.use(rateLimit());
 tenantApi.use(tenantConcurrency());
 // What each route needs (lib/routePermissions), before any route runs.
@@ -135,7 +137,12 @@ tenantApi.get('/savings', ...views.viewfilter('DEPOSITS'));
 tenantApi.get('/savings/transactions', ...views.viewfilter('DEPOSIT_TRANSACTIONS', { required: true }));
 tenantApi.get('/creditarrangements', ...views.viewfilter('CREDIT_ARRANGEMENTS'));
 tenantApi.get('/accounting/journal', ...views.viewfilter('JOURNAL_ENTRIES'));
-tenantApi.get('/activities', ...views.viewfilter('ACTIVITIES', { required: true }));
+tenantApi.get('/activities', ...views.viewfilter('ACTIVITIES'));
+// Activities (the reference platform's API v1): the list, the dashboard feed, and one record's.
+const activities = require('./routes/activities');
+tenantApi.get('/activities', ...activities.list);
+tenantApi.use('/activities', activities.router);
+for (const kind of Object.keys(activities.RECORD)) tenantApi.get(`/${kind}/:id/activities`, ...activities.forRecord(kind));
 tenantApi.get('/tasks', ...views.viewfilter('TASKS'));
 tenantApi.use('/views', views);
 const menus = require('./routes/menus');
@@ -200,6 +207,8 @@ const access = require('./routes/access');
 tenantApi.use('/access-preferences', access.prefs);
 tenantApi.use('/consumers', access.consumers);
 tenantApi.use('/audit-trail', access.trail);
+// The reference platform's path for the audit trail query (GET /v1/events).
+tenantApi.use('/v1', access.trail);
 tenantApi.use('/profile', access.profile);
 
 const data = require('./routes/dataManagement');

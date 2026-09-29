@@ -17,6 +17,8 @@ const { pool } = require('../db/pool');
  *   reauthenticate         ask for the password again on critical actions
  *   apiKeys                rotationGraceSeconds, rotatedKeyExpirySeconds
  *   auditRetentionDays     how long the audit trail keeps requests
+ *   requireUserAgent       refuse a request without a User-Agent header (the reference platform's
+ *                          audit trail rule); off by default
  *   mfaRequiredRoles       roles that must use a second factor (a column of
  *                          its own, kept there for the sign-in path)
  */
@@ -29,6 +31,7 @@ const DEFAULTS = {
   reauthenticate: false,
   apiKeys: { rotationGraceSeconds: 1800, rotatedKeyExpirySeconds: null },
   auditRetentionDays: 365,
+  requireUserAgent: false,
 };
 
 const err = (m, status = 400) => Object.assign(new Error(m), { status });
@@ -44,6 +47,7 @@ function merge(stored = {}) {
     reauthenticate: stored.reauthenticate ?? DEFAULTS.reauthenticate,
     apiKeys: { ...DEFAULTS.apiKeys, ...(stored.apiKeys || {}) },
     auditRetentionDays: stored.auditRetentionDays ?? DEFAULTS.auditRetentionDays,
+    requireUserAgent: stored.requireUserAgent ?? DEFAULTS.requireUserAgent,
   };
 }
 
@@ -192,6 +196,10 @@ function validate(current, body = {}) {
     }
   }
   if (body.auditRetentionDays !== undefined) next.auditRetentionDays = int(body.auditRetentionDays, 'AUDIT_RETENTION_DAYS', 30, 3650);
+  if (body.requireUserAgent !== undefined) {
+    if (typeof body.requireUserAgent !== 'boolean') throw err('REQUIRE_USER_AGENT_IS_TRUE_OR_FALSE');
+    next.requireUserAgent = body.requireUserAgent;
+  }
   return next;
 }
 

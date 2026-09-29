@@ -44,7 +44,7 @@ const err = (m, status = 400) => Object.assign(new Error(m), { status });
 const COLUMNS = `id, email, full_name, title, language, role, role_code, permissions, user_type, status, branch_id, all_branches, branch_access,
                  other_officers_clients, phone, mfa_enabled, mfa_enrolled_at, must_change_password,
                  approval_limit, disbursement_limit, fee_limit, deposit_limit, withdrawal_limit, repayment_limit,
-                 failed_logins, locked_at, locked_until, password_changed_at, custom_fields, last_login_at, created_at, created_by, updated_at`;
+                 failed_logins, locked_at, locked_until, password_changed_at, custom_fields, last_login_at, created_at, created_by, updated_at, activity_types`;
 
 /** A user row for the API, with the reference platform's state (ACTIVE, INACTIVE, LOCKED). */
 function shape(u) {
@@ -54,6 +54,7 @@ function shape(u) {
     state: locked ? 'LOCKED' : u.status === 'SUSPENDED' ? 'INACTIVE' : 'ACTIVE',
     locked,
     accessRights: { allBranches: u.all_branches, branches: u.branch_access, otherCreditOfficersClients: u.other_officers_clients },
+    activityTypes: u.activity_types ?? null,
   };
 }
 
@@ -349,6 +350,14 @@ async function updateProfile(tenant, userId, body = {}) {
   if (body.title !== undefined) sets.title = body.title || null;
   if (body.phone !== undefined) sets.phone = body.phone || null;
   if (body.language !== undefined) sets.language = body.language || 'en';
+  // The activity types the dashboard's Latest Activity shows; null or an empty list shows every type.
+  if (body.activityTypes !== undefined) {
+    const t = body.activityTypes;
+    if (t !== null && !(Array.isArray(t) && t.every((x) => typeof x === 'string' && /^[A-Z0-9_]{1,80}$/.test(x)) && t.length <= 200)) {
+      throw err('ACTIVITY_TYPES_IS_A_LIST_OF_ACTIVITY_TYPES', 400);
+    }
+    sets.activity_types = t && t.length ? [...new Set(t)] : null;
+  }
   for (const k of ['email', 'role', 'permissions', 'status', 'branchId', 'userType']) {
     if (body[k] !== undefined) throw err(`${k.toUpperCase()}_IS_NOT_PART_OF_YOUR_PROFILE`, 400);
   }

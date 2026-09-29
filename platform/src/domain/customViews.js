@@ -283,7 +283,9 @@ const ENTITIES = {
   },
   ACTIVITIES: {
     label: 'System activities', reference: 'ACTIVITIES', table: 'audit_log', idSql: 'x.id', permission: 'AUDIT_TRANSACTIONS',
-    from: 'audit_log x',
+    from: 'audit_log x LEFT JOIN branches xb ON xb.id = x.branch_id',
+    // A user limited to some branches sees the activities of those branches (migration 042 links them).
+    scope: (user, p) => (Array.isArray(user.branches) ? `x.branch_id = ANY(${p(user.branches)}::uuid[])` : null),
     defaults: ['createdAt', 'actor', 'action', 'entity', 'entityId'],
     fields: {
       actor: f('User', 'x.actor'),
@@ -291,6 +293,8 @@ const ENTITIES = {
       entity: f('Record', 'x.entity'),
       entityId: f('Record id', 'x.entity_id'),
       ip: f('IP address', 'host(x.ip)'),
+      channel: f('Channel', 'x.channel'),
+      branch: f('Branch', 'xb.code'),
       createdAt: f('When', 'x.created_at', 'TIMESTAMP'),
     },
   },

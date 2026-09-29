@@ -442,6 +442,8 @@ const T = (fn) => withTenant(SCHEMA, fn);
     } else check('the member has a deposit account to open', false);
     await page.evaluate((m) => memberDetail(m), mid);
     await page.waitForSelector('#credit-arrangements #ca-new');
+    await page.waitForFunction(() => !/Loading/.test(document.getElementById('activity-list')?.textContent || 'Loading'));
+    check('a member\'s page lists its activity', /savings account|member created|loan/i.test(await page.textContent('#activity-list')), await page.textContent('#activity-list'));
     await page.click('#ca-new');
     await page.waitForSelector('dialog[open] input[name=amount]');
     await page.fill('dialog[open] input[name=amount]', '25000');
@@ -514,6 +516,19 @@ const T = (fn) => withTenant(SCHEMA, fn);
     const dash = await page.textContent('main');
     check('the dashboard shows indicators, upcoming repayments, favourite views and the latest activity',
       /Indicators/.test(dash) && /Upcoming repayments/.test(dash) && /favourite views/.test(dash) && /Latest activity/.test(dash));
+    await page.click('#dash-activity-types');
+    await page.waitForSelector('dialog[open] #activity-types input');
+    await page.check('dialog[open] #activity-types input >> nth=0');
+    await page.evaluate(() => document.getElementById('latest-activity').setAttribute('data-stale', '1'));
+    await page.click('#activity-types-save');
+    await page.waitForSelector('#latest-activity:not([data-stale])');
+    check('the latest activity\'s types are chosen from the dashboard', true);
+    await page.click('#dash-activity-types');
+    await page.waitForSelector('dialog[open] #activity-types input');
+    await page.uncheck('dialog[open] #activity-types input >> nth=0');
+    await page.evaluate(() => document.getElementById('latest-activity').setAttribute('data-stale', '1'));
+    await page.click('#activity-types-save');
+    await page.waitForSelector('#latest-activity:not([data-stale])');
 
     section('views');
     await page.click('nav button[data-view=views]');
