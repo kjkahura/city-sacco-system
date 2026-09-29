@@ -205,12 +205,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // ------------------------------------------------------------------------
     section('access rights on a role (the reference platform and API)');
-    await call('POST', '/api/roles', { code: 'API_ONLY', name: 'API only', baseRole: 'AUDITOR', permissions: ['VIEW_CLIENT_DETAILS'], accessRights: { reference: false, api: true } });
+    await call('POST', '/api/roles', { code: 'API_ONLY', name: 'API only', baseRole: 'AUDITOR', permissions: ['VIEW_CLIENT_DETAILS'], accessRights: { console: false, api: true } });
     await call('POST', '/api/users', { email: 'robot@uac.local', role: 'API_ONLY', password: PW });
     await pool.query("UPDATE platform.users SET must_change_password = false WHERE email = 'robot@uac.local'");
     const robot = await login('robot@uac.local');
     check('a role without the reference platform access does not sign in to the back office', robot.status === 403 && /NO_BACK_OFFICE_ACCESS/.test(robot.reason), robot.text);
-    await call('POST', '/api/roles', { code: 'UI_ONLY', name: 'UI only', baseRole: 'AUDITOR', permissions: ['VIEW_CLIENT_DETAILS'], accessRights: { reference: true, api: false } });
+    await call('POST', '/api/roles', { code: 'UI_ONLY', name: 'UI only', baseRole: 'AUDITOR', permissions: ['VIEW_CLIENT_DETAILS'], accessRights: { console: true, api: false } });
     const noApi = await call('POST', '/api/consumers', { name: 'ui only', access: { role: 'UI_ONLY' } });
     check('and one without API access is not given to an API consumer', noApi.status === 409 && /API_ACCESS_NOT_ALLOWED/.test(noApi.reason), noApi.text);
 

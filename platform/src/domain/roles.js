@@ -50,7 +50,7 @@ function assertMayChange(actor, { baseRole, userType, code, added = [] }) {
 function shape(r, users = 0) {
   return {
     code: r.code, name: r.name, baseRole: r.base_role, userType: r.user_type,
-    accessRights: { reference: r.console_access !== false, api: r.api_access !== false }, apiAccess: r.api_access, consoleAccess: r.console_access !== false,
+    accessRights: { console: r.console_access !== false, api: r.api_access !== false }, apiAccess: r.api_access, consoleAccess: r.console_access !== false,
     permissions: [...r.permissions].sort(), notes: r.notes, builtin: r.builtin, users,
     edited: Boolean(r.edited), createdAt: r.created_at || null, updatedAt: r.updated_at || null,
   };
@@ -98,12 +98,12 @@ function permissionsOf(list) {
   return codes;
 }
 
-// The reference platform's Access Rights on a role: { reference, api }, or the flat flags.
+// The reference platform's Access Rights on a role: { console, api }, or the flat flags.
 function accessOf(body, before = null) {
   const r = body.accessRights || {};
   const pick = (v, flat, prev) => (v !== undefined ? v !== false : flat !== undefined ? flat !== false : prev);
   return {
-    reference: pick(r.reference, body.consoleAccess, before ? before.console_access !== false : true),
+    console: pick(r.console, body.consoleAccess, before ? before.console_access !== false : true),
     api: pick(r.api, body.apiAccess, before ? before.api_access !== false : true),
   };
 }

@@ -184,8 +184,8 @@ imports.post('/:id/reject', requireAuth(), async (req, res, next) => {
 //
 // The same imports as /data-imports, in the reference platform's shapes and names.
 
-const reference = express.Router();
-reference.post('/import', requireAuth(), (req, res, next) => rawBody(req, res, (e) => (e ? tooLarge(e, next) : next())),
+const importApi = express.Router();
+importApi.post('/import', requireAuth(), (req, res, next) => rawBody(req, res, (e) => (e ? tooLarge(e, next) : next())),
   async (req, res, next) => {
     try {
       const out = await acceptUpload(req, workbookFrom(req));
@@ -193,12 +193,12 @@ reference.post('/import', requireAuth(), (req, res, next) => rawBody(req, res, (
       res.status(200).json(IMP.apiStatus(imp));
     } catch (e) { next(e); }
   });
-reference.get('/import/:importKey', ...run(async (c, req) => {
+importApi.get('/import/:importKey', ...run(async (c, req) => {
   await IMP.markStale(c);
   return IMP.apiStatus(await IMP.get(c, req.params.importKey));
 }, { write: true }));
 // Express 5 does not match a colon suffix in a path string, so the route is a RegExp.
-reference.post(/^\/import\/events\/([^/:]+):action$/, requireAuth(), async (req, res, next) => {
+importApi.post(/^\/import\/events\/([^/:]+):action$/, requireAuth(), async (req, res, next) => {
   try {
     const eventKey = req.params[0];
     const action = String(req.body?.action || '').toUpperCase();
@@ -209,4 +209,4 @@ reference.post(/^\/import\/events\/([^/:]+):action$/, requireAuth(), async (req,
   } catch (e) { next(e); }
 });
 
-module.exports = { dictionary, extract, database, imports, reference };
+module.exports = { dictionary, extract, database, imports, importApi };

@@ -47,11 +47,11 @@ const LOAN_STATES = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACT
 /**
  * The kinds of record. `from` is the FROM clause, `id` the row identity,
  * `cf` the alias whose custom_fields holds custom values and the custom
- * field entity it answers to, `reference` the name API v1 uses.
+ * field entity it answers to, `api` the name API v1 uses.
  */
 const ENTITIES = {
   MEMBERS: {
-    label: 'Members', reference: 'CLIENTS', table: 'members', idSql: 'm.id', permission: 'VIEW_CLIENT_DETAILS',
+    label: 'Members', api: 'CLIENTS', table: 'members', idSql: 'm.id', permission: 'VIEW_CLIENT_DETAILS',
     from: "(SELECT * FROM members WHERE holder_type = 'CLIENT') m LEFT JOIN branches b ON b.id = m.branch_id LEFT JOIN centres ce ON ce.id = m.centre_id",
     cf: { alias: 'm', entity: 'MEMBER' },
     defaults: ['memberNo', 'fullName', 'status', 'branch', 'phone'],
@@ -89,7 +89,7 @@ const ENTITIES = {
     },
   },
   GROUPS: {
-    label: 'Groups', reference: 'GROUPS', table: 'members', idSql: 'm.id', permission: 'VIEW_GROUP_DETAILS',
+    label: 'Groups', api: 'GROUPS', table: 'members', idSql: 'm.id', permission: 'VIEW_GROUP_DETAILS',
     from: "(SELECT * FROM members WHERE holder_type = 'GROUP') m LEFT JOIN branches b ON b.id = m.branch_id LEFT JOIN centres ce ON ce.id = m.centre_id",
     cf: { alias: 'm', entity: 'GROUP' },
     defaults: ['groupId', 'groupName', 'state', 'members', 'branch'],
@@ -114,7 +114,7 @@ const ENTITIES = {
     },
   },
   LOANS: {
-    label: 'Loans', reference: 'LOANS', table: 'loan_accounts', idSql: 'l.id', permission: 'VIEW_LOAN_ACCOUNT_DETAILS',
+    label: 'Loans', api: 'LOANS', table: 'loan_accounts', idSql: 'l.id', permission: 'VIEW_LOAN_ACCOUNT_DETAILS',
     from: `loan_accounts l JOIN members m ON m.id = l.member_id LEFT JOIN branches b ON b.id = l.branch_id
       LEFT JOIN loan_products p ON p.id = l.product_id
       LEFT JOIN LATERAL (SELECT GREATEST(0, MAX(current_date - i.due_date))::int AS days_late FROM loan_installments i
@@ -158,7 +158,7 @@ const ENTITIES = {
     },
   },
   LOAN_TRANSACTIONS: {
-    label: 'Loan transactions', reference: 'LOAN_TRANSACTIONS', table: 'transactions', idSql: 't.id', permission: 'VIEW_LOAN_ACCOUNT_DETAILS',
+    label: 'Loan transactions', api: 'LOAN_TRANSACTIONS', table: 'transactions', idSql: 't.id', permission: 'VIEW_LOAN_ACCOUNT_DETAILS',
     from: 'transactions t JOIN loan_accounts l ON l.id = t.loan_account_id JOIN members m ON m.id = l.member_id LEFT JOIN branches b ON b.id = t.branch_id',
     cf: { alias: 't', entity: 'TRANSACTION_CHANNEL' },
     defaults: ['reference', 'valueDate', 'kind', 'accountNo', 'amount'],
@@ -184,7 +184,7 @@ const ENTITIES = {
     },
   },
   DEPOSITS: {
-    label: 'Deposit accounts', reference: 'DEPOSITS', table: 'savings_accounts', idSql: 'a.id', permission: 'VIEW_SAVINGS_ACCOUNT_DETAILS',
+    label: 'Deposit accounts', api: 'DEPOSITS', table: 'savings_accounts', idSql: 'a.id', permission: 'VIEW_SAVINGS_ACCOUNT_DETAILS',
     from: 'savings_accounts a JOIN members m ON m.id = a.member_id LEFT JOIN branches b ON b.id = a.branch_id LEFT JOIN savings_products sp ON sp.id = a.product_id',
     cf: { alias: 'a', entity: 'SAVINGS_ACCOUNT' },
     defaults: ['accountNo', 'memberName', 'productName', 'status', 'balance'],
@@ -206,7 +206,7 @@ const ENTITIES = {
     },
   },
   DEPOSIT_TRANSACTIONS: {
-    label: 'Deposit transactions', reference: 'DEPOSIT_TRANSACTIONS', table: 'transactions', idSql: 't.id', permission: 'VIEW_SAVINGS_ACCOUNT_DETAILS',
+    label: 'Deposit transactions', api: 'DEPOSIT_TRANSACTIONS', table: 'transactions', idSql: 't.id', permission: 'VIEW_SAVINGS_ACCOUNT_DETAILS',
     from: 'transactions t JOIN savings_accounts a ON a.id = t.savings_account_id JOIN members m ON m.id = a.member_id LEFT JOIN branches b ON b.id = t.branch_id',
     cf: { alias: 't', entity: 'TRANSACTION_CHANNEL' },
     defaults: ['reference', 'valueDate', 'kind', 'accountNo', 'amount'],
@@ -228,7 +228,7 @@ const ENTITIES = {
     },
   },
   CREDIT_ARRANGEMENTS: {
-    label: 'Credit arrangements', reference: 'CREDIT_ARRANGEMENTS', table: 'credit_arrangements', idSql: 'ca.id', permission: 'VIEW_LINE_OF_CREDIT_DETAILS',
+    label: 'Credit arrangements', api: 'CREDIT_ARRANGEMENTS', table: 'credit_arrangements', idSql: 'ca.id', permission: 'VIEW_LINE_OF_CREDIT_DETAILS',
     from: `credit_arrangements ca JOIN members m ON m.id = ca.holder_id LEFT JOIN branches b ON b.id = m.branch_id
       LEFT JOIN LATERAL (SELECT
         (SELECT COALESCE(SUM(l.principal), 0) FROM loan_accounts l WHERE l.credit_arrangement_id = ca.id AND l.status NOT LIKE 'CLOSED%')
@@ -261,7 +261,7 @@ const ENTITIES = {
     },
   },
   JOURNAL_ENTRIES: {
-    label: 'Journal entries', reference: 'JOURNAL_ENTRIES', table: 'journal_lines', idSql: 'jl.id', permission: 'VIEW_ACCOUNTING_REPORTS',
+    label: 'Journal entries', api: 'JOURNAL_ENTRIES', table: 'journal_lines', idSql: 'jl.id', permission: 'VIEW_ACCOUNTING_REPORTS',
     from: 'journal_lines jl JOIN journal_entries e ON e.id = jl.entry_id JOIN gl_accounts g ON g.code = jl.gl_code LEFT JOIN branches b ON b.id = jl.branch_id',
     defaults: ['bookingDate', 'glCode', 'glName', 'debit', 'credit', 'narration'],
     fields: {
@@ -282,7 +282,7 @@ const ENTITIES = {
     },
   },
   ACTIVITIES: {
-    label: 'System activities', reference: 'ACTIVITIES', table: 'audit_log', idSql: 'x.id', permission: 'AUDIT_TRANSACTIONS',
+    label: 'System activities', api: 'ACTIVITIES', table: 'audit_log', idSql: 'x.id', permission: 'AUDIT_TRANSACTIONS',
     from: 'audit_log x LEFT JOIN branches xb ON xb.id = x.branch_id',
     // A user limited to some branches sees the activities of those branches (migration 042 links them).
     scope: (user, p) => (Array.isArray(user.branches) ? `x.branch_id = ANY(${p(user.branches)}::uuid[])` : null),
@@ -299,7 +299,7 @@ const ENTITIES = {
     },
   },
   TASKS: {
-    label: 'Tasks', reference: 'TASKS', table: 'tasks', idSql: 'k.id', permission: 'VIEW_TASK',
+    label: 'Tasks', api: 'TASKS', table: 'tasks', idSql: 'k.id', permission: 'VIEW_TASK',
     from: 'tasks k LEFT JOIN members m ON m.id = k.member_id LEFT JOIN branches b ON b.id = k.branch_id',
     // A user's task views list the tasks they may see (./tasks).
     scope: (user, p) => (user.role === 'TENANT_ADMIN' ? null
@@ -323,7 +323,7 @@ const ENTITIES = {
   },
 };
 
-const API_NAME_FOR = Object.fromEntries(Object.entries(ENTITIES).map(([k, e]) => [e.reference, k]));
+const API_NAME_FOR = Object.fromEntries(Object.entries(ENTITIES).map(([k, e]) => [e.api, k]));
 
 function entityOf(name) {
   const key = String(name || '').toUpperCase();
@@ -392,7 +392,7 @@ async function describe(c, entity, user) {
   assertEntityAllowed(e, user);
   const fields = await fieldsFor(c, e, user);
   return {
-    entity: e.key, label: e.label, apiType: e.reference, defaultColumns: e.defaults,
+    entity: e.key, label: e.label, apiType: e.api, defaultColumns: e.defaults,
     fields: Object.entries(fields).map(([key, x]) => ({
       key, label: x.label, type: x.type, operators: OPS[x.type], ...(x.values ? { values: x.values } : {}),
       custom: Boolean(x.custom), grouped: Boolean(x.grouped),
@@ -402,7 +402,7 @@ async function describe(c, entity, user) {
 
 function entities(user) {
   return Object.entries(ENTITIES).filter(([, e]) => allowed(e, user))
-    .map(([key, e]) => ({ entity: key, label: e.label, apiType: e.reference }));
+    .map(([key, e]) => ({ entity: key, label: e.label, apiType: e.api }));
 }
 
 // --------------------------------------------------------------------------
@@ -615,7 +615,7 @@ async function fullDetails(c, def, user, { offset = 0, limit = 50 } = {}) {
 
 function shape(v, user, favourites = new Set()) {
   return {
-    id: v.id, encodedKey: v.id, entity: v.entity, type: ENTITIES[v.entity].reference, name: v.name, description: v.description,
+    id: v.id, encodedKey: v.id, entity: v.entity, type: ENTITIES[v.entity].api, name: v.name, description: v.description,
     owner: v.owner_email, match: v.match, filters: v.filters, columns: v.columns,
     sortBy: v.sort_by, sortDir: v.sort_dir, includeTotals: v.include_totals, includeTimestamp: v.include_timestamp,
     display: v.display, usageRights: { allUsers: v.all_users, roles: v.roles },

@@ -1,18 +1,20 @@
 'use strict';
 
 /**
- * The reference platform's API standards, where the platform follows them by request.
+ * API standards the platform follows by request.
  *
- * Nulls. The reference platform leaves a field out of a response when it has no value. This
- * API returns every column, null or not, because the console and the tests
- * read fields by name and an absent field and a null one would otherwise
- * both have to be handled. A client that wants the reference platform's behaviour asks for it
- * with the reference platform's media type (Accept: application/vnd.sacco.v2+json) or with
- * ?nulls=omit, and gets the same body with every null field removed, at any
- * depth. Nulls inside an array stay: an array's positions mean something.
+ * Nulls. By default the API returns every column, null or not, because the
+ * console and the tests read fields by name and an absent field and a null
+ * one would otherwise both have to be handled. A client that wants null
+ * fields left out asks for it with a vendor v2 media type (Accept:
+ * application/vnd.<vendor>.v2+json, any vendor name, so clients written for
+ * other core banking APIs keep working) or with ?nulls=omit, and gets the
+ * same body with every null field removed, at any depth. Nulls inside an
+ * array stay: an array's positions mean something.
  */
 
 const VENDOR_V2 = 'application/vnd.sacco.v2+json';
+const VENDOR_V2_RE = /application\/vnd\.[a-z0-9][a-z0-9.-]*\.v2\+json/;
 
 function omitNulls(v) {
   if (Array.isArray(v)) return v.map(omitNulls);
@@ -28,7 +30,7 @@ function omitNulls(v) {
 }
 
 const wantsNullsOmitted = (req) =>
-  String(req.get('accept') || '').toLowerCase().includes(VENDOR_V2)
+  VENDOR_V2_RE.test(String(req.get('accept') || '').toLowerCase())
   || String(req.query?.nulls || '').toLowerCase() === 'omit';
 
 /** Express middleware: wraps res.json when the request asks for it. */

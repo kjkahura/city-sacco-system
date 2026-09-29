@@ -147,10 +147,10 @@ const hooks = [];
     check('a page is at most 1,000 items (the reference platform\'s maximum)', capped.headers.get('items-limit') === '1000', capped.headers.get('items-limit'));
     const withNulls = await call('GET', `/api/members/${m0.body.id}`);
     check('by default a null field is returned as null', 'middle_name' in withNulls.body && withNulls.body.middle_name === null);
-    const reference = await call('GET', `/api/members/${m0.body.id}`, null, { headers: { accept: 'application/vnd.sacco.v2+json' } });
+    const vendor = await call('GET', `/api/members/${m0.body.id}`, null, { headers: { accept: 'application/vnd.sacco.v2+json' } });
     check('with Accept: application/vnd.sacco.v2+json null fields are left out',
-      reference.status === 200 && !('middle_name' in reference.body) && reference.body.first_name === 'Date' && reference.headers.get('x-nulls') === 'omitted',
-      JSON.stringify(Object.keys(reference.body || {})));
+      vendor.status === 200 && !('middle_name' in vendor.body) && vendor.body.first_name === 'Date' && vendor.headers.get('x-nulls') === 'omitted',
+      JSON.stringify(Object.keys(vendor.body || {})));
     const omit = await call('GET', `/api/members?nulls=omit&limit=5`);
     check('?nulls=omit does the same for a list', Array.isArray(omit.body) && omit.body.every((m) => !Object.values(m).includes(null)));
     check('nulls inside an array keep their place', JSON.stringify(omitNulls({ a: [1, null, { b: null, c: 2 }], d: null })) === '{"a":[1,null,{"c":2}]}');

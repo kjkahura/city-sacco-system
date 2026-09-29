@@ -5,6 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { pool } = require('./pool');
 const { assertSchemaName } = require('./tenantContext');
+const EARLIER = require('./earlierChecksums');
 
 const DIR = path.join(__dirname, 'migrations');
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 16);
@@ -19,6 +20,17 @@ function load(kind) {
       const sql = fs.readFileSync(path.join(dir, f), 'utf8');
       return { version: f.replace(/\.sql$/, ''), sql, checksum: sha(sql) };
     });
+}
+
+/**
+ * A checksum a file had before its comments were reworded
+ * (./earlierChecksums): the recorded checksum is moved to the current one.
+ */
+async function rebaseline(client, kind, schemaName, m, prev) {
+  if (!(EARLIER[kind]?.[m.version] || []).includes(prev)) return false;
+  await client.query('UPDATE platform.schema_migrations SET checksum = $3 WHERE schema_name = $1 AND version = $2',
+    [schemaName, m.version, m.checksum]);
+  return true;
 }
 
 async function applied(client, schemaName) {
@@ -46,6 +58,7 @@ async function migratePlatform() {
     for (const m of files) {
       const prev = have.get(m.version);
       if (prev === m.checksum) continue;
+      if (prev && await rebaseline(client, 'platform', 'platform', m, prev)) continue;
       if (prev && prev !== m.checksum) {
         throw new Error(
           `platform migration ${m.version} changed after being applied ` +
@@ -97,6 +110,7 @@ async function migrateTenant(schemaName, { lockTimeoutMs = 5_000 } = {}) {
     for (const m of files) {
       const prev = have.get(m.version);
       if (prev === m.checksum) continue;
+      if (prev && await rebaseline(client, 'tenant', schemaName, m, prev)) continue;
       if (prev && prev !== m.checksum) {
         throw new Error(
           `tenant migration ${m.version} changed after being applied to ${schemaName}. ` +

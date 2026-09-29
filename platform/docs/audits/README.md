@@ -1,6 +1,6 @@
 # Audits and build logs
 
-Each section of the platform is audited against the reference platform's documentation before it is built. The audit lists defects, compares coverage and proposes a build with decisions to take. The build log records what was decided, built and fixed, the test count and what was left out. Later audits read these files to check earlier decisions.
+Each section of the platform is audited before it is built against the documentation of the reference platform, the published core banking system whose features and API conventions the platform follows. The audit lists defects, compares coverage and proposes a build with decisions to take. The build log records what was decided, built and fixed, the test count and what was left out. Later audits read these files to check earlier decisions.
 
 The same files are kept in the claude.ai project "CoreBanking Service" under `claude/`. When a section is audited or built, its files are added here in the same commit as the code.
 

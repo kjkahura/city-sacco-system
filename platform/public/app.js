@@ -5250,7 +5250,7 @@ async function roleEditor(role, catalog) {
       <label>Base role<select name="baseRole" ${role.builtin ? 'disabled' : ''}>${['MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR', 'TENANT_ADMIN'].map((b) => `<option ${b === (role.baseRole || 'TELLER') ? 'selected' : ''}>${b}</option>`).join('')}</select>
         <span class="hint">Its starting permissions, and the role lists that name built-in roles.</span></label>
       <label>User type<select name="userType" ${role.builtin ? 'disabled' : ''}>${['', 'ADMINISTRATOR', 'TELLER', 'CREDIT_OFFICER'].map((u) => `<option value="${u}" ${u === (role.userType || '') ? 'selected' : ''}>${u || '(none)'}</option>`).join('')}</select></label>
-      <label class="check"><input type="checkbox" name="reference" ${role.accessRights?.reference === false ? '' : 'checked'} ${role.code === 'TENANT_ADMIN' ? 'disabled' : ''}> Back office access (sign in with a password)</label>
+      <label class="check"><input type="checkbox" name="console" ${role.accessRights?.console === false ? '' : 'checked'} ${role.code === 'TENANT_ADMIN' ? 'disabled' : ''}> Back office access (sign in with a password)</label>
       <label class="check"><input type="checkbox" name="api" ${role.accessRights?.api === false ? '' : 'checked'}> API access (may be given to an API consumer)</label>
       <div class="perm-groups">${catalog.map((g) => `<fieldset><legend>${esc(g.group)}</legend>${g.permissions.map((p) => `<label class="check" title="${esc(p.code)}">
         <input type="checkbox" name="perm" value="${esc(p.code)}" ${has.has(p.code) ? 'checked' : ''} ${role.code === 'TENANT_ADMIN' ? 'disabled' : ''}> ${esc(p.label)}${p.platform ? ' <span class="hint">(this platform)</span>' : ''}</label>`).join('')}</fieldset>`).join('')}</div>
@@ -5263,7 +5263,7 @@ async function roleEditor(role, catalog) {
         ...(role.code ? {} : { code: f.code.value.trim().toUpperCase() }), name: f.name.value, notes: f.notes.value || null,
         ...(role.builtin ? {} : { baseRole: f.baseRole.value, userType: f.userType.value || null }),
         ...(role.code === 'TENANT_ADMIN' ? {} : { permissions: [...f.querySelectorAll('input[name=perm]:checked')].map((i) => i.value) }),
-        accessRights: { reference: role.code === 'TENANT_ADMIN' ? true : f.reference.checked, api: f.api.checked },
+        accessRights: { console: role.code === 'TENANT_ADMIN' ? true : f.console.checked, api: f.api.checked },
       };
       dlg.remove();
       resolve(dlg.returnValue === 'ok' ? out : null);

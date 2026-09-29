@@ -16,7 +16,7 @@ npm start
 
 ## Audits and build logs
 
-Each section is audited against the reference platform's documentation before it is built. The audits and build logs are in [docs/audits](docs/audits/README.md), and each one is committed with the code it describes.
+Each section is audited before it is built against the documentation of the reference platform: the published core banking system whose features and API conventions this platform follows. The audits and build logs are in [docs/audits](docs/audits/README.md), and each one is committed with the code it describes.
 
 ## Why schema per tenant
 
