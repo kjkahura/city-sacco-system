@@ -417,6 +417,7 @@ const COLUMNS = {
   // savings
   'savings_accounts.account_no': 'The account number.',
   'savings_accounts.status': 'PENDING_APPROVAL, APPROVED, ACTIVE, IN_ARREARS, DORMANT, LOCKED, MATURED or CLOSED (the reference platform\'s deposit account states).',
+  'savings_accounts.name': 'The account\'s own name (the reference platform\'s account name); empty means the product\'s name.',
   'savings_accounts.closed_as': 'How a CLOSED account was closed: REJECTED, WITHDRAWN or WRITTEN_OFF; empty for a plain close.',
   'savings_accounts.state_before_lock': 'The state a LOCKED account returns to when unlocked.',
   'savings_accounts.approved_on': 'The date the account was approved.',

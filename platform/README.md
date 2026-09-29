@@ -490,10 +490,17 @@ range; each may be left out, and a null `expiryDate` clears it), `POST
 /:id/overdraft/write-off`, `POST /:id/interest` (accrue to a date, and apply
 with `apply: true`), `POST /:id/branch`, and:
 
-- `PATCH /api/savings/:id`: `maxBalance` (the reference platform's maximum deposit balance:
-  deposits and transfers in beyond it are refused with
-  `MAXIMUM_DEPOSIT_BALANCE_EXCEEDED`) and `notes`.
-- Opening an account takes its own `interestRate` (FIXED, within the range),
+- `PATCH /api/savings/:id` (the reference platform's Editing Accounts): at any time the
+  account's `name` (blank shows the product's), `notes`, `customFields` and
+  `maxBalance` (the reference platform's maximum deposit balance: deposits and transfers in
+  beyond it are refused with `MAXIMUM_DEPOSIT_BALANCE_EXCEEDED`). Before
+  activation (PENDING_APPROVAL or APPROVED) also its terms: `interestRate`,
+  `interestSpread`, `overdraftRate`, `overdraftSpread` and `termLength`,
+  within the product's ranges. After it the rate changes through
+  `:changeInterestRate` and the overdraft through `PUT /overdraft`.
+- `PUT /:id/overdraft` works on ACTIVE and IN_ARREARS accounts (the reference platform's
+  Adjusting Overdraft Terms), and before activation as part of the terms.
+- Opening an account takes its own `name`, `interestRate` (FIXED, within the range),
   `interestSpread` (INDEX), `overdraftRate`, `overdraftSpread`, `maxBalance`
   and `termLength`.
 - `POST /api/savings/:id:changeInterestRate` (also `/:id/interest-rate`):

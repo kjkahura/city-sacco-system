@@ -89,8 +89,9 @@ router.post('/:id/transfers', ...tx(async (c, req, res, { actor, user }) => {
   return await S.transfer(c, req.params.id, { ...req.body, createdBy: actor, user });
 }));
 
-// The account's own settings: its maximum balance (the reference platform's maxDepositBalance) and notes.
-router.patch('/:id', ...tx((c, req, _res, { actor }) => S.updateAccount(c, req.params.id, req.body || {}, { createdBy: actor })));
+// Edit the account (the reference platform's Editing Accounts): its name, notes, custom fields and maximum
+// balance at any time, and its terms before activation (../domain/savings updateAccount).
+router.patch('/:id', ...tx((c, req, _res, { actor, user }) => S.updateAccount(c, req.params.id, req.body || {}, { createdBy: actor, user })));
 
 // A fixed deposit's or savings plan's maturity (the reference platform's Activate Maturity and Undo Maturity).
 router.post('/:id/maturity', ...tx((c, req, _res, { actor }) =>

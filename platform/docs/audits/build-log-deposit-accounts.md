@@ -82,6 +82,20 @@ Built on 29 September 2026, following `audit-deposit-accounts.md`. After the Dep
 - **Backdated movements on an offset account:** the reference platform recalculates the loan's interest. Here the offset balance is the one the accrual finds.
 - **Overdraft interest on a locked account:** it still accrues. The product's "collect interest when locked" setting covers credit interest, as before.
 
+## Follow-up: the Managing Deposit Accounts pages
+
+John asked whether Deposits > Managing Deposit Accounts was covered. Of the reference platform's nine pages, eight were. The ninth, Editing Accounts, and one rule on Adjusting Overdraft Terms were closed in the next commit (tenant migration 038):
+
+- **Account name:** a deposit account has its own `name`, set at opening or with `PATCH`. Blank shows the product's name.
+- **Editing Accounts:**
+  - the name, notes, custom field values and maximum balance change at any time;
+  - the terms (the account's interest rate or spread, its overdraft rate or spread, and the term length) change only before activation, within the product's ranges;
+  - after activation, `TERMS_ARE_EDITED_BEFORE_ACTIVATION` points to `:changeInterestRate` and `PUT /overdraft`.
+- **Adjusting Overdraft Terms:** `PUT /overdraft` works on ACTIVE and IN_ARREARS accounts, and on pending and approved ones as part of their terms. A dormant, locked, matured or closed account is refused.
+- **Console:** an "Edit account" button on the deposit account page, with the terms shown only before activation.
+- **Maturity:** the reference platform takes a maturity date where the platform takes a term length and works the date out. This was left as it is.
+- The suite gained 9 checks. After the follow-up there are 40 suites and 2,796 checks, passing under both UTC and Africa/Nairobi.
+
 ## Tests
 
 - New suite `test/deposit-accounts.test.js`, 83 checks.

@@ -1041,6 +1041,7 @@ async function depositDetail(a, holder = null) {
       <dt>Interest accrued</dt><dd>${money(b.interest.accrued)}</dd><dt>Interest last applied</dt><dd>${esc(b.interest.lastApplied || '—')}</dd></dl>
       ${can('CLOSE_SAVINGS_ACCOUNTS') && ['ACTIVE', 'DORMANT', 'MATURED'].includes(b.status) && Number(b.balance) === 0 ? '<button class="secondary" id="dep-close">Close account</button>' : ''}`)}
       ${card('Terms', `<dl class="kv" id="deposit-terms">
+      <dt>Name</dt><dd>${esc(b.name || '')}</dd>
       <dt>Type</dt><dd>${esc(String(b.productType || '').replace(/_/g, ' ').toLowerCase())}</dd>
       <dt>Interest rate</dt><dd>${b.interestRate === null ? esc(String(b.interestRateTerms || '').replace(/_/g, ' ').toLowerCase()) : `${esc(b.interestRate)}%${b.interestRateOwn ? ' (the account\'s own)' : ''}`}</dd>
       <dt>Maximum balance</dt><dd>${b.maxBalance === null ? 'none' : money(b.maxBalance)}</dd>
@@ -1052,7 +1053,8 @@ async function depositDetail(a, holder = null) {
       ${b.maturity && !b.maturity.startedOn && b.status === 'ACTIVE' && can('ACTIVATE_MATURITY') ? '<button class="secondary" id="dep-mature">Start maturity</button>' : ''}
       ${b.maturity && b.maturity.startedOn && b.status !== 'MATURED' && can('UNDO_MATURITY') ? '<button class="secondary" id="dep-unmature">Undo maturity</button>' : ''}
       ${b.interestRateTerms === 'FIXED' && can('EDIT_SAVINGS_ACCOUNT') && b.status !== 'CLOSED' ? '<button class="secondary" id="dep-rate">Change interest rate</button>' : ''}
-      ${can('EDIT_SAVINGS_ACCOUNT') && b.status !== 'CLOSED' ? '<button class="secondary" id="dep-max">Maximum balance</button>' : ''}</div>`)}
+      ${can('EDIT_SAVINGS_ACCOUNT') && b.status !== 'CLOSED' ? '<button class="secondary" id="dep-max">Maximum balance</button>' : ''}
+      ${can('EDIT_SAVINGS_ACCOUNT') ? '<button class="secondary" id="dep-edit">Edit account</button>' : ''}</div>`)}
       ${card('State', `<dl class="kv" id="deposit-state">
       <dt>State</dt><dd>${esc(String(b.accountState || b.status).replace(/_/g, ' ').toLowerCase())}</dd>
       ${b.approvedOn ? `<dt>Approved</dt><dd>${day(b.approvedOn)}</dd>` : ''}${b.activatedOn ? `<dt>Activated</dt><dd>${day(b.activatedOn)}</dd>` : ''}
@@ -1088,6 +1090,22 @@ async function depositDetail(a, holder = null) {
     if (!d) return;
     const res = await api('POST', `/api/savings/${a.id}:changeInterestRate`, { interestRate: Number(d.interestRate), valueDate: d.valueDate || undefined, notes: d.notes || undefined });
     toast(res.ok ? `Now ${res.body.interestRate}%${res.body.accruedChange ? `, accrued interest changed by ${money(res.body.accruedChange)}` : ''}` : res.error, !res.ok);
+    if (res.ok) again();
+  });
+  onDep('#dep-edit', async () => {
+    // The reference platform: the name and notes at any time; the terms only before activation.
+    const before = ['PENDING_APPROVAL', 'APPROVED'].includes(b.status);
+    const fields = [opt({ label: 'Account name (blank: the product\'s)', name: 'name', value: b.ownName || '' }), opt({ label: 'Notes', name: 'notes' })];
+    if (before && b.interestRateTerms === 'FIXED') fields.push(opt({ label: 'Interest rate, percent', name: 'interestRate', type: 'number', step: '0.0001', value: b.interestRate ?? '' }));
+    if (before && b.maturity) fields.push(opt({ label: `Term in ${String(b.maturity.termUnit || '').toLowerCase()}`, name: 'termLength', type: 'number', value: b.maturity.termLength ?? '' }));
+    const d = await ask(fields, `Edit ${b.accountNo}${before ? '' : ' (its terms change only before activation)'}`);
+    if (!d) return;
+    const body = { name: d.name || null };
+    if (d.notes) body.notes = d.notes;
+    if (d.interestRate !== undefined && d.interestRate !== '') body.interestRate = Number(d.interestRate);
+    if (d.termLength !== undefined && d.termLength !== '') body.termLength = Number(d.termLength);
+    const res = await api('PATCH', `/api/savings/${a.id}`, body);
+    toast(res.ok ? 'Saved' : res.error, !res.ok);
     if (res.ok) again();
   });
   onDep('#dep-max', async () => {

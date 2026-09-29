@@ -269,6 +269,33 @@ const errOf = (p) => p.then(() => 'ok', (e) => e.message);
     check('the /state path takes the same actions', wd2.status === 409 && /CANNOT_CLOSE_WITHDRAW_A_CLOSED_ACCOUNT/.test(wd2.reason), wd2.text);
 
     // ------------------------------------------------------------------------
+    section('editing accounts (the reference platform: the terms before activation, the name and notes at any time)');
+    await product('PEN2', { initialState: 'PENDING_APPROVAL', annualRate: 3, interestRateMin: 1, interestRateMax: 5 });
+    const e1 = await open('PEN2', { name: 'School fees' });
+    const plainB = await bal(plain.id);
+    check('an account opens with its own name; one without shows its product\'s', (await bal(e1.id)).name === 'School fees' && plainB.ownName === null && plainB.name, JSON.stringify(plainB.name));
+    const eRate = await call('PATCH', `/api/savings/${e1.id}`, { interestRate: 4.5 });
+    check('before activation its rate is edited, within the product\'s range', eRate.status === 200 && Number(eRate.body.interest_rate) === 4.5, eRate.text);
+    const eHigh = await call('PATCH', `/api/savings/${e1.id}`, { interestRate: 6 });
+    check('and not beyond it', eHigh.status === 400 && /INTEREST_RATE_ABOVE_THE_PRODUCT_MAXIMUM/.test(eHigh.reason), eHigh.text);
+    const eOdPending = await call('PUT', `/api/savings/${e1.id}/overdraft`, { limit: 0 });
+    check('the overdraft of a pending account is part of its terms', eOdPending.status === 200, eOdPending.text);
+    await state(e1.id, 'APPROVE');
+    await put(e1.id, 500);
+    const eAfter = await call('PATCH', `/api/savings/${e1.id}`, { interestRate: 2 });
+    check('after activation the terms are not edited', eAfter.status === 409 && /TERMS_ARE_EDITED_BEFORE_ACTIVATION/.test(eAfter.reason), eAfter.text);
+    const eName = await call('PATCH', `/api/savings/${e1.id}`, { name: 'Holiday fund', notes: 'renamed' });
+    check('the name and notes are edited at any time', eName.status === 200 && eName.body.name === 'Holiday fund' && eName.body.notes === 'renamed', eName.text);
+    const eClear = await call('PATCH', `/api/savings/${e1.id}`, { name: '' });
+    check('a blank name falls back to the product\'s', eClear.status === 200 && (await bal(e1.id)).name === 'PEN2', eClear.text);
+    const eNothing = await call('PATCH', `/api/savings/${e1.id}`, { colour: 'red' });
+    check('a patch with nothing editable is refused with the list', eNothing.status === 400 && /NO_UPDATABLE_FIELDS/.test(eNothing.reason), eNothing.text);
+    const odAcc = await open('CUR1');
+    await state(odAcc.id, 'LOCK');
+    const odLocked = await call('PUT', `/api/savings/${odAcc.id}/overdraft`, { limit: 1000 });
+    check('overdraft terms are adjusted on active accounts only (the reference platform)', odLocked.status === 409 && /OVERDRAFT_TERMS_ARE_ADJUSTED_ON_ACTIVE_ACCOUNTS/.test(odLocked.reason), odLocked.text);
+
+    // ------------------------------------------------------------------------
     section('permissions');
     const codes = ['DELETE_SAVINGS_ACCOUNT', 'APPROVE_SAVINGS', 'LOCK_SAVINGS_ACCOUNT', 'UNLOCK_SAVINGS_ACCOUNT', 'REOPEN_SAVINGS_ACCOUNT', 'REVERSE_SAVINGS_ACCOUNT_WRITE_OFF'];
     check('the reference platform\'s deposit account permissions are in the catalogue', codes.every((x) => PERMS.CODES.has(x)));

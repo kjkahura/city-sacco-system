@@ -182,6 +182,7 @@ async function summary(c, accountId) {
       minOpeningBalance: a.min_opening_balance === null ? null : Number(a.min_opening_balance),
     } : null,
     lastActivityOn: a.last_activity_on ? S.ymd(a.last_activity_on) : null,
+    name: a.name || a.product_name, ownName: a.name || null,
     accountState: apiState(a), closedAs: a.closed_as || null,
     approvedOn: a.approved_on ? S.ymd(a.approved_on) : null, activatedOn: a.activated_on ? S.ymd(a.activated_on) : null,
     lockedOn: a.locked_on ? S.ymd(a.locked_on) : null, stateBeforeLock: a.state_before_lock || null,
@@ -995,8 +996,20 @@ async function changeInterestRate(c, accountId, { interestRate, valueDate = null
   return { accountId: a.id, interestRate: rate, previousRate: old, valueDate: from, accruedChange: round2(delta) };
 }
 
-/** The account's own limits (the reference platform's maximum deposit balance) and notes. */
-async function updateAccount(c, accountId, patch = {}, { createdBy } = {}) {
+// The account's terms, which the reference platform lets be edited only before activation.
+const TERM_FIELDS = { interestRate: 'interest_rate', interestSpread: 'interest_spread', overdraftRate: 'overdraft_rate',
+  overdraftSpread: 'overdraft_spread', termLength: 'term_length' };
+
+/**
+ * Edit an account (the reference platform's Editing Accounts). The name, notes and custom
+ * field values change at any time, and the maximum balance (the reference platform's
+ * maximum deposit balance) too. The terms (the account's interest rate or
+ * spread, its overdraft rate or spread, and the term of a fixed deposit or
+ * savings plan) change only before activation, within the product's
+ * ranges; after it the rate changes through :changeInterestRate and the
+ * overdraft through PUT /overdraft.
+ */
+async function updateAccount(c, accountId, patch = {}, { createdBy, user = null } = {}) {
   const a = await lock(c, accountId);
   const sets = {};
   if (patch.maxBalance !== undefined) {
@@ -1005,12 +1018,33 @@ async function updateAccount(c, accountId, patch = {}, { createdBy } = {}) {
     sets.max_balance = v;
   }
   if (patch.notes !== undefined) sets.notes = patch.notes || null;
+  if (patch.name !== undefined) {
+    const n = patch.name === null ? null : String(patch.name).trim();
+    if (n !== null && n.length > 255) throw err('NAME_IS_AT_MOST_255_CHARACTERS', 400);
+    sets.name = n || null;
+  }
+  const terms = Object.keys(TERM_FIELDS).filter((k) => patch[k] !== undefined);
+  if (terms.length) {
+    if (!['PENDING_APPROVAL', 'APPROVED'].includes(a.status)) {
+      throw err(`TERMS_ARE_EDITED_BEFORE_ACTIVATION: ${terms.join(', ')} on a ${a.status} account; change the rate with :changeInterestRate and the overdraft with PUT /overdraft`, 409);
+    }
+    const own = accountTerms(a, Object.fromEntries(terms.map((k) => [k, patch[k] === '' ? null : patch[k]])));
+    for (const k of terms) sets[TERM_FIELDS[k]] = patch[k] === null || patch[k] === '' ? null : own[k];
+  }
+  const hasFields = patch.customFields !== undefined && patch.customFields !== null;
   const keys = Object.keys(sets);
-  if (!keys.length) throw err('NO_UPDATABLE_FIELDS: maxBalance, notes', 400);
-  const { rows: [r] } = await c.query(`UPDATE savings_accounts SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')} WHERE id = $1 RETURNING *`,
-    [a.id, ...keys.map((k) => sets[k])]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'SAVINGS_ACCOUNT_EDITED','savings_account',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', a.id, JSON.stringify(Object.fromEntries(keys.map((k) => [k, a[k]]))), JSON.stringify(sets)]);
+  if (!keys.length && !hasFields) throw err(`NO_UPDATABLE_FIELDS: name, notes, maxBalance, customFields, and before activation ${Object.keys(TERM_FIELDS).join(', ')}`, 400);
+  let r = a;
+  if (keys.length) {
+    r = (await c.query(`UPDATE savings_accounts SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`,
+      [a.id, ...keys.map((k) => sets[k])])).rows[0];
+    await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'SAVINGS_ACCOUNT_EDITED','savings_account',$2,$3,$4)`,
+      [createdBy || 'SYSTEM', a.id, JSON.stringify(Object.fromEntries(keys.map((k) => [k, a[k] ?? null]))), JSON.stringify(sets)]);
+  }
+  if (hasFields) {
+    await customFields.setValues(c, 'SAVINGS_ACCOUNT', a.id, patch.customFields, { user, createdBy });
+    r = (await c.query('SELECT * FROM savings_accounts WHERE id = $1', [a.id])).rows[0];
+  }
   return r;
 }
 
@@ -1020,6 +1054,11 @@ async function updateAccount(c, accountId, patch = {}, { createdBy } = {}) {
 
 async function setOverdraftLimit(c, accountId, { limit, expiryDate, interestRate, interestSpread, createdBy } = {}) {
   const a = await lock(c, accountId);
+  // The reference platform adjusts overdraft terms on active accounts (and one in arrears is
+  // active); before activation they are part of the account's terms.
+  if (!['ACTIVE', 'IN_ARREARS', 'PENDING_APPROVAL', 'APPROVED'].includes(a.status)) {
+    throw err(`OVERDRAFT_TERMS_ARE_ADJUSTED_ON_ACTIVE_ACCOUNTS: the account is ${a.status}`, 409);
+  }
   const lim = limit === undefined ? round2(a.overdraft_limit) : round2(limit);
   if (!(lim >= 0)) throw err('INVALID_OVERDRAFT_LIMIT', 400);
   if (lim > 0 && !a.allow_overdraft) throw err('PRODUCT_DOES_NOT_ALLOW_OVERDRAFTS', 409);
@@ -1185,7 +1224,8 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
 // --------------------------------------------------------------------------
 
 async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = undefined, overdraftLimit = 0, openedOn = null, customFields: cf = {}, user = null,
-  interestRate = undefined, interestSpread = undefined, overdraftRate = undefined, overdraftSpread = undefined, maxBalance = undefined, termLength = undefined }) {
+  interestRate = undefined, interestSpread = undefined, overdraftRate = undefined, overdraftSpread = undefined, maxBalance = undefined, termLength = undefined,
+  name = null }) {
   const { rows: [p] } = await c.query('SELECT * FROM savings_products WHERE id = $1', [productId]);
   if (!p) throw err('UNKNOWN_DEPOSIT_PRODUCT', 404);
   if (p.is_active === false) throw err('DEPOSIT_PRODUCT_INACTIVE', 409);
@@ -1213,12 +1253,13 @@ async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = un
   const state = p.initial_state || 'ACTIVE';
   const { rows } = await c.query(
     `INSERT INTO savings_accounts (account_no, member_id, product_id, status, branch_id, overdraft_limit, opened_on, period_started_on, custom_fields,
-       interest_rate, interest_spread, overdraft_rate, overdraft_spread, max_balance, term_length, last_activity_on, approved_on)
+       interest_rate, interest_spread, overdraft_rate, overdraft_spread, max_balance, term_length, last_activity_on, approved_on, name)
      VALUES ($1,$2,$3,$14,$4,$5,COALESCE($6::date, current_date),COALESCE($6::date, current_date),$7,$8,$9,$10,$11,$12,$13,COALESCE($6::date, current_date),
-             CASE WHEN $14 = 'APPROVED' THEN COALESCE($6::date, current_date) END)
+             CASE WHEN $14 = 'APPROVED' THEN COALESCE($6::date, current_date) END, $15)
      RETURNING *`,
     [no, memberId, productId, branch, lim, openedOn, JSON.stringify(values),
-      own.interestRate, own.interestSpread, own.overdraftRate, own.overdraftSpread, own.maxBalance, own.termLength, state]
+      own.interestRate, own.interestSpread, own.overdraftRate, own.overdraftSpread, own.maxBalance, own.termLength, state,
+      name === null || name === undefined || String(name).trim() === '' ? null : String(name).trim().slice(0, 255)]
   );
   return rows[0];
 }
