@@ -1,6 +1,6 @@
 # Audit: Auditing against the reference platform (the audit trail and tracking activities)
 
-Audited on 29 September 2026, at commit 791ca93. John accepted the defaults below with "build it"; `build-log-auditing.md` records the build.
+Audited on 29 September 2026, at commit 6bd401d. John accepted the defaults below with "build it"; `build-log-auditing.md` records the build.
 
 ## Reference pages read
 

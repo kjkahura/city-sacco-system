@@ -1,6 +1,6 @@
 # Build log: Deposits > Deposit Products
 
-Built on 29 September 2026, following the audit in `audit-deposit-products.md`. John asked for the audit and then for everything in scope to be built, so the audit's defaults were taken. Committed as 08b1ce6 on main, on the device, not pushed. John pushes with `git push origin main`.
+Built on 29 September 2026, following the audit in `audit-deposit-products.md`. John asked for the audit and then for everything in scope to be built, so the audit's defaults were taken. Committed as 485b3a0 on main, on the device, not pushed. John pushes with `git push origin main`.
 
 ## Decisions (the audit's defaults)
 

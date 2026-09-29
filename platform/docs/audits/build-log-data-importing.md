@@ -1,4 +1,4 @@
-# Data importing build (commit 431cc9f, 27 Sep 2026)
+# Data importing build (commit e164d90, 27 Sep 2026)
 
 Section audited and built: the reference platform Data and Reporting > Data Importing (overview, Excel import, Excel Migration Template, import via API, database clone).
 

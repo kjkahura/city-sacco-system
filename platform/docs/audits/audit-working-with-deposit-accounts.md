@@ -1,6 +1,6 @@
 # Audit: Deposits > Working with Deposit Accounts against the reference platform
 
-Audited on 29 September 2026 and committed in 6bb1bb1. John said "build it", so the defaults below were taken; see `build-log-working-with-deposit-accounts.md`.
+Audited on 29 September 2026 and committed in 35e048e. John said "build it", so the defaults below were taken; see `build-log-working-with-deposit-accounts.md`.
 
 ## Reference pages read
 
@@ -24,8 +24,8 @@ The day-to-day use of a deposit account: opening it, what its balances mean, mon
 ## Already built
 
 - **Creating an account:** `POST /api/savings`, with the product, branch, the account's own name, rates, overdraft limit, maximum balance, term and custom fields.
-- **Life cycle and states:** built in 50a462b.
-- **Maximum balance:** built in 08b1ce6.
+- **Life cycle and states:** built in 5be771e.
+- **Maximum balance:** built in 485b3a0.
 - **Deposits, withdrawals and transfers:** transfers go between deposit accounts and to loans, and deposits and withdrawals carry custom fields.
 - **Maturity:** withdrawals during a term need MAKE_EARLY_WITHDRAWALS.
 - **Monthly, manual and arbitrary fees:** built, with fee reversal.
@@ -108,7 +108,7 @@ The reference platform shows seven balances:
 - **The reference platform:** with overdrafts enabled, a fee may be applied beyond the balance and the account goes In Arrears. Fees beyond what is available become "Fees Due".
 - **Platform:**
   - a fee may use the authorised overdraft, and beyond it only under a technical overdraft;
-  - the account stays ACTIVE, which was the default taken in 50a462b;
+  - the account stays ACTIVE, which was the default taken in 5be771e;
   - under cash accounting, fees on the overdrawn part are already kept as `od_fees_due`.
 
 ### 9. Technical overdraft
@@ -155,7 +155,7 @@ The reference platform shows seven balances:
 3. **How far back:** only to the day after the last interest application, so applied interest is never reposted? The reference platform reverses and reposts applied interest too. [Yes: after the last application]
 4. **Future value dates:** refuse them? No platform flow uses one; postdated loan payments have their own route. [Refuse]
 5. **Inter-client transfers:** give MAKE_INTER_CLIENTS_TRANSFERS to every role and user holding MAKE_TRANSFER? [Yes]
-6. **Fees beyond the balance:** keep the account ACTIVE, as decided in 50a462b, rather than putting it In Arrears as the reference platform does? [Keep ACTIVE]
+6. **Fees beyond the balance:** keep the account ACTIVE, as decided in 5be771e, rather than putting it In Arrears as the reference platform does? [Keep ACTIVE]
 7. **Interest precision:** keep six decimals rather than the reference platform's ten? [Keep six]
 8. **Withholding tax per account** (`:changeWithholdingTax` and its history): build it here? [Yes, with the product's source as the default]
 9. **Blocks on a closing member:** refuse closing an account or exiting a member while a block is pending? [Yes]

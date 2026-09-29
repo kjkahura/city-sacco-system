@@ -1,6 +1,6 @@
 # Audit: Deposits > Deposit Accounts against the reference platform, with the items left from earlier sections
 
-Audited on 29 September 2026, at commit 08b1ce6. John asked for everything not yet built to be built where it does not conflict with what is deployed, so this audit is short and its defaults were taken.
+Audited on 29 September 2026, at commit 485b3a0. John asked for everything not yet built to be built where it does not conflict with what is deployed, so this audit is short and its defaults were taken.
 
 ## Reference pages read
 

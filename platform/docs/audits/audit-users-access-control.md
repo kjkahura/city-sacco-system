@@ -1,6 +1,6 @@
 # Audit: Users and Access Control against the reference platform
 
-Audited on 28 September 2026 against commit b620ab6. Reference pages read: Understanding Users, Roles and Permissions; Roles; Permissions; Access Preferences; Creating a User; Deactivating, Reactivating and Deleting User Accounts; Profile and Password Management; API Consumers; Audit Trail; Federated Authentication; Getting Support (support and delivery users); Teller Users.
+Audited on 28 September 2026 against commit 065b1a7. Reference pages read: Understanding Users, Roles and Permissions; Roles; Permissions; Access Preferences; Creating a User; Deactivating, Reactivating and Deleting User Accounts; Profile and Password Management; API Consumers; Audit Trail; Federated Authentication; Getting Support (support and delivery users); Teller Users.
 
 ## Defects
 

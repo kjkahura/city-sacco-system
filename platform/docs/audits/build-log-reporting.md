@@ -1,6 +1,6 @@
 # Build log: Data and Reporting > Reporting
 
-Commit 0565bbe on main ("Reporting, after the reference platform"), on the device, not pushed. John pushes with `git push origin main`.
+Commit 31f6924 on main ("Reporting, after the reference platform"), on the device, not pushed. John pushes with `git push origin main`.
 
 ## Defects found and fixed
 

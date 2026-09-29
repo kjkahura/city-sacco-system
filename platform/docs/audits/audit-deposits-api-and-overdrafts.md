@@ -1,6 +1,6 @@
 # Audit: overdraft terms and the deposits API against the reference platform
 
-Audited on 29 September 2026, at commit 7882265. John asked whether overdraft terms and APIs on deposits were built, then said "Yes" to auditing and building the gaps found, so the defaults below were taken.
+Audited on 29 September 2026, at commit 9c72928. John asked whether overdraft terms and APIs on deposits were built, then said "Yes" to auditing and building the gaps found, so the defaults below were taken.
 
 ## Reference pages read
 

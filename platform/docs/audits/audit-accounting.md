@@ -1,6 +1,6 @@
 # Audit: Accounting against the reference platform (setup docs and APIs)
 
-Audited on 29 September 2026, at commit 931cacc. John accepted the defaults below with "build it"; `build-log-accounting.md` records the build.
+Audited on 29 September 2026, at commit 0541bf4. John accepted the defaults below with "build it"; `build-log-accounting.md` records the build.
 
 ## Reference pages read
 

@@ -1,6 +1,6 @@
 # Audit: Clients and Groups against the reference platform
 
-Audited on 28 September 2026 against commit 0f8b7da. Reference pages read:
+Audited on 28 September 2026 against commit b9ab09f. Reference pages read:
 
 - Clients and Groups Overview
 - Client Types

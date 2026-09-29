@@ -6,19 +6,19 @@ The same files are kept in the claude.ai project "CoreBanking Service" under `cl
 
 | Order | Section | Commit | Files |
 |---|---|---|---|
-| 1 | Data and Reporting > Data Management | 3941eae | [build log](build-log-data-management.md) |
-| 2 | Data and Reporting > Data Importing | 431cc9f | [build log](build-log-data-importing.md) |
-| 3 | Data and Reporting > Reporting | 0565bbe | [build log](build-log-reporting.md) |
-| 4 | Report templates, menu items, tasks, tills and permissions | b620ab6 | [build log](build-log-workspace.md) |
-| 5 | Users and Access Control | a88a0e9 | [audit](audit-users-access-control.md), [build log](build-log-users-access-control.md) |
-| 6 | Clients and Groups | 5f2c7f4 | [audit](audit-clients-and-groups.md), [build log](build-log-clients-and-groups.md) |
-| 7 | Open items from earlier sections, and the loan-engine audit | f6e92de | [audit](audit-loan-engine-open-items.md), [build log](build-log-open-items.md) |
-| 8 | Lines of credit and solidarity group loans (the loan-engine audit's build) | 7b74ec4 | [build log](build-log-credit-arrangements-and-solidarity-loans.md) |
-| 9 | Deposits > Deposit Products | 08b1ce6 | [audit](audit-deposit-products.md), [build log](build-log-deposit-products.md) |
-| 10 | Deposits > Deposit Accounts, offset loans, and the credit arrangement search and schedule | 50a462b, with the Managing Deposit Accounts follow-up in 6bb1bb1 | [audit](audit-deposit-accounts.md), [build log](build-log-deposit-accounts.md) |
-| 11 | Deposits > Working with Deposit Accounts | audit 6bb1bb1, build 7882265 | [audit](audit-working-with-deposit-accounts.md), [build log](build-log-working-with-deposit-accounts.md) |
-| 12 | Deposits > overdraft terms and the reference platform's deposits API | 931cacc | [audit](audit-deposits-api-and-overdrafts.md), [build log](build-log-deposits-api-and-overdrafts.md) |
-| 13 | Accounting (setup docs and APIs) | audit 7563c04, build 791ca93 | [audit](audit-accounting.md), [build log](build-log-accounting.md) |
-| 14 | Auditing (the audit trail and tracking activities) | audit 4ac1028, build the commit that adds the build log | [audit](audit-auditing.md), [build log](build-log-auditing.md) |
+| 1 | Data and Reporting > Data Management | b737bc5 | [build log](build-log-data-management.md) |
+| 2 | Data and Reporting > Data Importing | e164d90 | [build log](build-log-data-importing.md) |
+| 3 | Data and Reporting > Reporting | 31f6924 | [build log](build-log-reporting.md) |
+| 4 | Report templates, menu items, tasks, tills and permissions | 065b1a7 | [build log](build-log-workspace.md) |
+| 5 | Users and Access Control | 6cea8e9 | [audit](audit-users-access-control.md), [build log](build-log-users-access-control.md) |
+| 6 | Clients and Groups | 58111a2 | [audit](audit-clients-and-groups.md), [build log](build-log-clients-and-groups.md) |
+| 7 | Open items from earlier sections, and the loan-engine audit | 4468536 | [audit](audit-loan-engine-open-items.md), [build log](build-log-open-items.md) |
+| 8 | Lines of credit and solidarity group loans (the loan-engine audit's build) | e9591ba | [build log](build-log-credit-arrangements-and-solidarity-loans.md) |
+| 9 | Deposits > Deposit Products | 485b3a0 | [audit](audit-deposit-products.md), [build log](build-log-deposit-products.md) |
+| 10 | Deposits > Deposit Accounts, offset loans, and the credit arrangement search and schedule | 5be771e, with the Managing Deposit Accounts follow-up in 35e048e | [audit](audit-deposit-accounts.md), [build log](build-log-deposit-accounts.md) |
+| 11 | Deposits > Working with Deposit Accounts | audit 35e048e, build 9c72928 | [audit](audit-working-with-deposit-accounts.md), [build log](build-log-working-with-deposit-accounts.md) |
+| 12 | Deposits > overdraft terms and the reference platform's deposits API | 0541bf4 | [audit](audit-deposits-api-and-overdrafts.md), [build log](build-log-deposits-api-and-overdrafts.md) |
+| 13 | Accounting (setup docs and APIs) | audit 4c9962d, build 6bd401d | [audit](audit-accounting.md), [build log](build-log-accounting.md) |
+| 14 | Auditing (the audit trail and tracking activities) | audit d8a0050, build 5da21e7 | [audit](audit-auditing.md), [build log](build-log-auditing.md) |
 
 Before section 5, the audit findings were recorded inside the build logs, with no separate audit file.

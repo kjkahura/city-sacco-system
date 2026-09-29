@@ -1,6 +1,6 @@
 # Build log: Deposits > Working with Deposit Accounts
 
-Built on 29 September 2026, following `audit-working-with-deposit-accounts.md` (committed in 6bb1bb1). John said "build it", so the audit's defaults were taken. The commit is on main, on the device, not pushed. John pushes with `git push origin main`.
+Built on 29 September 2026, following `audit-working-with-deposit-accounts.md` (committed in 35e048e). John said "build it", so the audit's defaults were taken. The commit is on main, on the device, not pushed. John pushes with `git push origin main`.
 
 ## Decisions (the audit's defaults)
 
@@ -9,7 +9,7 @@ Built on 29 September 2026, following `audit-working-with-deposit-accounts.md` (
 3. **How far back:** to the day after the last interest application, so applied interest is never reposted.
 4. **Future value dates:** refused for staff.
 5. **Inter-client transfers:** MAKE_INTER_CLIENTS_TRANSFERS is given to every role and user holding MAKE_TRANSFER.
-6. **Fees beyond the balance:** the account stays ACTIVE, as decided in 50a462b.
+6. **Fees beyond the balance:** the account stays ACTIVE, as decided in 5be771e.
 7. **Interest precision:** six decimals, as now.
 8. **Withholding tax per account:** built, with the product's source as the default.
 9. **Pending blocks and holds** keep an account open: it is not closed, written off, withdrawn, rejected or deleted while one is pending.
@@ -131,4 +131,4 @@ The top-level `available` now takes blocks and holds off too.
 
 - **Card authorization holds and card transactions:** there is no card processor to connect to.
 - **Ten-decimal interest storage:** it would change the cents on running accounts.
-- **Putting an account In Arrears when a fee takes it beyond its limit:** it stays ACTIVE, as decided in 50a462b.
+- **Putting an account In Arrears when a fee takes it beyond its limit:** it stays ACTIVE, as decided in 5be771e.

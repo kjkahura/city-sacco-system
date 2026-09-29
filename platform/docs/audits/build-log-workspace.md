@@ -1,6 +1,6 @@
 # Build log: report templates, menus, tasks, tills and permissions
 
-Follows the Reporting build (commit 0565bbe). Commit b620ab6 on main ("Report templates, menu items, tasks, tills and permissions, after the reference platform"), on the device, not pushed. John pushes with `git push origin main`.
+Follows the Reporting build (commit 31f6924). Commit 065b1a7 on main ("Report templates, menu items, tasks, tills and permissions, after the reference platform"), on the device, not pushed. John pushes with `git push origin main`.
 
 ## Decisions
 

@@ -1,6 +1,6 @@
 # Build log: Users and Access Control
 
-Follows the audit in `claude/audit-users-access-control.md`. Commit a88a0e9 on main, on the device, not pushed. John pushes with `git push origin main`.
+Follows the audit in `claude/audit-users-access-control.md`. Commit 6cea8e9 on main, on the device, not pushed. John pushes with `git push origin main`.
 
 ## Decisions (the audit's defaults, taken with "proceed")
 

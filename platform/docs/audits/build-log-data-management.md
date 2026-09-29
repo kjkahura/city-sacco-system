@@ -1,4 +1,4 @@
-# Data management build (commit 3941eae, 27 Sep 2026)
+# Data management build (commit b737bc5, 27 Sep 2026)
 
 Section audited and built: the reference platform Data and Reporting > Data Management, plus the Excel data import, tenant user management, a Singer tap for Stitch and the reference platform's null handling.
 

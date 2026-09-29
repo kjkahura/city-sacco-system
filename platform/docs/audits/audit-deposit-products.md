@@ -1,6 +1,6 @@
 # Audit: Deposits > Deposit Products against the reference platform
 
-Audited on 29 September 2026, at commit 7b74ec4.
+Audited on 29 September 2026, at commit e9591ba.
 
 ## Reference pages read
 
@@ -34,7 +34,7 @@ The deposit account life cycle (approval, the initial state, locking, reopening,
   - the day count: ACTUAL_365, ACTUAL_360 or THIRTY_360;
   - how often it is applied: MONTHLY, QUARTERLY, SEMI_ANNUAL or ANNUAL, on the calendar period's last day;
   - whether it is paid into the account, a minimum balance to earn it, negative rates, and withholding tax (a percentage or a rate source).
-- **Overdrafts:** allowed, a maximum limit and a rate; the account has its own limit, rate and (since 7b74ec4) expiry date. Technical overdrafts can be allowed.
+- **Overdrafts:** allowed, a maximum limit and a rate; the account has its own limit, rate and (since e9591ba) expiry date. Technical overdrafts can be allowed.
 - **Fees:** MANUAL and MONTHLY (charged on the last day of the month), flat amounts. Any amount can also be charged by hand.
 - **Accounting:** NONE, CASH or ACCRUAL, with DAILY or MONTHLY accrual, per account or aggregated, and the reference platform's twelve GL rules.
 - **Other:** branch availability, individuals and groups, custom fields, the credit arrangement requirement, and the funding account flag.
@@ -67,7 +67,7 @@ There is also a product category (Stored Value, Daily Banking, Personal Deposits
 
 **The reference platform:** each product numbers its accounts, either from a random pattern or from an incremental number (digits only, starting where the product says).
 
-**Platform:** one series for every product (SA000001, from the counter built in f6e92de).
+**Platform:** one series for every product (SA000001, from the counter built in 4468536).
 
 **Gap.** A product that sets nothing keeps the shared series.
 
