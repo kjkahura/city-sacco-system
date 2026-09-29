@@ -116,7 +116,7 @@ async function tillAccount(c, lines, channelId) {
 async function post(c, {
   debits = [], credits = [], bookingDate = null, narration = '',
   sourceType = null, sourceId = null, channelId = null,
-  currencyCode = 'KES', createdBy = 'SYSTEM', reversalOf = null, branchId = null,
+  currencyCode = 'KES', createdBy = 'SYSTEM', reversalOf = null, branchId = null, transactionId = null,
 }) {
   const dr = round2(debits.reduce((s, d) => s + Number(d.amount || 0), 0));
   const cr = round2(credits.reduce((s, x) => s + Number(x.amount || 0), 0));
@@ -140,10 +140,10 @@ async function post(c, {
 
   const { rows: [entry] } = await c.query(
     `INSERT INTO journal_entries
-       (booking_date, currency_code, narration, source_type, source_id, channel_id, created_by, reversal_of, branch_id)
-     VALUES (COALESCE($1::date, current_date), $2, $3, $4, $5, $6, $7, $8, $9)
+       (booking_date, currency_code, narration, source_type, source_id, channel_id, created_by, reversal_of, branch_id, transaction_id)
+     VALUES (COALESCE($1::date, current_date), $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING id, booking_date`,
-    [bookingDate, currencyCode, narration, sourceType, sourceId, channelId, createdBy, reversalOf, branchId || null]
+    [bookingDate, currencyCode, narration, sourceType, sourceId, channelId, createdBy, reversalOf, branchId || null, transactionId]
   );
 
   let n = 0;
@@ -163,7 +163,7 @@ async function post(c, {
  * lines are never touched, because a trigger forbids it and because an
  * auditor needs to see that the correction happened, not a tidy book.
  */
-async function reverse(c, entryId, narration = 'Reversal', createdBy = 'SYSTEM', { bookingDate } = {}) {
+async function reverse(c, entryId, narration = 'Reversal', createdBy = 'SYSTEM', { bookingDate, transactionId = null } = {}) {
   const { rows: original } = await c.query(
     'SELECT gl_code, direction, amount, member_id, branch_id FROM journal_lines WHERE entry_id = $1 ORDER BY line_no',
     [entryId]
@@ -201,6 +201,7 @@ async function reverse(c, entryId, narration = 'Reversal', createdBy = 'SYSTEM',
     narration, createdBy, reversalOf: entryId,
     sourceType: head?.source_type || null, sourceId: head?.source_id || null,
     bookingDate: bookingDate || head?.booking_date || null,
+    transactionId,
   });
 }
 

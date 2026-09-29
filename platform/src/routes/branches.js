@@ -32,6 +32,7 @@ accounting.get('/inter-branch-rules', requireAuth(), run((c) => B.rules(c)));
 accounting.put('/inter-branch-rules', requireAuth(), run((c, req) => B.setRules(c, req.body?.rules || req.body, { createdBy: req.auth.email }), { write: true }));
 accounting.get('/closures', requireAuth(), run((c, req) => B.closures(c, { includeDeleted: req.query.includeDeleted === 'true' })));
 accounting.post('/closures', requireAuth(), run((c, req) => B.close(c, { ...req.body, createdBy: req.auth.email }), { write: true, status: 201 }));
+accounting.patch('/closures/:id', requireAuth(), run((c, req) => B.updateClosure(c, req.params.id, { ...req.body, createdBy: req.auth.email }), { write: true }));
 accounting.delete('/closures/:id', requireAuth(), run((c, req) => B.reopen(c, req.params.id, { reason: req.body?.reason, createdBy: req.auth.email }), { write: true }));
 accounting.get('/settings', requireAuth(), run((c) => B.settings(c)));
 accounting.put('/settings', requireAuth(), run((c, req) => B.updateSettings(c, { ...req.body, createdBy: req.auth.email }), { write: true }));

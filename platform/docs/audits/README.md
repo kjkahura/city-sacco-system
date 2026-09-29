@@ -18,6 +18,6 @@ The same files are kept in the claude.ai project "CoreBanking Service" under `cl
 | 10 | Deposits > Deposit Accounts, offset loans, and the credit arrangement search and schedule | 50a462b, with the Managing Deposit Accounts follow-up in 6bb1bb1 | [audit](audit-deposit-accounts.md), [build log](build-log-deposit-accounts.md) |
 | 11 | Deposits > Working with Deposit Accounts | audit 6bb1bb1, build 7882265 | [audit](audit-working-with-deposit-accounts.md), [build log](build-log-working-with-deposit-accounts.md) |
 | 12 | Deposits > overdraft terms and the reference platform's deposits API | 931cacc | [audit](audit-deposits-api-and-overdrafts.md), [build log](build-log-deposits-api-and-overdrafts.md) |
-| 13 | Accounting (setup docs and APIs), audit only, awaiting decisions | the commit that adds this file | [audit](audit-accounting.md) |
+| 13 | Accounting (setup docs and APIs) | audit 7563c04, build the commit that adds the build log | [audit](audit-accounting.md), [build log](build-log-accounting.md) |
 
 Before section 5, the audit findings were recorded inside the build logs, with no separate audit file.

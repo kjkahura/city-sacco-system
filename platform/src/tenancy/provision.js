@@ -162,6 +162,12 @@ async function provisionTenant({
         `INSERT INTO share_products (id, name, unit_price, min_units, gl_equity)
          VALUES ('SHR01','Ordinary Shares',100,10,'300-100') ON CONFLICT DO NOTHING`
       );
+      // The control accounts the seeded products post to take no manual
+      // journal entries, as migration 041 sets for existing tenants.
+      await c.query(
+        `UPDATE gl_accounts SET allow_manual_entries = false
+          WHERE code IN (SELECT gl_portfolio FROM loan_products UNION SELECT gl_liability FROM savings_products
+                         UNION SELECT gl_od_portfolio FROM savings_products WHERE gl_od_portfolio IS NOT NULL)`);
     });
 
     const hash = await hashPassword(adminPassword);

@@ -174,6 +174,12 @@ tenantApi.use('/savings', savings);
 tenantApi.use('/loans', require('./routes/loans'));
 tenantApi.use('/loan-products', require('./routes/loanProducts'));
 tenantApi.use('/index-rates', require('./routes/indexRates'));
+// The reference platform's accounting API: GL accounts, journal entries, the accrual breakdown search.
+const GL = require('./routes/generalLedger');
+tenantApi.post('/gljournalentries\\:search', ...GL.searchJournal);
+tenantApi.post('/accounting/interestaccrual\\:search', ...GL.searchAccruals);
+tenantApi.use('/glaccounts', GL.glaccounts);
+tenantApi.use('/gljournalentries', GL.journal);
 tenantApi.use('/accounting/reports', require('./routes/reports').accountingReports);
 tenantApi.use('/accounting', savings.accounting);
 const branchRoutes = require('./routes/branches');

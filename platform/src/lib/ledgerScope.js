@@ -13,7 +13,12 @@ const { withTenantRead } = require('../db/tenantContext');
  *     balance, the accounting reports API) is run for one of the user's
  *     branches: their only one when they name none, and refused when they
  *     name another branch or entries with none (NONE);
- *   - the journal is filtered to lines of the user's branches;
+ *   - the journal is filtered to lines of the user's branches (here for
+ *     /accounting/journal; /gljournalentries and the accrual breakdown
+ *     search filter in their routes, and a manual entry posts only to the
+ *     user's branches);
+ *   - the chart of accounts reads with balances for one of their branches,
+ *     and is changed only by a user with every branch;
  *   - what can only be read for the whole organization (GL balances, the
  *     rollup check, prudential ratios and limits, returns, provisioning,
  *     financial years) is refused with ALL_BRANCH_ACCESS_REQUIRED.
@@ -28,6 +33,8 @@ const BRANCH_REPORTS = [
   ['GET', /^\/reports\/income-statement\/?$/, 'query'],
   ['GET', /^\/accounting\/trial-balance\/?$/, 'query'],
   ['POST', /^\/accounting\/reports\/?$/, 'body'],
+  // Balances on the chart of accounts, for one of the user's branches.
+  ['GET', /^\/glaccounts(\/[^/]+)?\/?$/, 'query'],
 ];
 const ORG_ONLY = [
   ['GET', /^\/accounting\/gl\/?$/], ['GET', /^\/accounting\/verify\/?$/],

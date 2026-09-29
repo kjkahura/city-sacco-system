@@ -326,6 +326,21 @@ async function reopen(c, closureId, { createdBy, reason = null } = {}) {
   return k;
 }
 
+/** Edit a closure's notes (the reference platform: its description). The date and scope stay; delete and close again to move them. */
+async function updateClosure(c, closureId, { notes, closedThrough, branchId, createdBy } = {}) {
+  if (closedThrough !== undefined || branchId !== undefined) throw err('FIELDS_NOT_EDITABLE: closedThrough, branchId; delete the closure and close again', 400);
+  if (notes === undefined) throw err('NO_UPDATABLE_FIELDS: notes', 400);
+  if (!/^[0-9a-f-]{36}$/i.test(String(closureId))) throw err('CLOSURE_NOT_FOUND', 404);
+  const { rows: [before] } = await c.query('SELECT * FROM accounting_closures WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [closureId]);
+  if (!before) throw err('CLOSURE_NOT_FOUND', 404);
+  const { rows: [k] } = await c.query(
+    'UPDATE accounting_closures SET notes = $2, updated_by = $3, updated_at = now() WHERE id = $1 RETURNING *',
+    [closureId, notes === null ? null : String(notes), createdBy || 'SYSTEM']);
+  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'ACCOUNTING_CLOSURE_EDITED','accounting_closure',$2,$3,$4)`,
+    [createdBy || 'SYSTEM', k.id, JSON.stringify({ notes: before.notes }), JSON.stringify({ notes: k.notes })]);
+  return k;
+}
+
 async function settings(c) {
   const { rows: [s] } = await c.query('SELECT * FROM accounting_settings WHERE only_row');
   return s;
@@ -462,6 +477,6 @@ async function moveAccount(c, { kind, accountId, branchId, createdBy }) {
 }
 
 module.exports = {
-  list, create, update, resolve, rules, setRules, closures, close, reopen, settings, updateSettings, autoClose, moveAccount,
+  list, create, update, resolve, rules, setRules, closures, close, reopen, updateClosure, settings, updateSettings, autoClose, moveAccount,
   detail, resolveBranchIds, assertProductAvailable, centres, findCentre, createCentre, updateCentre, centreFor,
 };

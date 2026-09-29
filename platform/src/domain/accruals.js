@@ -143,4 +143,71 @@ async function breakdown(c, entryId) {
   return rows;
 }
 
-module.exports = { record, flush, breakdown, postMode, legs, isMonthEnd };
+/**
+ * The reference platform's interest accrual breakdown search (POST
+ * /accounting/interestaccrual:search): each accrual line read as its debit
+ * and its credit, with the account, product, branch and the journal entry
+ * that carried it (parentEntryId; empty while waiting to be posted). A user
+ * limited to some branches reads the lines of their branches.
+ */
+const BREAKDOWN_SQL = `
+  SELECT x.*, g.name AS gl_name, g.type AS gl_type, b.code AS branch_code, b.name AS branch_name,
+         COALESCE(la.account_no, sa.account_no) AS account_no
+    FROM (
+      SELECT a.id, a.account_kind, a.product_id, a.branch_id, a.account_id, a.component, a.booking_date, a.amount,
+             a.post_mode, a.entry_id, a.created_at, 'DEBIT' AS entry_type, a.debit_gl AS gl_code FROM accrual_lines a
+      UNION ALL
+      SELECT a.id, a.account_kind, a.product_id, a.branch_id, a.account_id, a.component, a.booking_date, a.amount,
+             a.post_mode, a.entry_id, a.created_at, 'CREDIT', a.credit_gl FROM accrual_lines a
+    ) x
+    JOIN gl_accounts g ON g.code = x.gl_code
+    LEFT JOIN branches b ON b.id = x.branch_id
+    LEFT JOIN loan_accounts la ON x.account_kind = 'LOAN' AND la.id = x.account_id
+    LEFT JOIN savings_accounts sa ON x.account_kind = 'SAVINGS' AND sa.id = x.account_id`;
+
+const BREAKDOWN_FIELDS = {
+  entryId: { sql: "(j.id::text || '-' || left(j.entry_type, 1))", type: 'text' },
+  accrualLineId: { sql: 'j.id', type: 'number' },
+  entryType: { sql: 'j.entry_type', type: 'text' },
+  parentEntryId: { sql: 'j.entry_id::text', type: 'text' },
+  amount: { sql: 'j.amount', type: 'number' },
+  bookingDate: { sql: 'j.booking_date', type: 'date' },
+  creationDate: { sql: 'j.created_at', type: 'timestamp' },
+  glAccountId: { sql: 'j.gl_code', type: 'text' },
+  glAccountKey: { sql: 'j.gl_code', type: 'text' },
+  glAccountName: { sql: 'j.gl_name', type: 'text' },
+  glAccountType: { sql: 'j.gl_type', type: 'text' },
+  productType: { sql: "(CASE j.account_kind WHEN 'LOAN' THEN 'LOAN' ELSE 'SAVINGS' END)", type: 'text' },
+  productId: { sql: 'j.product_id', type: 'text' },
+  productKey: { sql: 'j.product_id', type: 'text' },
+  accountId: { sql: 'j.account_no', type: 'text' },
+  accountKey: { sql: 'j.account_id::text', type: 'text' },
+  branchKey: { sql: 'j.branch_id::text', type: 'text' },
+  branchId: { sql: 'j.branch_code', type: 'text' },
+  component: { sql: 'j.component', type: 'text' },
+};
+
+async function searchBreakdown(c, { body = {}, offset = 0, limit = 50, branches = null, today = null } = {}) {
+  const SEARCH = require('../lib/searchCriteria');
+  const s = SEARCH.build({ filterCriteria: body.filterCriteria || [], sortingCriteria: body.sortingCriteria }, BREAKDOWN_FIELDS,
+    { customColumn: 'NULL::jsonb', today });
+  let where = s.where;
+  if (Array.isArray(branches)) { s.params.push(branches); where = `(${where}) AND j.branch_id = ANY($${s.params.length}::uuid[])`; }
+  const { rows } = await c.query(
+    `SELECT j.*, count(*) OVER () AS total FROM (${BREAKDOWN_SQL}) j WHERE ${where}
+      ORDER BY ${s.order ? `${s.order}, ` : ''}j.booking_date DESC, j.id, j.entry_type DESC LIMIT ${Number(limit)} OFFSET ${Number(offset)}`, s.params);
+  return {
+    total: rows.length ? Number(rows[0].total) : 0,
+    items: rows.map((r) => ({
+      entryId: `${r.id}-${r.entry_type[0]}`, accrualLineId: Number(r.id), entryType: r.entry_type, amount: round2(r.amount),
+      bookingDate: r.booking_date, creationDate: r.created_at,
+      glAccountId: r.gl_code, glAccountKey: r.gl_code, glAccountName: r.gl_name, glAccountType: r.gl_type,
+      productType: r.account_kind === 'LOAN' ? 'LOAN' : 'SAVINGS', productId: r.product_id, productKey: r.product_id,
+      accountId: r.account_no ?? null, accountKey: r.account_id,
+      branchKey: r.branch_id ?? null, branchId: r.branch_code ?? null, branchName: r.branch_name ?? null,
+      parentEntryId: r.entry_id ?? null, component: r.component, postMode: r.post_mode,
+    })),
+  };
+}
+
+module.exports = { record, flush, breakdown, searchBreakdown, postMode, legs, isMonthEnd, BREAKDOWN_FIELDS };

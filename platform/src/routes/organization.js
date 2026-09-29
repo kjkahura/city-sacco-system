@@ -125,6 +125,14 @@ currencies.delete('/:code', ...W((c, req) => CUR.remove(c, req.params.code, by(r
 currencies.get('/:code/rates', ...run((c, req) => CUR.rates(c, req.params.code)));
 currencies.post('/:code/exchange-rates', ...W((c, req) => CUR.setExchangeRate(c, req.params.code, req.body || {}, by(req)), 201));
 currencies.post('/:code/accounting-rates', ...W((c, req) => CUR.setAccountingRate(c, req.params.code, req.body || {}, by(req)), 201));
+// The reference platform's spelling of the same path (POST and GET /currencies/{code}/accountingRates).
+currencies.post('/:code/accountingRates', ...W((c, req) => CUR.setAccountingRate(c, req.params.code, req.body || {}, by(req)), 201));
+currencies.get('/:code/accountingRates', ...run(async (c, req) => {
+  const r = await CUR.rates(c, req.params.code);
+  const { rows: [t] } = await c.query('SELECT code FROM currencies WHERE is_base LIMIT 1');
+  return r.accounting.map((x) => ({ encodedKey: String(x.id), rate: Number(x.rate), startDate: x.valid_from,
+    fromCurrencyCode: t ? t.code : null, toCurrencyCode: r.currency.code, createdBy: x.created_by ?? null }));
+}));
 
 // --- custom fields --------------------------------------------------------------
 

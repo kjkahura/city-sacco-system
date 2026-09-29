@@ -708,7 +708,68 @@ linked to accounting (which writes no journal) is held to the same line.
 deleted, when something has to be backdated. `PUT /api/accounting/settings`
 switches on automatic closures every N days. The year-end sweep is exempt:
 it is dated on the year's last day, which a closure has usually covered by
-the time the year is closed.
+the time the year is closed. `PATCH /api/accounting/closures/:id` edits a
+closure's notes; its date and scope stay.
+
+### The chart of accounts and journal entries (the reference platform's accounting API)
+
+**GL accounts** (`/api/glaccounts`, `src/domain/chartOfAccounts.js`). Each
+account in the reference platform's GLAccount shape: `glCode`, `name`, `type`, `usage`,
+`description`, `activated`, `allowManualJournalEntries`, `parentGlCode`,
+`currency` and `balance`.
+
+- `GET` filters by `type`, `usage` and `activated`; `GET /:code` reads one.
+  Both give balances for `from` and `to` (and a `branchId`), in each
+  account's own sign. A header's balance is the sum of the accounts under it.
+- `POST` creates one account or a list. `PUT`, `PATCH` (JSON Patch) and
+  `DELETE` need MANAGE_ACCOUNTS and a user with every branch.
+- A parent is a header of the same type, and a header takes no manual
+  entries.
+- The name, description, parent and flags change at any time. The GL code
+  changes only while nothing uses the account. The type and usage never
+  change.
+- An account something maps (a product, channel, till, rule, setting, or a
+  column default) stays active. An account is deleted only while nothing
+  uses it (`GL_ACCOUNT_IN_USE` names what does).
+
+**Journal entries** (`/api/gljournalentries`, `src/domain/journalEntries.js`).
+
+- `GET` (`from`, `to`, `branchId`, `glAccountId`, `transactionId`) and
+  `POST /api/gljournalentries:search` return one GLJournalEntry per line:
+  `entryId`, `transactionId`, `type`, `amount`, `glAccount`, `bookingDate`,
+  `creationDate`, `assignedBranchKey`, `userKey` and `reversalEntryKey`.
+  An automatic entry also shows `productType`, `productKey`, `accountKey`
+  and `accountId` from the transaction behind it.
+- `GET /:ref` returns one entry with its lines (by its id, its transaction
+  ID or a line's `entryId`).
+- A user limited to some branches reads the lines of their branches.
+
+**Manual entries** (`POST /api/gljournalentries`, LOG_JOURNAL_ENTRIES).
+
+- The body is `date`, `branchId`, `notes` (required), `transactionId`
+  (generated as `MJ-000001` when not given) and `debits` and `credits`, each
+  a list of `{ glAccount, amount, branchId }`.
+- Only active detail accounts that allow manual entries are used.
+- The date may be backdated to after the closure and inside an open
+  financial year, never in the future.
+- A line in another branch is squared through the inter-branch rules, and
+  the lines added are returned.
+- `POST /:ref:reverse` (with `notes`, optionally a `date`) reverses a manual
+  entry once. An automatic entry is refused with the transaction to reverse.
+- `/:ref/attachments` keeps up to five files on a manual entry, under the
+  loan attachment rules.
+- Migration 041 turns manual entries off on the accounts products map as
+  Portfolio Control, Savings Control and Overdraft Portfolio Control.
+
+**Also:**
+
+- `POST /api/accounting/interestaccrual:search` searches the accrual
+  breakdown. Each accrual line is shown twice, once as its debit and once as
+  its credit, with the account, product, branch and the entry that posted it.
+- `/api/currencies/:code/accountingRates` is the reference platform's spelling of
+  `accounting-rates`.
+- The console's Chart of accounts and Journal pages manage accounts, log and
+  reverse entries, and attach files.
 
 ### Changing the accounting method of a product in use
 
