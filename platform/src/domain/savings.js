@@ -63,7 +63,8 @@ const PRODUCT_COLUMNS = `
   p.accrue_interest_after_maturity, p.recommended_deposit_amount, p.max_withdrawal_amount, p.min_opening_balance,
   p.max_opening_balance, p.default_opening_balance, p.term_unit, p.term_min, p.term_max, p.term_default, p.dormancy_days,
   p.allow_arbitrary_fees, p.od_rate_terms, p.od_rate_min, p.od_rate_max, p.od_index_source_id, p.od_spread_min, p.od_spread_max,
-  p.od_spread_default, p.od_rate_tiers, p.od_day_count, p.od_calc_balance, p.initial_state, p.allow_offset`;
+  p.od_spread_default, p.od_rate_tiers, p.od_day_count, p.od_calc_balance, p.initial_state, p.allow_offset,
+  p.withholding_source_id AS product_withholding_source_id`;
 
 // The states an account is open in (it holds money, earns and is charged).
 const OPEN = ['ACTIVE', 'IN_ARREARS', 'DORMANT', 'LOCKED', 'MATURED'];
@@ -147,6 +148,9 @@ async function summary(c, accountId) {
   const locked = await lock(c, accountId);
   const a = onDay(locked, await orgToday(c));
   const pledged = await pledgedAmount(c, a.member_id);
+  const hb = await heldBack(c, a.id);
+  const overdrawn = round2(Math.max(0, -Number(a.balance)));
+  const avail = round2(Math.max(0, availableOf(a, pledged) - hb.blocked - hb.holds));
   return {
     accountId: a.id,
     accountNo: a.account_no,
@@ -162,7 +166,14 @@ async function summary(c, accountId) {
     overdraftExpired: Number(a.overdraft_limit) !== Number(locked.overdraft_limit),
     creditArrangementId: a.credit_arrangement_id || null,
     overdrawn: round2(Math.max(0, -Number(a.balance))),
-    available: round2(Math.max(0, availableOf(a, pledged))),
+    available: avail,
+    // The reference platform's balances (Deposit Account Overview Details).
+    balances: {
+      totalBalance: round2(a.balance), availableBalance: avail,
+      overdraftAvailable: round2(Math.max(0, Number(a.overdraft_limit || 0) - overdrawn)),
+      holdBalance: hb.holds, lockedBalance: pledged, blockedBalance: hb.blocked, overdraftAmountDue: overdrawn,
+      pendingCredits: hb.credits,
+    },
     interest: {
       accrued: round2(a.interest_accrued), negativeAccrued: round2(a.neg_interest_accrued),
       overdraftAccrued: round2(a.od_interest_accrued), accruedThrough: a.accrued_through ? S.ymd(a.accrued_through) : null,
@@ -174,8 +185,10 @@ async function summary(c, accountId) {
     interestRateOwn: a.interest_rate !== null, interestRateTerms: a.interest_rate_terms, interestSpread: a.interest_spread === null ? null : Number(a.interest_spread),
     overdraftRate: Number(a.overdraft_annual_rate), overdraftSpread: a.overdraft_spread === null ? null : Number(a.overdraft_spread),
     maxBalance: a.max_balance === null ? null : Number(a.max_balance),
-    maxWithdrawalAmount: a.max_withdrawal_amount === null ? null : Number(a.max_withdrawal_amount),
-    recommendedDepositAmount: a.recommended_deposit_amount === null ? null : Number(a.recommended_deposit_amount),
+    maxWithdrawalAmount: maxWithdrawal(a),
+    recommendedDepositAmount: a.own_recommended_deposit !== null && a.own_recommended_deposit !== undefined ? Number(a.own_recommended_deposit)
+      : a.recommended_deposit_amount === null ? null : Number(a.recommended_deposit_amount),
+    withholdingTaxSourceId: a.withholding_source_id || a.product_withholding_source_id || null,
     maturity: DR.hasTerm(a.product_type) ? {
       termLength: a.term_length ?? a.term_default, termUnit: a.term_unit,
       startedOn: a.maturity_started_on ? S.ymd(a.maturity_started_on) : null, maturityDate: a.maturity_date ? S.ymd(a.maturity_date) : null,
@@ -279,6 +292,12 @@ async function postWithChannel(c, a, { channelGl, amount, direction, productLegs
 // What the product lets in and out (the reference platform's Deposit Products)
 // --------------------------------------------------------------------------
 
+// The most one withdrawal may take: the account's own maximum or the
+// product's, the lower where both are set (the reference platform's account-level limit).
+const maxWithdrawal = (a) => {
+  const xs = [a.own_max_withdrawal, a.max_withdrawal_amount].filter((v) => v !== null && v !== undefined).map(Number);
+  return xs.length ? Math.min(...xs) : null;
+};
 const need = (user, code) => { if (user && !can(user, code)) throw err(`PERMISSION_REQUIRED: ${code}`, 403); };
 const inTerm = (a, day) => Boolean(a.maturity_started_on) && a.maturity_date && day < S.ymd(a.maturity_date);
 
@@ -315,9 +334,8 @@ function assertMayDebit(a, amt, { user = null, day, offsetting = false } = {}) {
   if (a.status === 'DORMANT') need(user, 'POST_TRANSACTIONS_ON_DORMANT_ACCOUNTS');
   else if (!['ACTIVE', 'IN_ARREARS', 'MATURED', 'APPROVED'].includes(a.status)) throw err(`ACCOUNT_NOT_ACTIVE: ${a.status}`, 409);
   if (offsetting) return;
-  if (a.max_withdrawal_amount !== null && a.max_withdrawal_amount !== undefined && Number(amt) > Number(a.max_withdrawal_amount)) {
-    throw err(`ABOVE_THE_MAXIMUM_WITHDRAWAL: ${a.max_withdrawal_amount} in one transaction`, 409);
-  }
+  const most = maxWithdrawal(a);
+  if (most !== null && Number(amt) > most) throw err(`ABOVE_THE_MAXIMUM_WITHDRAWAL: ${most} in one transaction`, 409);
   if (inTerm(a, day)) {
     if (!user) throw err(`WITHDRAWALS_CLOSED_UNTIL_MATURITY: ${S.ymd(a.maturity_date)}`, 409);
     need(user, 'MAKE_EARLY_WITHDRAWALS');
@@ -372,15 +390,83 @@ async function followArrears(c, id, day, { limitChanged = false, createdBy = 'SY
   return next;
 }
 
+/**
+ * The value date of a holder's movement. A staff user (`user`) may not date
+ * one in the future, and needs BACKDATE_SAVINGS_TRANSACTIONS to date one in
+ * the past, back no further than the day after the last interest
+ * application (the interest from that day is priced again). Callers inside
+ * the platform (the end of day, loan transfers, imports) date as they did.
+ */
+async function valueDay(c, a, valueDate, user) {
+  const today = await orgToday(c);
+  const day = valueDate ? S.ymd(valueDate) : today;
+  if (user) {
+    if (day > today) throw err(`VALUE_DATE_CANNOT_BE_IN_THE_FUTURE: ${day}`, 400);
+    if (day < today) {
+      need(user, 'BACKDATE_SAVINGS_TRANSACTIONS');
+      const floor = repriceFloor(a);
+      if (a.accrued_through && day <= S.ymd(a.accrued_through) && day < floor) {
+        throw err(`BACKDATED_BEFORE_THE_LAST_INTEREST_APPLICATION: the earliest value date is ${floor}`, 409);
+      }
+    }
+  }
+  return { day, today };
+}
+
+/**
+ * The reference platform refuses a backdated withdrawal that takes the account below what it
+ * may owe on a day already past. Only the days recorded are checked.
+ */
+async function assertBackdatedFloor(c, a, day, delta) {
+  if (a.allow_technical_overdraft) return;
+  const { rows: [r] } = await c.query(
+    'SELECT min(balance) AS lo, (array_agg(day::text ORDER BY balance))[1] AS lo_day FROM savings_daily_balances WHERE account_id = $1 AND day >= $2', [a.id, day]);
+  if (r.lo === null) return;
+  if (Number(r.lo) + delta < -Number(a.overdraft_limit || 0)) {
+    throw err(`BACKDATED_WITHDRAWAL_WOULD_OVERDRAW: the balance on ${r.lo_day} would be ${round2(Number(r.lo) + delta)}`, 409);
+  }
+}
+
+/** What is held back from the holder: pending blocks (less what was seized) and debit holds, and credit holds on their way. */
+async function heldBack(c, accountId) {
+  const { rows: [r] } = await c.query(
+    `SELECT COALESCE((SELECT sum(amount - seized) FROM savings_blocks WHERE account_id = $1 AND state = 'PENDING'), 0) AS blocked,
+            COALESCE((SELECT sum(amount) FROM savings_holds WHERE account_id = $1 AND state = 'PENDING' AND indicator = 'DBIT'), 0) AS holds,
+            COALESCE((SELECT sum(amount) FROM savings_holds WHERE account_id = $1 AND state = 'PENDING' AND indicator = 'CRDT'), 0) AS credits`, [accountId]);
+  return { blocked: round2(r.blocked), holds: round2(r.holds), credits: round2(r.credits) };
+}
+
+/**
+ * The hold a deposit (CRDT) or withdrawal (DBIT) settles (the reference platform: the
+ * transaction names holdExternalReferenceId, for exactly the amount held,
+ * with no value date). Settling needs UPDATE_HOLDS.
+ */
+async function holdToSettle(c, a, reference, indicator, amt, { valueDate, user }) {
+  if (!reference) return null;
+  need(user, 'UPDATE_HOLDS');
+  if (valueDate) throw err('A_VALUE_DATE_IS_NOT_TAKEN_WITH_A_HOLD', 400);
+  const { rows: [h] } = await c.query('SELECT * FROM savings_holds WHERE external_reference_id = $1 FOR UPDATE', [String(reference)]);
+  if (!h || h.account_id !== a.id) throw err(`HOLD_NOT_FOUND: ${reference}`, 404);
+  if (h.state !== 'PENDING') throw err(`HOLD_IS_${h.state}: ${reference}`, 409);
+  if (h.indicator !== indicator) throw err(`A_${h.indicator}_HOLD_IS_SETTLED_BY_A_${h.indicator === 'DBIT' ? 'WITHDRAWAL' : 'DEPOSIT'}`, 409);
+  if (round2(h.amount) !== round2(amt)) throw err(`THE_AMOUNT_MUST_MATCH_THE_HOLD: ${round2(h.amount)}`, 409);
+  return h;
+}
+
+async function settleHold(c, h, t) {
+  await c.query("UPDATE savings_holds SET state = 'SETTLED', transaction_id = $2, closed_at = now() WHERE id = $1", [h.id, t.id]);
+}
+
 // --------------------------------------------------------------------------
 // Deposits, withdrawals, transfers
 // --------------------------------------------------------------------------
 
-async function deposit(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null, user = null }) {
+async function deposit(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null, user = null, holdExternalReferenceId = null }) {
   const a = await lock(c, accountId);
   const amt = round2(amount);
   if (!(amt > 0)) throw err('INVALID_AMOUNT');
-  const day = valueDate ? S.ymd(valueDate) : await orgToday(c);
+  const hold = await holdToSettle(c, a, holdExternalReferenceId, 'CRDT', amt, { valueDate, user });
+  const { day } = await valueDay(c, a, valueDate, user);
   assertMayCredit(a, amt, { user, day });
   const ch = await channels.assertUsable(c, channelId, { side: 'SAVINGS', type: 'DEPOSIT', amount: amt, productId: a.product_id, user });
   if (!ch.gl_account_code) throw err(`CHANNEL_HAS_NO_GL_ACCOUNT: ${channelId}`);
@@ -395,16 +481,20 @@ async function deposit(c, accountId, { amount, channelId = 'cash', valueDate, na
     `UPDATE savings_accounts SET balance = balance + $1, od_fees_due = od_fees_due - $2, od_interest_due = od_interest_due - $3
      WHERE id = $4`, [amt, legs.allocation.odFees, legs.allocation.odInterest, a.id]);
   await touch(c, a, day);
-  return record(c, {
+  const repriced = await repriceFrom(c, a.id, day, amt, { createdBy });
+  const t = await record(c, {
     reference: ref('SD'), kind: 'SAVINGS_DEPOSIT', memberId: a.member_id,
     savingsAccountId: a.id, channelId, amount: amt, valueDate, branchId: a.branch_id,
-    entryId, narration, createdBy, allocation: legs.allocation,
+    entryId, narration, createdBy, allocation: { ...legs.allocation, ...(repriced ? { repricedFrom: day } : {}), ...(hold ? { hold: hold.external_reference_id } : {}) },
   });
+  if (hold) await settleHold(c, hold, t);
+  return t;
 }
-
-async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null, offsetPledge = null, user = null }) {
-  const day = valueDate ? S.ymd(valueDate) : await orgToday(c);
-  const a = onDay(await lock(c, accountId), day);
+async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null, offsetPledge = null, user = null, holdExternalReferenceId = null }) {
+  const locked = await lock(c, accountId);
+  const hold = await holdToSettle(c, locked, holdExternalReferenceId, 'DBIT', round2(amount), { valueDate, user });
+  const { day } = await valueDay(c, locked, valueDate, user);
+  const a = onDay(locked, day);
   // `offsetPledge`: a guarantor's pledge being collected (./loanClosures
   // collectSecurities). The deposits it was pledged from need not be
   // withdrawable, and that pledge does not hold them back.
@@ -415,11 +505,15 @@ async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, n
   assertMayDebit(a, amt, { user, day, offsetting });
 
   const pledged = round2(await pledgedAmount(c, a.member_id) - (offsetting ? Number(offsetPledge) : 0));
-  const available = availableOf(a, pledged);
+  // Blocked funds and debit holds are not available (the reference platform); the hold this
+  // withdrawal settles is.
+  const hb = await heldBack(c, a.id);
+  const available = round2(availableOf(a, pledged) - hb.blocked - hb.holds + (hold ? Number(hold.amount) : 0));
   if (amt > available) {
     throw err(`INSUFFICIENT_AVAILABLE_BALANCE: available ${available}, requested ${amt}` +
-      (pledged ? ` (${pledged} pledged as loan security)` : ''), 409);
+      (pledged ? ` (${pledged} pledged as loan security)` : '') + (hb.blocked ? ` (${hb.blocked} blocked)` : '') + (hb.holds ? ` (${hb.holds} on hold)` : ''), 409);
   }
+  if (user) await assertBackdatedFloor(c, a, day, -amt);
   // Into a linked overdraft: the credit arrangement's state, expiry and limit.
   await CA.onOverdraw(c, a, amt, day);
   const ch = await channels.assertUsable(c, channelId, { side: 'SAVINGS', type: 'WITHDRAWAL', amount: amt, productId: a.product_id, user });
@@ -436,31 +530,38 @@ async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, n
   // the availability maths above is ever wrong.
   await c.query('UPDATE savings_accounts SET balance = balance - $1 WHERE id = $2', [amt, a.id]);
   if (!offsetting) await touch(c, a, day);
-  return record(c, {
+  const repriced = await repriceFrom(c, a.id, day, -amt, { createdBy });
+  const t = await record(c, {
     reference: ref('SW'), kind: 'SAVINGS_WITHDRAWAL', memberId: a.member_id,
     savingsAccountId: a.id, channelId, amount: amt, valueDate, branchId: a.branch_id,
-    entryId, narration, createdBy, allocation: legs.allocation,
+    entryId, narration, createdBy, allocation: { ...legs.allocation, ...(repriced ? { repricedFrom: day } : {}), ...(hold ? { hold: hold.external_reference_id } : {}) },
   });
+  if (hold) await settleHold(c, hold, t);
+  return t;
 }
-
 async function transfer(c, fromId, { toAccountId, amount, valueDate, narration, createdBy, user = null }) {
   // Lock in a deterministic order so two opposing transfers cannot deadlock.
   const ids = [fromId, toAccountId];
   const first = ids.slice().sort()[0];
   await lock(c, first);
 
-  const day = valueDate ? S.ymd(valueDate) : await orgToday(c);
-  const from = onDay(await lock(c, fromId), day);
+  const fromLocked = await lock(c, fromId);
+  const { day } = await valueDay(c, fromLocked, valueDate, user);
+  const from = onDay(fromLocked, day);
   const to = await lock(c, toAccountId);
   if (from.id === to.id) throw err('SAME_ACCOUNT_TRANSFER');
+  // To another holder's account (the reference platform's inter-client transfer).
+  if (from.member_id !== to.member_id) need(user, 'MAKE_INTER_CLIENTS_TRANSFERS');
   const amt = round2(amount);
   if (!(amt > 0)) throw err('INVALID_AMOUNT');
   assertMayDebit(from, amt, { user, day });
   assertMayCredit(to, amt, { user, day, source: 'TRANSFER' });
 
   const pledged = await pledgedAmount(c, from.member_id);
-  const available = availableOf(from, pledged);
+  const hb = await heldBack(c, from.id);
+  const available = round2(availableOf(from, pledged) - hb.blocked - hb.holds);
   if (amt > available) throw err(`INSUFFICIENT_AVAILABLE_BALANCE: available ${available}`, 409);
+  if (user) await assertBackdatedFloor(c, from, day, -amt);
   await CA.onOverdraw(c, from, amt, day);
 
   const out = outLegs(from, amt);
@@ -483,15 +584,16 @@ async function transfer(c, fromId, { toAccountId, amount, valueDate, narration, 
      WHERE id = $4`, [amt, inn.allocation.odFees, inn.allocation.odInterest, to.id]);
   await touch(c, from, day);
   await touch(c, to, day);
+  const r1 = await repriceFrom(c, from.id, day, -amt, { createdBy });
+  const r2 = await repriceFrom(c, to.id, day, amt, { createdBy });
 
   return record(c, {
     reference: ref('ST'), kind: 'SAVINGS_TRANSFER', memberId: from.member_id,
     savingsAccountId: from.id, channelId: 'internal', amount: amt, valueDate, branchId: from.branch_id,
-    entryId, allocation: { toAccountId: to.id, toAccountNo: to.account_no, from: out.allocation, to: inn.allocation },
+    entryId, allocation: { toAccountId: to.id, toAccountNo: to.account_no, from: out.allocation, to: inn.allocation, ...(r1 || r2 ? { repricedFrom: day } : {}) },
     narration, createdBy,
   });
 }
-
 // --------------------------------------------------------------------------
 // Fees
 // --------------------------------------------------------------------------
@@ -611,31 +713,95 @@ async function indexRates(c, sourceId, from, to) {
  * Under ACCRUAL with a GL accrual method, what has accrued is booked to the
  * payable (or receivable) as it changes, through ./accruals.
  */
+/** What the accrual of an account needs for a range of days: its rules, and the index rates in force. */
+async function accrualContext(c, a, start, date) {
+  const conv = a.interest_day_count || 'ACTUAL_365';
+  return {
+    interestOn: Boolean(a.interest_paid_into_account) && !a.is_funding_account,
+    conv, odConv: a.od_day_count || conv,
+    threshold: a.min_balance_for_interest === null ? null : Number(a.min_balance_for_interest),
+    cap: a.interest_max_balance === null || a.interest_max_balance === undefined ? null : Number(a.interest_max_balance),
+    basis: a.interest_calc_balance || 'END_OF_DAY',
+    // Locked accounts earn only if the product collects interest when locked;
+    // after maturity only if it accrues after maturity (the reference platform).
+    lockedOut: a.status === 'LOCKED' && a.collect_interest_when_locked === false,
+    // A dormant account accrues no interest, credit or overdraft (the reference platform); its days are still recorded.
+    dormant: a.status === 'DORMANT',
+    maturity: a.maturity_date ? S.ymd(a.maturity_date) : null,
+    creditIndex: await indexRates(c, a.interest_rate_terms === 'INDEX' ? a.interest_index_source_id : null, start, date),
+    odIndex: await indexRates(c, a.od_rate_terms === 'INDEX' ? a.od_index_source_id : null, start, date),
+  };
+}
+
+/**
+ * One day's interest on an account: credit (or negative) interest on the
+ * day's balance by the product's basis (not MINIMUM, which prices the
+ * period), and overdraft interest on what is overdrawn.
+ */
+function dayInterest(a, x, d, bal, mv) {
+  const dayMin = mv ? Math.min(Number(mv.open_balance), Number(mv.min_balance)) : bal;
+  const dayAvg = mv ? Number(mv.sum_after) / Number(mv.movements) : bal;
+  const w = weight(addDays(d, -1), d, x.conv);
+  let pos = 0;
+  let neg = 0;
+  let od = 0;
+  const earning = x.interestOn && !x.lockedOut && !x.dormant && !(x.maturity && d > x.maturity && !a.accrue_interest_after_maturity);
+  if (earning && x.basis !== 'MINIMUM') {
+    let b = x.basis === 'MINIMUM_DAILY' ? dayMin : x.basis === 'AVERAGE_DAILY' ? dayAvg : bal;
+    if (x.basis === 'END_OF_DAY' && x.cap !== null) b = Math.min(b, x.cap);
+    if (b > 0 && (x.threshold === null || b >= x.threshold)) {
+      const r = DR.creditOn(a, b, d, { index: x.creditIndex(d) });
+      const amt = r.amount * w / DR.yearDays(x.conv, d);
+      if (amt >= 0) pos += amt; else neg += -amt;
+    }
+  }
+  const odBal = a.od_calc_balance === 'MINIMUM_DAILY' ? dayMin : bal;
+  if (odBal < 0 && !x.dormant) {
+    const r = DR.overdraftRateOn(a, -odBal, { index: x.odIndex(d) });
+    if (r > 0) od += -odBal * r / 100 * weight(addDays(d, -1), d, x.odConv) / DR.yearDays(x.odConv, d);
+  }
+  return { pos, neg, od };
+}
+
+/** Book to the ledger what has accrued and is not yet booked, under accrual accounting (./accruals). */
+async function bookAccrued(c, a, u, date, narration, createdBy) {
+  if (!(books(a) && accrues(a))) return null;
+  const interestOn = Boolean(a.interest_paid_into_account) && !a.is_funding_account;
+  const comps = [
+    ['INTEREST', 'interest_accrued', 'interest_booked', a.gl_interest_exp, a.gl_interest_payable, interestOn],
+    ['NEG_INTEREST', 'neg_interest_accrued', 'neg_interest_booked', a.gl_neg_interest_rec, a.gl_neg_interest_inc, interestOn && a.allow_negative_rate],
+    ['OD_INTEREST', 'od_interest_accrued', 'od_interest_booked', a.gl_od_interest_rec, a.gl_od_interest_inc, Boolean(a.gl_od_interest_rec)],
+  ];
+  const lines = [];
+  const sets = [];
+  for (const [component, accruedCol, bookedCol, dr, cr, on] of comps) {
+    if (!on) continue;
+    const delta = round2(round2(u[accruedCol]) - Number(u[bookedCol]));
+    if (delta === 0) continue;
+    lines.push({ component, debitGl: dr, creditGl: cr, amount: delta });
+    sets.push(`${bookedCol} = ${bookedCol} + ${delta}`);
+  }
+  if (!lines.length) return null;
+  const entryId = await accruals.record(c, {
+    kind: 'SAVINGS', product: { ...a, id: a.product_id }, accountId: a.id, memberId: a.member_id, branchId: a.branch_id,
+    date, lines, narration, createdBy,
+  });
+  await c.query(`UPDATE savings_accounts SET ${sets.join(', ')} WHERE id = $1`, [a.id]);
+  return entryId;
+}
+
 async function accrueInterest(c, accountId, { date, createdBy = 'EOD' } = {}) {
   const a = await lock(c, accountId);
   if (!OPEN.includes(a.status)) return null;
-  const interestOn = Boolean(a.interest_paid_into_account) && !a.is_funding_account;
   const opened = S.ymd(a.opened_on);
   const start = a.accrued_through ? S.ymd(a.accrued_through) : addDays(opened, -1);
   if (date <= start) return null;
   const periodStart = a.period_started_on ? S.ymd(a.period_started_on) : opened;
-  const conv = a.interest_day_count || 'ACTUAL_365';
-  const odConv = a.od_day_count || conv;
-  const threshold = a.min_balance_for_interest === null ? null : Number(a.min_balance_for_interest);
-  const cap = a.interest_max_balance === null || a.interest_max_balance === undefined ? null : Number(a.interest_max_balance);
-  const basis = a.interest_calc_balance || 'END_OF_DAY';
-  // Locked accounts earn only if the product collects interest when locked;
-  // after maturity only if it accrues after maturity (the reference platform).
-  const lockedOut = a.status === 'LOCKED' && a.collect_interest_when_locked === false;
-  // A dormant account accrues no interest, credit or overdraft (the reference platform); its days are still recorded.
-  const dormant = a.status === 'DORMANT';
-  const maturity = a.maturity_date ? S.ymd(a.maturity_date) : null;
-  const creditIndex = await indexRates(c, a.interest_rate_terms === 'INDEX' ? a.interest_index_source_id : null, start, date);
-  const odIndex = await indexRates(c, a.od_rate_terms === 'INDEX' ? a.od_index_source_id : null, start, date);
+  const x = await accrualContext(c, a, start, date);
   const { rows: intraday } = await c.query(
     'SELECT day::text AS d, open_balance, min_balance, sum_after, movements FROM savings_intraday_balances WHERE account_id = $1 AND day > $2::date AND day <= $3::date',
     [a.id, start, date]);
-  const moves = new Map(intraday.map((x) => [x.d, x]));
+  const moves = new Map(intraday.map((m) => [m.d, m]));
 
   let pos = 0;
   let neg = 0;
@@ -645,76 +811,80 @@ async function accrueInterest(c, accountId, { date, createdBy = 'EOD' } = {}) {
       'INSERT INTO savings_daily_balances (account_id, day, balance) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',
       [a.id, d, a.balance]);
     const { rows: [snap] } = await c.query('SELECT balance FROM savings_daily_balances WHERE account_id = $1 AND day = $2', [a.id, d]);
-    const bal = Number(snap.balance);
-    const mv = moves.get(d);
-    const dayMin = mv ? Math.min(Number(mv.open_balance), Number(mv.min_balance)) : bal;
-    const dayAvg = mv ? Number(mv.sum_after) / Number(mv.movements) : bal;
-    const w = weight(addDays(d, -1), d, conv);
-    const earning = interestOn && !lockedOut && !dormant && !(maturity && d > maturity && !a.accrue_interest_after_maturity);
-    if (earning && basis !== 'MINIMUM') {
-      let b = basis === 'MINIMUM_DAILY' ? dayMin : basis === 'AVERAGE_DAILY' ? dayAvg : bal;
-      if (basis === 'END_OF_DAY' && cap !== null) b = Math.min(b, cap);
-      if (b > 0 && (threshold === null || b >= threshold)) {
-        const x = DR.creditOn(a, b, d, { index: creditIndex(d) });
-        const amt = x.amount * w / DR.yearDays(conv, d);
-        if (amt >= 0) pos += amt; else neg += -amt;
-      }
-    }
-    const odBal = a.od_calc_balance === 'MINIMUM_DAILY' ? dayMin : bal;
-    if (odBal < 0 && !dormant) {
-      const r = DR.overdraftRateOn(a, -odBal, { index: odIndex(d) });
-      if (r > 0) od += -odBal * r / 100 * weight(addDays(d, -1), d, odConv) / DR.yearDays(odConv, d);
-    }
+    const day = dayInterest(a, x, d, Number(snap.balance), moves.get(d));
+    pos += day.pos; neg += day.neg; od += day.od;
   }
-  if (interestOn && basis === 'MINIMUM' && !lockedOut && !dormant) {
+  if (x.interestOn && x.basis === 'MINIMUM' && !x.lockedOut && !x.dormant) {
     const { rows: [m] } = await c.query(
       'SELECT min(balance) AS lo FROM savings_daily_balances WHERE account_id = $1 AND day BETWEEN $2 AND $3', [a.id, periodStart, date]);
     const lo = Number(m.lo);
     let days = 0;
-    for (let d = periodStart; d <= date; d = addDays(d, 1)) days += weight(addDays(d, -1), d, conv);
-    const x = lo > 0 && (threshold === null || lo >= threshold) ? DR.creditOn(a, lo, date, { index: creditIndex(date) }) : { amount: 0 };
-    const target = x.amount * days / DR.yearDays(conv, date);
+    for (let d = periodStart; d <= date; d = addDays(d, 1)) days += weight(addDays(d, -1), d, x.conv);
+    const r = lo > 0 && (x.threshold === null || lo >= x.threshold) ? DR.creditOn(a, lo, date, { index: x.creditIndex(date) }) : { amount: 0 };
+    const target = r.amount * days / DR.yearDays(x.conv, date);
     // The period so far is priced again; what changes is booked (either side).
     pos = Math.max(target, 0) - Number(a.interest_accrued);
     neg = Math.max(-target, 0) - Number(a.neg_interest_accrued);
   }
-  const posAdd = pos;
-  const negAdd = neg;
   const { rows: [u] } = await c.query(
     `UPDATE savings_accounts SET interest_accrued = interest_accrued + $1, neg_interest_accrued = neg_interest_accrued + $2,
        od_interest_accrued = od_interest_accrued + $3, accrued_through = $4::date,
        period_started_on = COALESCE(period_started_on, opened_on)
-     WHERE id = $5 RETURNING *`, [posAdd, negAdd, od, date, a.id]);
-
+     WHERE id = $5 RETURNING *`, [pos, neg, od, date, a.id]);
   // Book what has changed to the ledger.
-  let entryId = null;
-  if (books(a) && accrues(a)) {
-    const comps = [
-      ['INTEREST', 'interest_accrued', 'interest_booked', a.gl_interest_exp, a.gl_interest_payable, interestOn],
-      ['NEG_INTEREST', 'neg_interest_accrued', 'neg_interest_booked', a.gl_neg_interest_rec, a.gl_neg_interest_inc, interestOn && a.allow_negative_rate],
-      ['OD_INTEREST', 'od_interest_accrued', 'od_interest_booked', a.gl_od_interest_rec, a.gl_od_interest_inc, Boolean(a.gl_od_interest_rec)],
-    ];
-    const lines = [];
-    const sets = [];
-    for (const [component, accruedCol, bookedCol, dr, cr, on] of comps) {
-      if (!on) continue;
-      const delta = round2(round2(u[accruedCol]) - Number(u[bookedCol]));
-      if (delta === 0) continue;
-      lines.push({ component, debitGl: dr, creditGl: cr, amount: delta });
-      sets.push(`${bookedCol} = ${bookedCol} + ${delta}`);
-    }
-    if (lines.length) {
-      entryId = await accruals.record(c, {
-        kind: 'SAVINGS', product: { ...a, id: a.product_id }, accountId: a.id, memberId: a.member_id, branchId: a.branch_id,
-        date, lines, narration: `Deposit interest accrual ${a.account_no} to ${date}`, createdBy,
-      });
-      await c.query(`UPDATE savings_accounts SET ${sets.join(', ')} WHERE id = $1`, [a.id]);
-    }
-  }
+  const entryId = await bookAccrued(c, a, u, date, `Deposit interest accrual ${a.account_no} to ${date}`, createdBy);
   return {
     accountId: a.id, through: date,
     interest: round2(u.interest_accrued), negative: round2(u.neg_interest_accrued), overdraft: round2(u.od_interest_accrued), entryId,
   };
+}
+
+/**
+ * The first day a movement may be dated and priced again: the day after the
+ * last interest application, or the day the account started earning
+ * (The reference platform reposts applied interest too; here what was applied stays).
+ */
+function repriceFloor(a) {
+  if (a.last_interest_applied_on) return addDays(S.ymd(a.last_interest_applied_on), 1);
+  return S.ymd(a.activated_on || a.opened_on);
+}
+
+/**
+ * A backdated movement (or the reversal of one) of `delta` on `day`: the
+ * recorded daily balances from that day to the last day accrued move by it,
+ * the interest on those days is priced again, and the change is booked.
+ * The movement counts from the start of its day. Under the MINIMUM
+ * (period) basis the next accrual prices the period again itself.
+ */
+async function repriceFrom(c, accountId, day, delta, { createdBy } = {}) {
+  const a = await lock(c, accountId);
+  const through = a.accrued_through ? S.ymd(a.accrued_through) : null;
+  if (!through || day > through || delta === 0 || day < repriceFloor(a)) return null;
+  const x = await accrualContext(c, a, addDays(day, -1), through);
+  const { rows } = await c.query(
+    `SELECT d.day::text AS d, d.balance, m.open_balance, m.min_balance, m.sum_after, m.movements
+       FROM savings_daily_balances d LEFT JOIN savings_intraday_balances m ON m.account_id = d.account_id AND m.day = d.day
+      WHERE d.account_id = $1 AND d.day BETWEEN $2 AND $3 ORDER BY d.day`, [a.id, day, through]);
+  let pos = 0;
+  let neg = 0;
+  let od = 0;
+  for (const r of rows) {
+    const mv = r.movements ? r : null;
+    const was = dayInterest(a, x, r.d, Number(r.balance), mv);
+    const moved = mv ? { open_balance: Number(r.open_balance) + delta, min_balance: Number(r.min_balance) + delta,
+      sum_after: Number(r.sum_after) + delta * Number(r.movements), movements: r.movements } : null;
+    const now = dayInterest(a, x, r.d, Number(r.balance) + delta, moved);
+    pos += now.pos - was.pos; neg += now.neg - was.neg; od += now.od - was.od;
+  }
+  await c.query('UPDATE savings_daily_balances SET balance = balance + $2 WHERE account_id = $1 AND day BETWEEN $3 AND $4', [a.id, delta, day, through]);
+  await c.query(`UPDATE savings_intraday_balances SET open_balance = open_balance + $2, min_balance = min_balance + $2, sum_after = sum_after + $2 * movements
+                  WHERE account_id = $1 AND day BETWEEN $3 AND $4`, [a.id, delta, day, through]);
+  if (x.basis === 'MINIMUM') { pos = 0; neg = 0; }
+  const { rows: [u] } = await c.query(
+    `UPDATE savings_accounts SET interest_accrued = GREATEST(0, interest_accrued + $2), neg_interest_accrued = GREATEST(0, neg_interest_accrued + $3),
+       od_interest_accrued = GREATEST(0, od_interest_accrued + $4) WHERE id = $1 RETURNING *`, [a.id, pos, neg, od]);
+  const entryId = await bookAccrued(c, a, u, await orgToday(c), `Interest priced again ${a.account_no} from ${day}`, createdBy || 'SYSTEM');
+  return { from: day, through, interest: pos, negative: neg, overdraft: od, entryId };
 }
 
 /**
@@ -753,7 +923,8 @@ async function applyInterest(c, accountId, { date, createdBy = 'EOD' } = {}) {
       reference: ref('SI'), kind: 'SAVINGS_INTEREST_APPLIED', memberId: mid, savingsAccountId: a.id, amount: pos,
       valueDate: date, branchId: br, entryId, createdBy, allocation: { booked, ...inn.allocation },
     }));
-    const wht = a.withholding_tax_percent === null ? 0 : round2(pos * Number(a.withholding_tax_percent) / 100);
+    const whtRate = await withholdingRate(c, a, date);
+    const wht = whtRate === null ? 0 : round2(pos * whtRate / 100);
     if (wht > 0) {
       a = await lock(c, a.id);
       const legs = outLegs(a, wht);
@@ -761,7 +932,7 @@ async function applyInterest(c, accountId, { date, createdBy = 'EOD' } = {}) {
       if (books(a)) {
         taxEntry = (await acct.post(c, {
           debits: legs.debits, credits: [{ glCode: a.gl_tax_payable, amount: wht, memberId: mid, branchId: br }],
-          narration: `Withholding tax ${a.withholding_tax_percent}% on interest ${a.account_no}`,
+          narration: `Withholding tax ${whtRate}% on interest ${a.account_no}`,
           sourceType: 'SAVINGS_WITHHOLDING_TAX', sourceId: a.id, bookingDate: date, createdBy, branchId: br,
         })).entryId;
       }
@@ -769,7 +940,7 @@ async function applyInterest(c, accountId, { date, createdBy = 'EOD' } = {}) {
       out.push(await record(c, {
         reference: ref('WT'), kind: 'SAVINGS_WITHHOLDING_TAX', memberId: mid, savingsAccountId: a.id, amount: wht,
         valueDate: date, branchId: br, entryId: taxEntry, createdBy,
-        allocation: { rate: Number(a.withholding_tax_percent), on: pos, ...legs.allocation },
+        allocation: { rate: whtRate, on: pos, interestReference: out[out.length - 1].reference, ...legs.allocation },
       }));
     }
   }
@@ -996,6 +1167,28 @@ async function changeInterestRate(c, accountId, { interestRate, valueDate = null
   return { accountId: a.id, interestRate: rate, previousRate: old, valueDate: from, accruedChange: round2(delta) };
 }
 
+/**
+ * The account's own maximum withdrawal and recommended deposit (the reference platform's
+ * account-level amounts). The maximum may not exceed the product's.
+ */
+function ownLimits(p, x) {
+  const out = {};
+  if (x.maxWithdrawalAmount !== undefined) {
+    const v = x.maxWithdrawalAmount === null || x.maxWithdrawalAmount === '' ? null : round2(x.maxWithdrawalAmount);
+    if (v !== null && !(v > 0)) throw err('MAX_WITHDRAWAL_AMOUNT_IS_MORE_THAN_ZERO', 400);
+    if (v !== null && p.max_withdrawal_amount !== null && p.max_withdrawal_amount !== undefined && v > Number(p.max_withdrawal_amount)) {
+      throw err(`MAX_WITHDRAWAL_AMOUNT_ABOVE_THE_PRODUCT_MAXIMUM: ${p.max_withdrawal_amount}`, 400);
+    }
+    out.own_max_withdrawal = v;
+  }
+  if (x.recommendedDepositAmount !== undefined) {
+    const v = x.recommendedDepositAmount === null || x.recommendedDepositAmount === '' ? null : round2(x.recommendedDepositAmount);
+    if (v !== null && !(v > 0)) throw err('RECOMMENDED_DEPOSIT_AMOUNT_IS_MORE_THAN_ZERO', 400);
+    out.own_recommended_deposit = v;
+  }
+  return out;
+}
+
 // The account's terms, which the reference platform lets be edited only before activation.
 const TERM_FIELDS = { interestRate: 'interest_rate', interestSpread: 'interest_spread', overdraftRate: 'overdraft_rate',
   overdraftSpread: 'overdraft_spread', termLength: 'term_length' };
@@ -1018,6 +1211,7 @@ async function updateAccount(c, accountId, patch = {}, { createdBy, user = null 
     sets.max_balance = v;
   }
   if (patch.notes !== undefined) sets.notes = patch.notes || null;
+  Object.assign(sets, ownLimits(a, patch));
   if (patch.name !== undefined) {
     const n = patch.name === null ? null : String(patch.name).trim();
     if (n !== null && n.length > 255) throw err('NAME_IS_AT_MOST_255_CHARACTERS', 400);
@@ -1033,7 +1227,7 @@ async function updateAccount(c, accountId, patch = {}, { createdBy, user = null 
   }
   const hasFields = patch.customFields !== undefined && patch.customFields !== null;
   const keys = Object.keys(sets);
-  if (!keys.length && !hasFields) throw err(`NO_UPDATABLE_FIELDS: name, notes, maxBalance, customFields, and before activation ${Object.keys(TERM_FIELDS).join(', ')}`, 400);
+  if (!keys.length && !hasFields) throw err(`NO_UPDATABLE_FIELDS: name, notes, maxBalance, maxWithdrawalAmount, recommendedDepositAmount, customFields, and before activation ${Object.keys(TERM_FIELDS).join(', ')}`, 400);
   let r = a;
   if (keys.length) {
     r = (await c.query(`UPDATE savings_accounts SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`,
@@ -1161,13 +1355,27 @@ async function writeOffOverdraft(c, accountId, { narration, createdBy, closing =
 // Reversal
 // --------------------------------------------------------------------------
 
-const REVERSIBLE = ['SAVINGS_DEPOSIT', 'SAVINGS_WITHDRAWAL', 'SAVINGS_TRANSFER', 'SAVINGS_FEE'];
+const REVERSIBLE = ['SAVINGS_DEPOSIT', 'SAVINGS_WITHDRAWAL', 'SAVINGS_TRANSFER', 'SAVINGS_FEE', 'SAVINGS_SEIZURE',
+  'SAVINGS_INTEREST_APPLIED', 'SAVINGS_WITHHOLDING_TAX'];
+
+/** Refuse a reversal that would take an account without a technical overdraft below what it may owe. */
+async function assertMayLower(c, id, amt) {
+  const a = await lock(c, id);
+  if (!a.allow_technical_overdraft && Number(a.balance) - amt < -Number(a.overdraft_limit || 0)) {
+    throw err(`REVERSAL_WOULD_OVERDRAW: ${a.account_no} would go to ${round2(Number(a.balance) - amt)}`, 409);
+  }
+}
 
 /**
- * Reverse a posted deposit transaction. Never edits the original. One half
- * of a transfer with a loan (a repayment from this account, a disbursement
- * into it) is reversed with its loan transaction, which reverses both; on
- * its own (`linked` false) it is refused.
+ * Reverse a posted deposit transaction (the reference platform's Adjusting Transactions).
+ * Never edits the original. The account must be open. A deposit,
+ * withdrawal, transfer, fee or seizure dated after the last interest
+ * application has the interest from its date priced again. Interest
+ * applied goes back to accrued, with its withholding tax; only the latest
+ * application is reversed. One half of a transfer with a loan (a repayment
+ * from this account, a disbursement into it) is reversed with its loan
+ * transaction, which reverses both; on its own (`linked` false) it is
+ * refused.
  */
 async function reverseTransaction(c, reference, { narration = 'Reversal', createdBy, linked = false } = {}) {
   const { rows } = await c.query(
@@ -1187,36 +1395,282 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
   if (tx.allocation?.loanTransfer && !linked) {
     throw err(`LINKED_TO_A_LOAN_TRANSACTION: reverse ${tx.allocation.loanTransfer.reference}, which reverses both`, 409);
   }
+  // The reference platform: the account must be open to adjust its transactions.
+  const { rows: closed } = await c.query("SELECT account_no FROM savings_accounts WHERE id = ANY($1::uuid[]) AND status = 'CLOSED'",
+    [[tx.savings_account_id, tx.allocation?.toAccountId].filter(Boolean)]);
+  if (closed.length) throw err(`ACCOUNT_IS_CLOSED: ${closed.map((r) => r.account_no).join(', ')}`, 409);
 
-  const entry = tx.entry_id ? await acct.reverse(c, tx.entry_id, narration, createdBy) : { entryId: null };
   const al = tx.allocation || {};
   const amt = Number(tx.amount);
+  const day = tx.value_date ? S.ymd(tx.value_date) : null;
+  const extra = [];
+
+  if (tx.kind === 'SAVINGS_INTEREST_APPLIED') {
+    const { rows: [later] } = await c.query(
+      `SELECT reference FROM transactions WHERE savings_account_id = $1 AND kind = 'SAVINGS_INTEREST_APPLIED' AND reversed_by IS NULL
+          AND id <> $2 AND (value_date > $3 OR (value_date = $3 AND created_at > $4)) LIMIT 1`,
+      [tx.savings_account_id, tx.id, tx.value_date, tx.created_at]);
+    if (later) throw err(`REVERSE_THE_LATEST_INTEREST_APPLICATION_FIRST: ${later.reference}`, 409);
+    await assertMayLower(c, tx.savings_account_id, amt);
+  } else if (['SAVINGS_DEPOSIT'].includes(tx.kind)) {
+    await assertMayLower(c, tx.savings_account_id, amt);
+  } else if (tx.kind === 'SAVINGS_TRANSFER' && al.toAccountId) {
+    await assertMayLower(c, al.toAccountId, amt);
+  }
+
+  const entry = tx.entry_id ? await acct.reverse(c, tx.entry_id, narration, createdBy) : { entryId: null };
+  let repriced = null;
 
   if (tx.kind === 'SAVINGS_DEPOSIT') {
     await c.query(
       `UPDATE savings_accounts SET balance = balance - $1, od_fees_due = od_fees_due + $2, od_interest_due = od_interest_due + $3
        WHERE id = $4`, [amt, al.odFees || 0, al.odInterest || 0, tx.savings_account_id]);
+    repriced = await repriceFrom(c, tx.savings_account_id, day, -amt, { createdBy });
   } else if (tx.kind === 'SAVINGS_WITHDRAWAL') {
     await c.query('UPDATE savings_accounts SET balance = balance + $1 WHERE id = $2', [amt, tx.savings_account_id]);
+    repriced = await repriceFrom(c, tx.savings_account_id, day, amt, { createdBy });
   } else if (tx.kind === 'SAVINGS_FEE') {
     await c.query('UPDATE savings_accounts SET balance = balance + $1, od_fees_due = od_fees_due - $2 WHERE id = $3',
       [amt, al.odFeesDue || 0, tx.savings_account_id]);
+    repriced = await repriceFrom(c, tx.savings_account_id, day, amt, { createdBy });
   } else if (tx.kind === 'SAVINGS_TRANSFER') {
     await c.query('UPDATE savings_accounts SET balance = balance + $1 WHERE id = $2', [amt, tx.savings_account_id]);
+    repriced = await repriceFrom(c, tx.savings_account_id, day, amt, { createdBy });
     if (al.toAccountId) {
       await c.query(
         `UPDATE savings_accounts SET balance = balance - $1, od_fees_due = od_fees_due + $2, od_interest_due = od_interest_due + $3
          WHERE id = $4`, [amt, al.to?.odFees || 0, al.to?.odInterest || 0, al.toAccountId]);
+      await repriceFrom(c, al.toAccountId, day, -amt, { createdBy });
+    }
+  } else if (tx.kind === 'SAVINGS_SEIZURE') {
+    await c.query('UPDATE savings_accounts SET balance = balance + $1 WHERE id = $2', [amt, tx.savings_account_id]);
+    await c.query("UPDATE savings_blocks SET seized = seized - $2, state = 'PENDING', closed_at = NULL WHERE id = $1", [al.blockId, amt]);
+    repriced = await repriceFrom(c, tx.savings_account_id, day, amt, { createdBy });
+  } else if (tx.kind === 'SAVINGS_WITHHOLDING_TAX') {
+    await c.query('UPDATE savings_accounts SET balance = balance + $1 WHERE id = $2', [amt, tx.savings_account_id]);
+  } else if (tx.kind === 'SAVINGS_INTEREST_APPLIED') {
+    // The interest goes back to accrued (and booked, as far as it was), to be applied again.
+    await c.query(
+      `UPDATE savings_accounts SET balance = balance - $1, interest_accrued = interest_accrued + $1, interest_booked = interest_booked + $2,
+         od_fees_due = od_fees_due + $3, od_interest_due = od_interest_due + $4 WHERE id = $5`,
+      [amt, Number(al.booked || 0), al.odFees || 0, al.odInterest || 0, tx.savings_account_id]);
+    // Its withholding tax is reversed with it.
+    const { rows: taxes } = await c.query(
+      `SELECT reference FROM transactions WHERE savings_account_id = $1 AND kind = 'SAVINGS_WITHHOLDING_TAX' AND reversed_by IS NULL
+          AND (allocation->>'interestReference' = $2 OR (allocation->>'interestReference' IS NULL AND value_date = $3 AND created_at >= $4))`,
+      [tx.savings_account_id, tx.reference, tx.value_date, tx.created_at]);
+    for (const t of taxes) extra.push(await reverseTransaction(c, t.reference, { narration, createdBy }));
+    // The account's last application moves back when nothing else was applied that day.
+    const { rows: [other] } = await c.query(
+      `SELECT 1 FROM transactions WHERE savings_account_id = $1 AND value_date = $2 AND reversed_by IS NULL AND id <> $3
+          AND kind IN ('SAVINGS_INTEREST_APPLIED', 'SAVINGS_NEGATIVE_INTEREST', 'OVERDRAFT_INTEREST_APPLIED') LIMIT 1`,
+      [tx.savings_account_id, tx.value_date, tx.id]);
+    if (!other) {
+      const { rows: [prev] } = await c.query(
+        `SELECT max(value_date)::text AS d FROM transactions WHERE savings_account_id = $1 AND reversed_by IS NULL AND id <> $2
+            AND kind IN ('SAVINGS_INTEREST_APPLIED', 'SAVINGS_NEGATIVE_INTEREST', 'OVERDRAFT_INTEREST_APPLIED')`, [tx.savings_account_id, tx.id]);
+      await c.query(
+        `UPDATE savings_accounts SET last_interest_applied_on = $2::date,
+           period_started_on = COALESCE($2::date + 1, activated_on, opened_on) WHERE id = $1`, [tx.savings_account_id, prev.d]);
     }
   }
 
   const rev = await record(c, {
     reference: ref('REV'), kind: 'REVERSAL', memberId: tx.member_id,
     savingsAccountId: tx.savings_account_id, amount: -tx.amount, branchId: tx.branch_id,
-    entryId: entry.entryId, allocation: { reversalOf: tx.reference }, narration, createdBy,
+    entryId: entry.entryId, allocation: { reversalOf: tx.reference, ...(repriced ? { repricedFrom: day } : {}),
+      ...(extra.length ? { alsoReversed: extra.map((x) => x.allocation.reversalOf) } : {}) }, narration, createdBy,
   });
   await c.query('UPDATE transactions SET reversed_by = $1 WHERE id = $2', [rev.id, tx.id]);
   return rev;
+}
+
+// --------------------------------------------------------------------------
+// Blocked funds and seizures (the reference platform's Blocking Funds in Deposit Accounts)
+// --------------------------------------------------------------------------
+
+const BLOCKABLE = ['ACTIVE', 'IN_ARREARS', 'LOCKED', 'DORMANT'];
+const blockOut = (b) => ({
+  externalReferenceId: b.reference, accountKey: b.account_id, amount: Number(b.amount), seizedAmount: Number(b.seized),
+  state: b.state, notes: b.notes, creationDate: b.created_at, closedDate: b.closed_at || null,
+});
+
+/** Block an amount (it may exceed the available balance). Interest accrues on the total balance still. */
+async function blockFunds(c, accountId, { externalReferenceId = null, amount, notes = null, createdBy } = {}) {
+  const a = await lock(c, accountId);
+  if (!BLOCKABLE.includes(a.status)) throw err(`FUNDS_ARE_BLOCKED_ON_OPEN_ACCOUNTS: the account is ${a.status}`, 409);
+  const amt = round2(amount);
+  if (!(amt > 0)) throw err('INVALID_AMOUNT', 400);
+  const refId = externalReferenceId ? String(externalReferenceId).slice(0, 64) : ref('BLK');
+  const { rows: [dupe] } = await c.query('SELECT 1 FROM savings_blocks WHERE account_id = $1 AND reference = $2', [a.id, refId]);
+  if (dupe) throw err(`BLOCK_REFERENCE_IN_USE: ${refId}`, 409);
+  const { rows: [b] } = await c.query(
+    'INSERT INTO savings_blocks (account_id, reference, amount, notes, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+    [a.id, refId, amt, notes, createdBy || 'SYSTEM']);
+  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'SAVINGS_FUNDS_BLOCKED','savings_account',$2,$3)`,
+    [createdBy || 'SYSTEM', a.id, JSON.stringify({ reference: refId, amount: amt, notes })]);
+  return blockOut(b);
+}
+
+async function blocksOf(c, accountId) {
+  const a = await lock(c, accountId);
+  const { rows } = await c.query('SELECT * FROM savings_blocks WHERE account_id = $1 ORDER BY created_at', [a.id]);
+  return rows.map(blockOut);
+}
+
+/** Unblock what is still blocked of a pending block (the reference platform: only a pending block, on an open account). */
+async function unblockFunds(c, accountId, reference, { createdBy } = {}) {
+  const a = await lock(c, accountId);
+  if (!BLOCKABLE.includes(a.status)) throw err(`FUNDS_ARE_UNBLOCKED_ON_OPEN_ACCOUNTS: the account is ${a.status}`, 409);
+  const { rows: [b] } = await c.query('SELECT * FROM savings_blocks WHERE account_id = $1 AND reference = $2 FOR UPDATE', [a.id, String(reference)]);
+  if (!b) throw err(`BLOCK_NOT_FOUND: ${reference}`, 404);
+  if (b.state !== 'PENDING') throw err(`BLOCK_IS_${b.state}`, 409);
+  const { rows: [u] } = await c.query("UPDATE savings_blocks SET state = 'UNBLOCKED', closed_at = now() WHERE id = $1 RETURNING *", [b.id]);
+  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'SAVINGS_FUNDS_UNBLOCKED','savings_account',$2,$3)`,
+    [createdBy || 'SYSTEM', a.id, JSON.stringify({ reference: b.reference, amount: Number(b.amount), seized: Number(b.seized) })]);
+  return blockOut(u);
+}
+
+/**
+ * Seize blocked funds (the reference platform's seizure transaction, "Seized Amount"): all or
+ * part of what a pending block still holds, no more than the balance. The
+ * money leaves through the channel given (bank by default). The block is
+ * SEIZED once nothing of it is left.
+ */
+async function seizeFunds(c, accountId, { blockId, amount, channelId = 'bank', notes = null, createdBy, user = null } = {}) {
+  const a = await lock(c, accountId);
+  if (!BLOCKABLE.includes(a.status)) throw err(`FUNDS_ARE_SEIZED_ON_OPEN_ACCOUNTS: the account is ${a.status}`, 409);
+  const { rows: [b] } = await c.query('SELECT * FROM savings_blocks WHERE account_id = $1 AND (reference = $2 OR id::text = $2) FOR UPDATE',
+    [a.id, String(blockId || '')]);
+  if (!b) throw err(`BLOCK_NOT_FOUND: ${blockId}`, 404);
+  if (b.state !== 'PENDING') throw err(`BLOCK_IS_${b.state}`, 409);
+  const left = round2(Number(b.amount) - Number(b.seized));
+  const amt = round2(amount ?? left);
+  if (!(amt > 0)) throw err('INVALID_AMOUNT', 400);
+  if (amt > left) throw err(`ABOVE_WHAT_THE_BLOCK_HOLDS: ${left}`, 409);
+  if (amt > round2(a.balance)) throw err(`ABOVE_THE_BALANCE: ${round2(a.balance)}`, 409);
+  const ch = await channels.assertUsable(c, channelId, { side: 'SAVINGS', type: 'WITHDRAWAL', amount: amt, productId: a.product_id, user });
+  if (!ch.gl_account_code) throw err(`CHANNEL_HAS_NO_GL_ACCOUNT: ${channelId}`);
+  const legs = outLegs(a, amt);
+  const entryId = await postWithChannel(c, a, {
+    channelGl: ch.gl_account_code, amount: amt, direction: 'OUT', productLegs: legs.debits,
+    narration: notes || `Seizure ${a.account_no} (${b.reference})`, sourceType: 'SAVINGS_SEIZURE', channelId, createdBy,
+  });
+  await c.query('UPDATE savings_accounts SET balance = balance - $1 WHERE id = $2', [amt, a.id]);
+  const seized = round2(Number(b.seized) + amt);
+  await c.query('UPDATE savings_blocks SET seized = $2, state = $3, closed_at = CASE WHEN $3 = \'SEIZED\' THEN now() END WHERE id = $1',
+    [b.id, seized, seized >= Number(b.amount) ? 'SEIZED' : 'PENDING']);
+  return record(c, {
+    reference: ref('SZ'), kind: 'SAVINGS_SEIZURE', memberId: a.member_id, savingsAccountId: a.id, channelId, amount: amt,
+    branchId: a.branch_id, entryId, narration: notes, createdBy, allocation: { blockId: b.id, block: b.reference, ...legs.allocation },
+  });
+}
+
+// --------------------------------------------------------------------------
+// Transaction holds (the reference platform's Transaction Holds)
+// --------------------------------------------------------------------------
+
+const holdOut = (h) => ({
+  externalReferenceId: h.external_reference_id, accountKey: h.account_id, creditDebitIndicator: h.indicator, amount: Number(h.amount),
+  status: h.state, notes: h.notes, creationDate: h.created_at, closedDate: h.closed_at || null, transactionKey: h.transaction_id || null,
+});
+
+/**
+ * Hold an amount (the reference platform's POST /deposits/{id}/authorizationholds): a debit
+ * (DBIT) no larger than what is available, which it makes unavailable, or
+ * a credit (CRDT) on its way. The external reference is unique and at most
+ * 32 characters. Holds on deposit accounts do not expire.
+ */
+async function createHold(c, accountId, { externalReferenceId, amount, creditDebitIndicator = 'DBIT', notes = null, createdBy } = {}) {
+  const a = await lock(c, accountId);
+  const ind = String(creditDebitIndicator || 'DBIT').toUpperCase();
+  if (!['DBIT', 'CRDT'].includes(ind)) throw err('CREDIT_DEBIT_INDICATOR_IS_DBIT_OR_CRDT', 400);
+  const refId = String(externalReferenceId || '').trim();
+  if (!refId || refId.length > 32) throw err('EXTERNAL_REFERENCE_ID_IS_1_TO_32_CHARACTERS', 400);
+  const open = ind === 'DBIT' ? ['ACTIVE', 'IN_ARREARS', 'MATURED', 'DORMANT'] : ['ACTIVE', 'IN_ARREARS', 'APPROVED', 'DORMANT'];
+  if (!open.includes(a.status)) throw err(`A_${ind}_HOLD_IS_NOT_TAKEN_ON_A_${a.status}_ACCOUNT`, 409);
+  const amt = round2(amount);
+  if (!(amt > 0)) throw err('INVALID_AMOUNT', 400);
+  const { rows: [dupe] } = await c.query('SELECT 1 FROM savings_holds WHERE external_reference_id = $1', [refId]);
+  if (dupe) throw err(`EXTERNAL_REFERENCE_ID_IN_USE: ${refId}`, 409);
+  if (ind === 'DBIT') {
+    const day = await orgToday(c);
+    const hb = await heldBack(c, a.id);
+    const available = round2(availableOf(onDay(a, day), await pledgedAmount(c, a.member_id)) - hb.blocked - hb.holds);
+    if (amt > available) throw err(`INSUFFICIENT_AVAILABLE_BALANCE: available ${available}, requested ${amt}`, 409);
+  }
+  const { rows: [h] } = await c.query(
+    'INSERT INTO savings_holds (account_id, external_reference_id, indicator, amount, notes, created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+    [a.id, refId, ind, amt, notes, createdBy || 'SYSTEM']);
+  return holdOut(h);
+}
+
+async function holdsOf(c, accountId, { status = null } = {}) {
+  const a = await lock(c, accountId);
+  const { rows } = await c.query('SELECT * FROM savings_holds WHERE account_id = $1 AND ($2::text IS NULL OR state = $2) ORDER BY created_at',
+    [a.id, status ? String(status).toUpperCase() : null]);
+  return rows.map(holdOut);
+}
+
+/** Reverse a pending hold (the reference platform: DELETE /deposits/{id}/authorizationholds/{ref}); it no longer holds anything. */
+async function reverseHold(c, accountId, reference, { createdBy } = {}) {
+  const a = await lock(c, accountId);
+  const { rows: [h] } = await c.query('SELECT * FROM savings_holds WHERE external_reference_id = $1 AND account_id = $2 FOR UPDATE', [String(reference), a.id]);
+  if (!h) throw err(`HOLD_NOT_FOUND: ${reference}`, 404);
+  if (h.state !== 'PENDING') throw err(`HOLD_IS_${h.state}`, 409);
+  const { rows: [u] } = await c.query("UPDATE savings_holds SET state = 'REVERSED', closed_at = now() WHERE id = $1 RETURNING *", [h.id]);
+  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'SAVINGS_HOLD_REVERSED','savings_account',$2,$3)`,
+    [createdBy || 'SYSTEM', a.id, JSON.stringify(holdOut(h))]);
+  return holdOut(u);
+}
+
+/** Pending blocks and holds keep an account open (closing it, or its holder's exit, waits for them). */
+async function assertNothingPending(c, a) {
+  const hb = await heldBack(c, a.id);
+  if (hb.blocked > 0) throw err(`ACCOUNT_HAS_BLOCKED_FUNDS: ${hb.blocked}; unblock or seize them first`, 409);
+  const { rows: [h] } = await c.query("SELECT count(*)::int AS n FROM savings_holds WHERE account_id = $1 AND state = 'PENDING'", [a.id]);
+  if (h.n) throw err(`ACCOUNT_HAS_PENDING_HOLDS: ${h.n}; settle or reverse them first`, 409);
+}
+
+// --------------------------------------------------------------------------
+// Withholding tax per account (the reference platform's :changeWithholdingTax)
+// --------------------------------------------------------------------------
+
+/** The withholding tax rate on interest applied on a day: the account's own source in force then, or the product's percentage. */
+async function withholdingRate(c, a, date) {
+  if (!a.withholding_source_id) return a.withholding_tax_percent === null || a.withholding_tax_percent === undefined ? null : Number(a.withholding_tax_percent);
+  const { rows: [r] } = await c.query(
+    'SELECT rate FROM index_rates WHERE source_id = $1 AND valid_from <= $2::date ORDER BY valid_from DESC LIMIT 1', [a.withholding_source_id, date]);
+  return r ? Number(r.rate) : null;
+}
+
+/**
+ * Give the account its own withholding tax source, from today (null goes
+ * back to the product's). The change is kept (the reference platform's GET
+ * /deposits/{id}/withholdingtaxes).
+ */
+async function changeWithholdingTax(c, accountId, { sourceId, createdBy } = {}) {
+  const a = await lock(c, accountId);
+  if (!OPEN.includes(a.status) && !['PENDING_APPROVAL', 'APPROVED'].includes(a.status)) throw err(`ACCOUNT_NOT_OPEN: ${a.status}`, 409);
+  const src = sourceId === null || sourceId === undefined || sourceId === '' ? null : String(sourceId).toUpperCase();
+  if (src) {
+    const { rows: [r] } = await c.query('SELECT kind FROM index_rate_sources WHERE id = $1', [src]);
+    if (!r || r.kind !== 'WITHHOLDING') throw err(`NOT_A_WITHHOLDING_TAX_SOURCE: ${src}`, 400);
+    if (books(a) && !a.gl_tax_payable) throw err(`THE_PRODUCT_HAS_NO_TAXES_PAYABLE_ACCOUNT: ${a.product_id}`, 409);
+    if (!a.interest_paid_into_account) throw err('WITHHOLDING_TAX_NEEDS_INTEREST_PAID_INTO_THE_ACCOUNT', 409);
+  }
+  const today = await orgToday(c);
+  await c.query('UPDATE savings_accounts SET withholding_source_id = $2 WHERE id = $1', [a.id, src]);
+  await c.query('INSERT INTO savings_withholding_changes (account_id, source_id, valid_from, created_by) VALUES ($1,$2,$3,$4)',
+    [a.id, src, today, createdBy || 'SYSTEM']);
+  const u = await lock(c, a.id);
+  return { accountId: a.id, withholdingTaxSourceKey: src, validFrom: today, rate: await withholdingRate(c, u, today) };
+}
+
+async function withholdingHistory(c, accountId) {
+  const a = await lock(c, accountId);
+  const { rows } = await c.query('SELECT source_id, valid_from::text, created_by, created_at FROM savings_withholding_changes WHERE account_id = $1 ORDER BY created_at', [a.id]);
+  return rows.map((r) => ({ withholdingTaxSourceKey: r.source_id, validFrom: r.valid_from, createdBy: r.created_by, creationDate: r.created_at }));
 }
 
 // --------------------------------------------------------------------------
@@ -1225,7 +1679,7 @@ async function reverseTransaction(c, reference, { narration = 'Reversal', create
 
 async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = undefined, overdraftLimit = 0, openedOn = null, customFields: cf = {}, user = null,
   interestRate = undefined, interestSpread = undefined, overdraftRate = undefined, overdraftSpread = undefined, maxBalance = undefined, termLength = undefined,
-  name = null }) {
+  name = null, maxWithdrawalAmount = undefined, recommendedDepositAmount = undefined }) {
   const { rows: [p] } = await c.query('SELECT * FROM savings_products WHERE id = $1', [productId]);
   if (!p) throw err('UNKNOWN_DEPOSIT_PRODUCT', 404);
   if (p.is_active === false) throw err('DEPOSIT_PRODUCT_INACTIVE', 409);
@@ -1245,6 +1699,7 @@ async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = un
   }
   // The account's own terms, within the product's ranges (the reference platform's new account settings).
   const own = accountTerms(p, { interestRate, interestSpread, overdraftRate, overdraftSpread, maxBalance, termLength });
+  const limits = ownLimits(p, { maxWithdrawalAmount, recommendedDepositAmount });
   const values = await customFields.prepare(c, 'SAVINGS_ACCOUNT', { item: p.id, patch: cf || {}, user, creating: true });
   const no = accountNo || await NUMBERS.forProduct(c, p);
   // The product's initial state (the reference platform): ACTIVE, the platform's rule so far,
@@ -1253,13 +1708,15 @@ async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = un
   const state = p.initial_state || 'ACTIVE';
   const { rows } = await c.query(
     `INSERT INTO savings_accounts (account_no, member_id, product_id, status, branch_id, overdraft_limit, opened_on, period_started_on, custom_fields,
-       interest_rate, interest_spread, overdraft_rate, overdraft_spread, max_balance, term_length, last_activity_on, approved_on, name)
+       interest_rate, interest_spread, overdraft_rate, overdraft_spread, max_balance, term_length, last_activity_on, approved_on, name,
+       own_max_withdrawal, own_recommended_deposit)
      VALUES ($1,$2,$3,$14,$4,$5,COALESCE($6::date, current_date),COALESCE($6::date, current_date),$7,$8,$9,$10,$11,$12,$13,COALESCE($6::date, current_date),
-             CASE WHEN $14 = 'APPROVED' THEN COALESCE($6::date, current_date) END, $15)
+             CASE WHEN $14 = 'APPROVED' THEN COALESCE($6::date, current_date) END, $15, $16, $17)
      RETURNING *`,
     [no, memberId, productId, branch, lim, openedOn, JSON.stringify(values),
       own.interestRate, own.interestSpread, own.overdraftRate, own.overdraftSpread, own.maxBalance, own.termLength, state,
-      name === null || name === undefined || String(name).trim() === '' ? null : String(name).trim().slice(0, 255)]
+      name === null || name === undefined || String(name).trim() === '' ? null : String(name).trim().slice(0, 255),
+      limits.own_max_withdrawal ?? null, limits.own_recommended_deposit ?? null]
   );
   return rows[0];
 }
@@ -1318,6 +1775,7 @@ async function closeAccount(c, accountId, { createdBy, notes = null } = {}) {
   const { rows: [l] } = await c.query(
     "SELECT account_no FROM loan_accounts WHERE settlement_account_id = $1 AND status NOT LIKE 'CLOSED%' LIMIT 1", [a.id]);
   if (l) throw err(`SETTLEMENT_ACCOUNT_OF_A_RUNNING_LOAN: ${l.account_no}`, 409);
+  await assertNothingPending(c, a);
   const { rows: [out] } = await c.query(
     `UPDATE savings_accounts SET status = 'CLOSED', closed_on = current_date, notes = COALESCE($2, notes), updated_at = now()
      WHERE id = $1 RETURNING *`, [a.id, notes]);
@@ -1404,6 +1862,7 @@ async function changeState(c, accountId, action, { notes = null, user = null, cr
     case 'CLOSE_WITHDRAW': {
       const t = await liveTransactions(c, a.id);
       if (t.live || Number(a.balance) !== 0) throw err('ACCOUNT_HAS_TRANSACTIONS', 409);
+      await assertNothingPending(c, a);
       out = await set("status = 'CLOSED', closed_as = $2, closed_on = $3", [act === 'CLOSE_REJECT' ? 'REJECTED' : 'WITHDRAWN', today]);
       break;
     }
@@ -1431,6 +1890,7 @@ async function changeState(c, accountId, action, { notes = null, user = null, cr
       const { rows: [l] } = await c.query(
         "SELECT account_no FROM loan_accounts WHERE settlement_account_id = $1 AND status NOT LIKE 'CLOSED%' LIMIT 1", [a.id]);
       if (l) throw err(`SETTLEMENT_ACCOUNT_OF_A_RUNNING_LOAN: ${l.account_no}`, 409);
+      await assertNothingPending(c, a);
       const t = await writeOffOverdraft(c, a.id, { createdBy, closing: true, narration: notes ? `Write-off ${a.account_no}: ${notes}` : undefined });
       out = await set("status = 'CLOSED', closed_as = 'WRITTEN_OFF', closed_on = $2, state_before_lock = NULL, locked_on = NULL", [today]);
       out.writeOff = t;
@@ -1494,6 +1954,9 @@ async function deleteAccount(c, accountId, { createdBy } = {}) {
     if ((await c.query(`${sql} LIMIT 1`, [a.id])).rows.length) throw err(`CANNOT_DELETE: the account ${what}`, 409);
   }
   if (a.credit_arrangement_id) throw err('CANNOT_DELETE: remove the account from its credit arrangement first', 409);
+  await assertNothingPending(c, a);
+  const { rows: [anyHold] } = await c.query('SELECT 1 FROM savings_holds WHERE account_id = $1 UNION ALL SELECT 1 FROM savings_blocks WHERE account_id = $1 LIMIT 1', [a.id]);
+  if (anyHold) throw err('CANNOT_DELETE: the account has had blocks or holds', 409);
   await c.query('DELETE FROM savings_daily_balances WHERE account_id = $1', [a.id]);
   await c.query('DELETE FROM savings_accounts WHERE id = $1', [a.id]);
   await c.query('SELECT refresh_member_state($1)', [a.member_id]);
@@ -1503,6 +1966,8 @@ async function deleteAccount(c, accountId, { createdBy } = {}) {
 }
 
 module.exports = {
+  blockFunds, blocksOf, unblockFunds, seizeFunds, createHold, holdsOf, reverseHold, heldBack, changeWithholdingTax, withholdingHistory,
+  withholdingRate, repriceFrom, valueDay,
   changeState, deleteAccount, followArrears, apiState, OPEN, ACTIONS,
   closeAccount, lockedFunding, open, deposit, withdraw, transfer, summary, reverseTransaction, pledgedAmount, lock, record, ref,
   applyFee, applyMonthlyFees, accrueInterest, applyInterest, endOfDay, isApplicationDate,

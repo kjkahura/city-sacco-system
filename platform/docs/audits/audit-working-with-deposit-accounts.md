@@ -1,6 +1,6 @@
 # Audit: Deposits > Working with Deposit Accounts against the reference platform
 
-Audited on 29 September 2026, at the commit that adds this file. Nothing here is built yet; the build waits for John's decisions below.
+Audited on 29 September 2026 and committed in 6bb1bb1. John said "build it", so the defaults below were taken; see `build-log-working-with-deposit-accounts.md`.
 
 ## Reference pages read
 

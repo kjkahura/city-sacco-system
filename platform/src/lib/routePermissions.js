@@ -130,6 +130,12 @@ const RULES = [
   // :changeState; each checks the permission its action needs.
   ['POST', '/savings/:id', DEP_STATE], ['POST', '/savings/:id/state', DEP_STATE],
   ['DELETE', '/savings/:id', 'DELETE_SAVINGS_ACCOUNT'],
+  ['POST', '/savings/:id/blocks', 'BLOCK_AND_SEIZE_FUNDS'], ['DELETE', '/savings/:id/blocks/:reference', 'BLOCK_AND_SEIZE_FUNDS'],
+  ['POST', '/savings/:id/seizure-transactions', 'BLOCK_AND_SEIZE_FUNDS'],
+  ['GET', '/savings/:id/authorizationholds', 'VIEW_HOLDS'], ['POST', '/savings/:id/authorizationholds', 'CREATE_HOLDS'],
+  ['DELETE', '/savings/:id/authorizationholds/:reference', 'DELETE_HOLDS'],
+  ['POST', '/savings/deposit-transactions:bulk', 'MAKE_DEPOSIT'], ['POST', '/savings/transactions/reversals', 'BULK_DEPOSIT_CORRECTIONS'],
+  ['GET', '/bulks/:key', V_DEP],
   ['POST', '/savings/:id/overdraft/write-off', 'CLOSE_SAVINGS_ACCOUNTS'], ['POST', '/savings/:id/close', 'CLOSE_SAVINGS_ACCOUNTS'],
   ['POST', '/savings/:id/interest', 'APPLY_ACCRUED_SAVINGS_INTEREST'],
   ['POST', '/savings/:id/branch', 'MANAGE_DEPOSIT_ASSOCIATION'],

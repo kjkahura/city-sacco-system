@@ -581,6 +581,68 @@ takes an `action` and `notes`:
   account nothing was ever posted to and no loan, funding pledge, dividend
   or credit arrangement points at.
 
+**Working with deposit accounts** (the reference platform's Working with Deposit Accounts).
+
+- **Balances:** the balance endpoint gives the reference platform's `balances`: total,
+  available (after the overdraft lends, less holds, blocks and the pledged
+  amount), the available overdraft, holds, locked (the pledged amount),
+  blocked, the overdraft amount due, and credits on their way.
+- **Blocked funds:** `POST /api/savings/:id/blocks` (`externalReferenceId`,
+  `amount`, `notes`), `GET`, and `DELETE /:id/blocks/:reference` to unblock
+  (BLOCK_AND_SEIZE_FUNDS, administrators by default). A block may be larger
+  than the balance. What it holds is not available; deposits still come in
+  and interest accrues on the whole balance. Allowed on ACTIVE, IN_ARREARS,
+  LOCKED and DORMANT accounts.
+- **Seizures:** `POST /api/savings/:id/seizure-transactions` (`blockId`,
+  `amount`, `transactionChannelId`) takes all or part of what a block
+  holds, no more than the balance, through a channel (bank by default), as
+  a SAVINGS_SEIZURE. The block is SEIZED once nothing is left. A seizure is
+  reversed like any transaction, and the block holds it again.
+- **Transaction holds:** `POST /api/savings/:id/authorizationholds`
+  (`externalReferenceId` up to 32 characters, unique; `amount`;
+  `creditDebitIndicator` DBIT or CRDT) with CREATE_HOLDS, `GET` (VIEW_HOLDS,
+  `?status=`) and `DELETE /:id/authorizationholds/:reference` (DELETE_HOLDS).
+  A debit hold is no larger than what is available and makes it
+  unavailable; a credit hold is money on its way. A withdrawal (DBIT) or
+  deposit (CRDT) naming `holdExternalReferenceId`, for exactly the amount
+  held and with no value date, settles it (UPDATE_HOLDS). Holds do not
+  expire. Card authorization holds are not built: there is no card
+  processor to connect to.
+- **Value dates:** staff may not date a deposit, withdrawal or transfer in
+  the future, and need BACKDATE_SAVINGS_TRANSACTIONS for a past date, back
+  no further than the day after the last interest application. A backdated
+  movement moves the recorded daily balances from its date and prices that
+  interest again (the movement counts from the start of its day); a
+  backdated withdrawal that would take a past day below what the account
+  may owe is refused. Transfers are backdated the same way (the reference platform refuses
+  them). The platform's own callers (the end of day, loan transfers,
+  imports) date as before.
+- **Inter-client transfers:** a transfer to another holder's account, or a
+  repayment of another holder's loan, needs MAKE_INTER_CLIENTS_TRANSFERS.
+  Transfers carry custom fields like deposits.
+- **Bulk deposits:** `POST /api/savings/deposit-transactions:bulk`
+  (`transactions`: `accountId`, `amount`, `transactionDetails.transactionChannelId`,
+  `valueDate`, `notes`, `externalId`, `customFields`; up to 1,000) posts each
+  on its own under the same checks and returns a `bulkProcessKey`;
+  `GET /api/bulks/:key` lists what went through and what did not.
+- **Reversals:** deposits, withdrawals, transfers, fees, seizures, interest
+  applied (the latest only; it goes back to accrued, with its withholding
+  tax) and withholding tax on its own. A reversal dated after the last
+  interest application prices the interest again. A closed account's
+  transactions are not reversed, and a reversal that would overdraw an
+  account without a technical overdraft is refused.
+  `POST /api/savings/transactions/reversals` (`references`, `notes`,
+  BULK_DEPOSIT_CORRECTIONS) reverses several, each on its own.
+- **The account's own limits:** `maxWithdrawalAmount` (within the
+  product's; the lower applies) and `recommendedDepositAmount`, at opening
+  or with `PATCH`.
+- **Withholding tax per account:** `POST /api/savings/:id:changeWithholdingTax`
+  (`withholdingTaxSourceKey`, a WITHHOLDING rate source; null goes back to
+  the product's) from today, and `GET /:id/withholdingtaxes`. Interest
+  applied is taxed at the source's rate in force that day.
+- **Closing:** an account with pending blocks or holds is not closed,
+  written off, withdrawn, rejected or deleted.
+
 **Offset accounts** (the reference platform's offset loans). A loan product with
 `offsetEnabled` (a DYNAMIC_TERM product, REDUCING_EQUAL_INSTALLMENTS, SIMPLE
 interest on PRINCIPAL_AND_INTEREST) has its linked deposit account as its
@@ -2547,7 +2609,7 @@ approving imports, data dictionary comments, loan migration, resetting
 passwords), or any signed-in staff user (views, menu items, your own
 profile). A route the table does not list is refused to everyone but an
 administrator. The catalogue holds only permissions that are checked,
-178 of them: the reference platform's codes for what the platform has, and eleven of the platform's
+186 of them: the reference platform's codes for what the platform has, and eleven of the platform's
 own for what the reference platform does not have (shares and dividends, provisioning, the
 year-end close, regulatory returns, data extracts, data imports read-only,
 ID templates, approving write-off requests). A few permissions are checked

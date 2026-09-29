@@ -84,7 +84,7 @@ Built on 29 September 2026, following `audit-deposit-accounts.md`. After the Dep
 
 ## Follow-up: the Managing Deposit Accounts pages
 
-John asked whether Deposits > Managing Deposit Accounts was covered. Of the reference platform's nine pages, eight were. The ninth, Editing Accounts, and one rule on Adjusting Overdraft Terms were closed in the next commit (tenant migration 038):
+John asked whether Deposits > Managing Deposit Accounts was covered. Of the reference platform's nine pages, eight were. The ninth, Editing Accounts, and one rule on Adjusting Overdraft Terms were closed in 6bb1bb1 (tenant migration 038):
 
 - **Account name:** a deposit account has its own `name`, set at opening or with `PATCH`. Blank shows the product's name.
 - **Editing Accounts:**

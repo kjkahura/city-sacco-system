@@ -165,6 +165,7 @@ tenantApi.use('/group-role-names', clientRoutes.roleNames);
 tenantApi.use('/client-controls', clientRoutes.controls);
 // The reference platform's credit arrangements (lines of credit).
 tenantApi.use('/creditarrangements', require('./routes/creditArrangements').router);
+tenantApi.use('/bulks', require('./routes/savings').bulks);
 
 const savings = require('./routes/savings');
 tenantApi.use('/savings', savings);

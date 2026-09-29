@@ -435,6 +435,8 @@ const T = (fn) => withTenant(SCHEMA, fn);
       check('a deposit account opens on its own page', /Balance/.test(await page.textContent('#deposit-detail')));
       check('with its terms: the type, the interest rate and its limits', /savings account/.test(await page.textContent('#deposit-terms'))
         && /Interest rate/.test(await page.textContent('#deposit-terms')) && await page.locator('#dep-rate').count() === 1);
+      check('and its blocks and holds, with the actions an administrator may take', /No blocks or holds/.test(await page.textContent('#deposit-blocks'))
+        && await page.locator('#dep-block').count() === 1 && await page.locator('#dep-hold').count() === 1);
       check('and its state, with the actions it may take', /active/.test(await page.textContent('#deposit-state'))
         && await page.locator('#dep-act-LOCK').count() === 1 && await page.locator('#dep-act-UNLOCK').count() === 0);
     } else check('the member has a deposit account to open', false);

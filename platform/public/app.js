@@ -1027,9 +1027,10 @@ const DEP_ACTIONS = [
   { action: 'REOPEN', label: 'Reopen', code: 'REOPEN_SAVINGS_ACCOUNT', from: ['CLOSED'], when: (b) => !b.closedAs && ['CURRENT_ACCOUNT', 'SAVINGS_ACCOUNT'].includes(b.productType) },
 ];
 
-/** A deposit account: its balance, its transactions, its state, closing it, and its report templates. */
+/** A deposit account: its balance, its transactions, its state, blocks and holds, closing it, and its report templates. */
 async function depositDetail(a, holder = null) {
-  const [bal, tx] = await Promise.all([api('GET', `/api/savings/${a.id}/balance`), api('GET', `/api/savings/${a.id}/transactions?limit=50`)]);
+  const [bal, tx, bl, hd] = await Promise.all([api('GET', `/api/savings/${a.id}/balance`), api('GET', `/api/savings/${a.id}/transactions?limit=50`),
+    api('GET', `/api/savings/${a.id}/blocks`), can('VIEW_HOLDS') ? api('GET', `/api/savings/${a.id}/authorizationholds`) : Promise.resolve({ body: [] })]);
   if (!bal.ok) throw new Error(bal.error);
   const b = bal.body;
   view().innerHTML = `
@@ -1038,7 +1039,10 @@ async function depositDetail(a, holder = null) {
     <div class="grid" id="deposit-detail">${card('Balances', `<dl class="kv">
       <dt>Product</dt><dd>${esc(b.productId)}</dd><dt>Balance</dt><dd>${money(b.balance)}</dd><dt>Available</dt><dd>${money(b.available)}</dd>
       <dt>Pledged (member)</dt><dd>${money(b.pledged)}</dd><dt>Overdraft limit</dt><dd>${money(b.overdraftLimit)}${b.overdraftExpiryDate ? ` (expires ${day(b.overdraftExpiryDate)}${b.overdraftExpired ? ', expired' : ''})` : ''}</dd>
-      <dt>Interest accrued</dt><dd>${money(b.interest.accrued)}</dd><dt>Interest last applied</dt><dd>${esc(b.interest.lastApplied || '—')}</dd></dl>
+      <dt>Interest accrued</dt><dd>${money(b.interest.accrued)}</dd><dt>Interest last applied</dt><dd>${esc(b.interest.lastApplied || '—')}</dd>
+      ${b.balances?.blockedBalance ? `<dt>Blocked</dt><dd>${money(b.balances.blockedBalance)}</dd>` : ''}
+      ${b.balances?.holdBalance ? `<dt>On hold</dt><dd>${money(b.balances.holdBalance)}</dd>` : ''}
+      ${b.balances?.pendingCredits ? `<dt>Credits on their way</dt><dd>${money(b.balances.pendingCredits)}</dd>` : ''}</dl>
       ${can('CLOSE_SAVINGS_ACCOUNTS') && ['ACTIVE', 'DORMANT', 'MATURED'].includes(b.status) && Number(b.balance) === 0 ? '<button class="secondary" id="dep-close">Close account</button>' : ''}`)}
       ${card('Terms', `<dl class="kv" id="deposit-terms">
       <dt>Name</dt><dd>${esc(b.name || '')}</dd>
@@ -1062,7 +1066,14 @@ async function depositDetail(a, holder = null) {
       ${b.inArrearsSince ? `<dt>In arrears since</dt><dd>${day(b.inArrearsSince)}</dd>` : ''}${b.closedOn ? `<dt>Closed</dt><dd>${day(b.closedOn)}</dd>` : ''}</dl>
       <div class="toolbar">${DEP_ACTIONS.filter((x) => x.from.includes(b.status) && can(x.code) && (!x.when || x.when(b, tx.body || [])))
     .map((x) => `<button class="secondary" id="dep-act-${x.action}">${esc(x.label)}</button>`).join('')}
-      ${can('DELETE_SAVINGS_ACCOUNT') && !(tx.body || []).length ? '<button class="secondary" id="dep-delete">Delete account</button>' : ''}</div>`)}</div>
+      ${can('DELETE_SAVINGS_ACCOUNT') && !(tx.body || []).length ? '<button class="secondary" id="dep-delete">Delete account</button>' : ''}</div>`)}
+      ${card('Blocks and holds', `<div id="deposit-blocks">${table([
+    { label: 'Kind', value: (x) => (x.creditDebitIndicator ? `hold (${x.creditDebitIndicator})` : 'block') }, { label: 'Reference', value: (x) => esc(x.externalReferenceId) },
+    { label: 'Amount', num: true, value: (x) => money(x.amount) }, { label: 'Seized', num: true, value: (x) => (x.seizedAmount === undefined ? '' : money(x.seizedAmount)) },
+    { label: 'State', value: (x) => esc(String(x.state || x.status).toLowerCase()) },
+  ], [...(bl.body || []), ...(hd.body || [])], { empty: 'No blocks or holds' })}</div>
+      <div class="toolbar">${can('BLOCK_AND_SEIZE_FUNDS') ? '<button class="secondary" id="dep-block">Block funds</button><button class="secondary" id="dep-unblock">Unblock</button><button class="secondary" id="dep-seize">Seize</button>' : ''}
+      ${can('CREATE_HOLDS') ? '<button class="secondary" id="dep-hold">Hold</button>' : ''}${can('DELETE_HOLDS') ? '<button class="secondary" id="dep-unhold">Reverse a hold</button>' : ''}</div>`)}</div>
     ${card('Transactions', table([
     { label: 'Date', value: (t) => day(t.value_date || t.created_at) }, { label: 'Kind', key: 'kind' }, { label: 'Reference', key: 'reference' },
     { label: 'Amount', num: true, value: (t) => money(t.amount) },
@@ -1124,6 +1135,40 @@ async function depositDetail(a, holder = null) {
       if (res.ok) again();
     });
   }
+  const pendingBlocks = (bl.body || []).filter((x) => x.state === 'PENDING').map((x) => x.externalReferenceId);
+  const pendingHolds = (hd.body || []).filter((x) => x.status === 'PENDING').map((x) => x.externalReferenceId);
+  const act = async (method, path, body, done) => {
+    const res = await api(method, path, body);
+    toast(res.ok ? done : res.error, !res.ok);
+    if (res.ok) again();
+  };
+  onDep('#dep-block', async () => {
+    const d = await ask([{ label: 'Amount', name: 'amount', type: 'number', step: '0.01' }, opt({ label: 'Reference (blank: generated)', name: 'externalReferenceId' }),
+      opt({ label: 'Why (court order, investigation)', name: 'notes' })], `Block funds in ${b.accountNo}`);
+    if (d) act('POST', `/api/savings/${a.id}/blocks`, { amount: Number(d.amount), externalReferenceId: d.externalReferenceId || undefined, notes: d.notes || undefined }, 'Blocked');
+  });
+  onDep('#dep-unblock', async () => {
+    if (!pendingBlocks.length) return toast('No pending block', true);
+    const d = await ask([{ label: 'Block', name: 'ref', options: pendingBlocks }], `Unblock funds in ${b.accountNo}`);
+    if (d) act('DELETE', `/api/savings/${a.id}/blocks/${encodeURIComponent(d.ref)}`, undefined, 'Unblocked');
+  });
+  onDep('#dep-seize', async () => {
+    if (!pendingBlocks.length) return toast('No pending block', true);
+    const d = await ask([{ label: 'Block', name: 'ref', options: pendingBlocks }, opt({ label: 'Amount (blank: all it holds)', name: 'amount', type: 'number', step: '0.01' }),
+      opt({ label: 'Channel (blank: bank)', name: 'channelId' }), opt({ label: 'Notes', name: 'notes' })], `Seize blocked funds in ${b.accountNo}`);
+    if (d) act('POST', `/api/savings/${a.id}/seizure-transactions`, { blockId: d.ref, amount: d.amount ? Number(d.amount) : undefined,
+      transactionChannelId: d.channelId || undefined, notes: d.notes || undefined }, 'Seized');
+  });
+  onDep('#dep-hold', async () => {
+    const d = await ask([{ label: 'External reference (up to 32 characters)', name: 'externalReferenceId' }, { label: 'Amount', name: 'amount', type: 'number', step: '0.01' },
+      { label: 'Direction', name: 'creditDebitIndicator', options: ['DBIT', 'CRDT'] }, opt({ label: 'Notes', name: 'notes' })], `Hold on ${b.accountNo}`);
+    if (d) act('POST', `/api/savings/${a.id}/authorizationholds`, { ...d, amount: Number(d.amount), notes: d.notes || undefined }, 'Held');
+  });
+  onDep('#dep-unhold', async () => {
+    if (!pendingHolds.length) return toast('No pending hold', true);
+    const d = await ask([{ label: 'Hold', name: 'ref', options: pendingHolds }], `Reverse a hold on ${b.accountNo}`);
+    if (d) act('DELETE', `/api/savings/${a.id}/authorizationholds/${encodeURIComponent(d.ref)}`, undefined, 'Hold reversed');
+  });
   onDep('#dep-delete', async () => {
     if (!(await ask([], `Delete ${b.accountNo}? It cannot be undone.`))) return;
     const res = await api('DELETE', `/api/savings/${a.id}`);
@@ -2179,6 +2224,7 @@ async function tellerView() {
           <option value="bank">Bank transfer</option><option value="cheque">Cheque</option>
           <option value="payroll">Payroll check-off</option>
         </select></label>
+        ${can('BACKDATE_SAVINGS_TRANSACTIONS') ? '<label>Value date (blank: today; back to the day after the last interest application)<input id="t-date" type="date"></label>' : ''}
         <div class="toolbar">
           <button id="t-deposit">Deposit</button>
           <button id="t-withdraw" class="secondary">Withdraw</button>
@@ -2198,7 +2244,8 @@ async function tellerView() {
     const channelId = $('#t-channel').value;
     if (!account || !(amount > 0)) return toast('Account and a positive amount are needed', true);
     const path = kind === 'deposit' ? 'deposits' : 'withdrawals';
-    const r = await api('POST', `/api/savings/${encodeURIComponent(account)}/${path}`, { amount, channelId });
+    const valueDate = $('#t-date')?.value || undefined;
+    const r = await api('POST', `/api/savings/${encodeURIComponent(account)}/${path}`, { amount, channelId, valueDate });
     toast(r.ok ? `${kind} posted: ${r.body.reference}` : r.error, !r.ok);
     if (r.ok && own?.till && channelId === 'cash') {
       const t = await api('GET', `/api/tills/${own.till.id}`);

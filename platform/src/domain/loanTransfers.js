@@ -1,5 +1,7 @@
 'use strict';
 
+const { can } = require('../lib/permissions');
+
 const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
@@ -80,6 +82,8 @@ async function repayFromDeposit(c, loanId, { savingsAccountId, amount, valueDate
   const l = await ledger.lock(c, loanId);
   const a = await savings.lock(c, String(savingsAccountId));
   if (a.is_funding_account) throw err('A_FUNDING_ACCOUNT_CANNOT_REPAY_A_LOAN', 409);
+  // Repaying another holder's loan is an inter-client transfer (the reference platform).
+  if (user && a.member_id !== l.member_id && !can(user, 'MAKE_INTER_CLIENTS_TRANSFERS')) throw err('PERMISSION_REQUIRED: MAKE_INTER_CLIENTS_TRANSFERS', 403);
   const amt = round2(amount);
   if (!(amt > 0)) throw err('INVALID_REPAYMENT_AMOUNT', 400);
   const date = valueDate ? ymd(valueDate) : (await orgToday(c));
