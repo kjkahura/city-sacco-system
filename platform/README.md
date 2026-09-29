@@ -643,6 +643,34 @@ takes an `action` and `notes`:
 - **Closing:** an account with pending blocks or holds is not closed,
   written off, withdrawn, rejected or deleted.
 
+**The reference platform's deposits API** (`/api/deposits`). The same accounts and rules as
+`/api/savings`, in the reference platform's API v2 shape: the account object with
+`overdraftSettings` (`allowOverdraft`, `overdraftLimit`,
+`overdraftExpiryDate`), `overdraftInterestSettings` and `interestSettings`
+(each `interestRateSettings`: rate, spread, source, terms, index, review
+frequency, tiers, days in year), `internalControls`, `balances`,
+`accruedAmounts` and custom fields; `GET` (filters, paging headers),
+`POST /api/deposits:search`, `POST`, `GET /:id`, `PUT /:id` and `PATCH /:id`
+(JSON Patch; only what changed is applied, each through its rule; the
+holder, product, type, ID and state are refused), `DELETE /:id`, the colon
+actions `:changeState`, `:changeInterestRate`, `:changeWithholdingTax`,
+`:startMaturity`, `:undoMaturity` and `:applyInterest`, the
+`deposit-`, `withdrawal-`, `transfer-`, `fee-` and `seizure-transactions`,
+`GET /:id/transactions` (the reference platform's transaction types, adjustments as
+`DEPOSIT_ADJUSTMENT` and so on), blocks, holds, withholding tax history and
+`deposit-transactions:bulk`. Each route is let in by the permission of the
+`/api/savings` route it matches.
+
+- **Overdraft expiry at opening:** `overdraftExpiryDate` on `POST /api/savings`
+  (`overdraftSettings.overdraftExpiryDate` on `/api/deposits`), with a limit.
+- **Index rate review frequency** (the reference platform's Interest Rate Review Frequency):
+  `interestReviewCount` and `interestReviewUnit` (DAYS, WEEKS, MONTHS) for an
+  INDEX credit rate, `overdraftReviewCount` and `overdraftReviewUnit` for an
+  INDEX overdraft rate, from the account's activation. A day takes the index
+  rate in force on its latest review date; unset, the rate in force that day.
+- **30E/360:** THIRTY_360 is 30E/360 in its ISDA form (31sts and the last day
+  of February count as the 30th); `/api/deposits` names it `E30_360`.
+
 **Offset accounts** (the reference platform's offset loans). A loan product with
 `offsetEnabled` (a DYNAMIC_TERM product, REDUCING_EQUAL_INSTALLMENTS, SIMPLE
 interest on PRINCIPAL_AND_INTEREST) has its linked deposit account as its

@@ -51,6 +51,9 @@ const FIELDS = {
   overdraftCalcBalance: 'od_calc_balance',
   // Deposit Accounts (the reference platform): the state a new account starts in, and offset.
   initialState: 'initial_state', allowOffset: 'allow_offset',
+  // The reference platform's Interest Rate Review Frequency, for index rates.
+  interestReviewCount: 'interest_review_count', interestReviewUnit: 'interest_review_unit',
+  overdraftReviewCount: 'od_review_count', overdraftReviewUnit: 'od_review_unit',
 };
 const ENUMS = {
   interest_calc_balance: DR.BALANCES,
@@ -90,6 +93,7 @@ const publicProduct = (p) => ({
     spread: { min: num(p.interest_spread_min), max: num(p.interest_spread_max), default: num(p.interest_spread_default) },
     tiers: p.interest_rate_tiers || [], maxBalance: num(p.interest_max_balance), fixedDates: p.interest_fixed_dates || [],
     collectWhenLocked: p.collect_interest_when_locked, accrueAfterMaturity: p.accrue_interest_after_maturity,
+    review: p.interest_review_count ? { count: p.interest_review_count, unit: p.interest_review_unit } : null,
   },
   overdraft: {
     allowed: p.allow_overdraft, maxLimit: num(p.max_overdraft_limit), annualRate: Number(p.overdraft_annual_rate),
@@ -97,6 +101,7 @@ const publicProduct = (p) => ({
     rateTerms: p.od_rate_terms, rateMin: num(p.od_rate_min), rateMax: num(p.od_rate_max), indexSourceId: p.od_index_source_id || null,
     spread: { min: num(p.od_spread_min), max: num(p.od_spread_max), default: num(p.od_spread_default) },
     tiers: p.od_rate_tiers || [], dayCount: p.od_day_count || p.interest_day_count, calcBalance: p.od_calc_balance,
+    review: p.od_review_count ? { count: p.od_review_count, unit: p.od_review_unit } : null,
   },
   accountingMethod: p.accounting_method, interestAccruedAccounting: p.interest_accrued_accounting,
   accrualGranularity: p.accrual_granularity,
@@ -133,7 +138,7 @@ function toColumns(body) {
   if (body) { const af = availableFor(body); if (af !== undefined) cols.available_for = af; }
   if (body && body.creditArrangementRequirement !== undefined) cols.credit_arrangement_requirement = body.creditArrangementRequirement;
   for (const k of ['interest_rate_tiers', 'od_rate_tiers']) if (cols[k] !== undefined) cols[k] = JSON.stringify(cols[k] || []);
-  for (const k of ['initial_state', 'product_type', 'category', 'id_generator_type', 'interest_rate_terms', 'interest_rate_frequency', 'term_unit', 'od_rate_terms']) {
+  for (const k of ['interest_review_unit', 'od_review_unit', 'initial_state', 'product_type', 'category', 'id_generator_type', 'interest_rate_terms', 'interest_rate_frequency', 'term_unit', 'od_rate_terms']) {
     if (typeof cols[k] === 'string') cols[k] = cols[k].toUpperCase();
   }
   for (const k of ['interest_index_source_id', 'od_index_source_id']) if (typeof cols[k] === 'string') cols[k] = cols[k].toUpperCase();
@@ -182,6 +187,18 @@ async function validate(c, cols, { before = null, accounts = 0 } = {}) {
     problems.push('a negative annual_rate needs allow_negative_rate');
   }
   if (m.allow_overdraft === false && m.max_overdraft_limit) problems.push('max_overdraft_limit needs allow_overdraft');
+  // An index rate's review frequency: a whole number of DAYS, WEEKS or MONTHS, both given, on an INDEX rate.
+  for (const [cnt, unit, terms, what] of [['interest_review_count', 'interest_review_unit', 'interest_rate_terms', 'the interest rate'],
+    ['od_review_count', 'od_review_unit', 'od_rate_terms', 'the overdraft rate']]) {
+    if (cols[cnt] === undefined && cols[unit] === undefined) continue;
+    const n = m[cnt];
+    if ((n === null || n === undefined) !== (m[unit] === null || m[unit] === undefined)) problems.push(`${cnt} and ${unit} are given together`);
+    else if (n !== null && n !== undefined) {
+      if (!(Number.isInteger(Number(n)) && Number(n) > 0)) problems.push(`${cnt} is a whole number above zero`);
+      if (!DR.REVIEW_UNITS.includes(m[unit])) problems.push(`${unit} must be one of ${DR.REVIEW_UNITS.join(', ')}`);
+      if (m[terms] !== 'INDEX') problems.push(`a review frequency is for an INDEX rate: ${what} is ${m[terms] || 'FIXED'}`);
+    }
+  }
   if (!before && !cols.name) problems.push('name is required');
   if (before && accounts > 0) {
     const changed = FROZEN_WITH_ACCOUNTS.filter((k) => cols[k] !== undefined && cols[k] !== before[k]);

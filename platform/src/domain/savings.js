@@ -64,7 +64,8 @@ const PRODUCT_COLUMNS = `
   p.max_opening_balance, p.default_opening_balance, p.term_unit, p.term_min, p.term_max, p.term_default, p.dormancy_days,
   p.allow_arbitrary_fees, p.od_rate_terms, p.od_rate_min, p.od_rate_max, p.od_index_source_id, p.od_spread_min, p.od_spread_max,
   p.od_spread_default, p.od_rate_tiers, p.od_day_count, p.od_calc_balance, p.initial_state, p.allow_offset,
-  p.withholding_source_id AS product_withholding_source_id`;
+  p.withholding_source_id AS product_withholding_source_id,
+  p.interest_review_count, p.interest_review_unit, p.od_review_count, p.od_review_unit`;
 
 // The states an account is open in (it holds money, earns and is charged).
 const OPEN = ['ACTIVE', 'IN_ARREARS', 'DORMANT', 'LOCKED', 'MATURED'];
@@ -688,16 +689,24 @@ const weight = (prev, day, conv) => (conv === 'THIRTY_360' ? S.dayCount(prev, da
 // Whether interest is applied on a day: the calendar schedules, and the reference platform's (./depositRules).
 const isApplicationDate = DR.isApplicationDate;
 
-/** The index rate of a source on each day of a range, from the rates in force. */
-async function indexRates(c, sourceId, from, to) {
+/**
+ * The index rate of a source on each day of a range, from the rates in
+ * force. With a review frequency (the reference platform's Interest Rate Review Frequency:
+ * every `count` DAYS, WEEKS or MONTHS from the account's activation) a day
+ * takes the rate in force on its latest review date; without one, the rate
+ * in force that day.
+ */
+async function indexRates(c, sourceId, from, to, review = null) {
   if (!sourceId) return () => null;
   const { rows } = await c.query(
     `SELECT valid_from::text AS d, rate FROM index_rates WHERE source_id = $1 AND valid_from <= $2::date ORDER BY valid_from`, [sourceId, to]);
-  return (day) => {
+  const on = (day) => {
     let r = null;
     for (const x of rows) { if (x.d <= day) r = Number(x.rate); else break; }
     return r;
   };
+  if (!review || !review.count || !review.unit || !review.anchor) return on;
+  return (day) => on(DR.reviewDate(review.anchor, day, review.count, review.unit));
 }
 
 /**
@@ -728,8 +737,10 @@ async function accrualContext(c, a, start, date) {
     // A dormant account accrues no interest, credit or overdraft (the reference platform); its days are still recorded.
     dormant: a.status === 'DORMANT',
     maturity: a.maturity_date ? S.ymd(a.maturity_date) : null,
-    creditIndex: await indexRates(c, a.interest_rate_terms === 'INDEX' ? a.interest_index_source_id : null, start, date),
-    odIndex: await indexRates(c, a.od_rate_terms === 'INDEX' ? a.od_index_source_id : null, start, date),
+    creditIndex: await indexRates(c, a.interest_rate_terms === 'INDEX' ? a.interest_index_source_id : null, start, date,
+      { count: a.interest_review_count, unit: a.interest_review_unit, anchor: S.ymd(a.activated_on || a.opened_on) }),
+    odIndex: await indexRates(c, a.od_rate_terms === 'INDEX' ? a.od_index_source_id : null, start, date,
+      { count: a.od_review_count, unit: a.od_review_unit, anchor: S.ymd(a.activated_on || a.opened_on) }),
   };
 }
 
@@ -1679,12 +1690,19 @@ async function withholdingHistory(c, accountId) {
 
 async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = undefined, overdraftLimit = 0, openedOn = null, customFields: cf = {}, user = null,
   interestRate = undefined, interestSpread = undefined, overdraftRate = undefined, overdraftSpread = undefined, maxBalance = undefined, termLength = undefined,
-  name = null, maxWithdrawalAmount = undefined, recommendedDepositAmount = undefined }) {
+  name = null, maxWithdrawalAmount = undefined, recommendedDepositAmount = undefined, overdraftExpiryDate = null }) {
   const { rows: [p] } = await c.query('SELECT * FROM savings_products WHERE id = $1', [productId]);
   if (!p) throw err('UNKNOWN_DEPOSIT_PRODUCT', 404);
   if (p.is_active === false) throw err('DEPOSIT_PRODUCT_INACTIVE', 409);
   const lim = round2(overdraftLimit || 0);
   if (lim > 0 && !p.allow_overdraft) throw err('PRODUCT_DOES_NOT_ALLOW_OVERDRAFTS', 409);
+  // The overdraft expiry date at opening (the reference platform's new account overdraft settings).
+  let expires = null;
+  if (overdraftExpiryDate !== null && overdraftExpiryDate !== undefined && overdraftExpiryDate !== '') {
+    expires = String(overdraftExpiryDate).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(expires) || Number.isNaN(Date.parse(`${expires}T00:00:00Z`))) throw err('OVERDRAFT_EXPIRY_DATE_IS_A_DATE: yyyy-MM-dd', 400);
+    if (!(lim > 0)) throw err('AN_OVERDRAFT_EXPIRY_DATE_NEEDS_AN_OVERDRAFT_LIMIT', 400);
+  }
   // An overdraft under a product that requires a credit arrangement is set once the account is linked.
   if (lim > 0 && p.credit_arrangement_requirement === 'REQUIRED') throw err(`OVERDRAFT_NEEDS_A_CREDIT_ARRANGEMENT: product ${p.id} requires one`, 409);
   if (lim > 0 && p.max_overdraft_limit !== null && lim > Number(p.max_overdraft_limit)) {
@@ -1709,14 +1727,14 @@ async function open(c, { memberId, productId = 'SAV01', accountNo, branchId = un
   const { rows } = await c.query(
     `INSERT INTO savings_accounts (account_no, member_id, product_id, status, branch_id, overdraft_limit, opened_on, period_started_on, custom_fields,
        interest_rate, interest_spread, overdraft_rate, overdraft_spread, max_balance, term_length, last_activity_on, approved_on, name,
-       own_max_withdrawal, own_recommended_deposit)
+       own_max_withdrawal, own_recommended_deposit, overdraft_expires_on)
      VALUES ($1,$2,$3,$14,$4,$5,COALESCE($6::date, current_date),COALESCE($6::date, current_date),$7,$8,$9,$10,$11,$12,$13,COALESCE($6::date, current_date),
-             CASE WHEN $14 = 'APPROVED' THEN COALESCE($6::date, current_date) END, $15, $16, $17)
+             CASE WHEN $14 = 'APPROVED' THEN COALESCE($6::date, current_date) END, $15, $16, $17, $18::date)
      RETURNING *`,
     [no, memberId, productId, branch, lim, openedOn, JSON.stringify(values),
       own.interestRate, own.interestSpread, own.overdraftRate, own.overdraftSpread, own.maxBalance, own.termLength, state,
       name === null || name === undefined || String(name).trim() === '' ? null : String(name).trim().slice(0, 255),
-      limits.own_max_withdrawal ?? null, limits.own_recommended_deposit ?? null]
+      limits.own_max_withdrawal ?? null, limits.own_recommended_deposit ?? null, expires]
   );
   return rows[0];
 }

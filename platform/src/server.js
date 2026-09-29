@@ -158,6 +158,7 @@ const clientRoutes = require('./routes/clients');
 tenantApi.post('/clients\\:search', ...clientRoutes.searchClients);
 tenantApi.post('/groups\\:search', ...clientRoutes.searchGroups);
 tenantApi.post('/creditarrangements\\:search', ...require('./routes/creditArrangements').search);
+tenantApi.post('/deposits\\:search', ...require('./routes/deposits').search);
 tenantApi.use('/clients', clientRoutes.clients);
 tenantApi.use('/groups', clientRoutes.groups);
 tenantApi.use('/client-types', clientRoutes.types);
@@ -166,6 +167,7 @@ tenantApi.use('/client-controls', clientRoutes.controls);
 // The reference platform's credit arrangements (lines of credit).
 tenantApi.use('/creditarrangements', require('./routes/creditArrangements').router);
 tenantApi.use('/bulks', require('./routes/savings').bulks);
+tenantApi.use('/deposits', require('./routes/deposits').router);
 
 const savings = require('./routes/savings');
 tenantApi.use('/savings', savings);

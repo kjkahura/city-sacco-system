@@ -271,7 +271,29 @@ function productProblems(m, cols, { before = null, accounts = 0 } = {}) {
   return p;
 }
 
+/**
+ * The latest review date on or before `day` for a rate reviewed every
+ * `count` DAYS, WEEKS or MONTHS from `anchor` (the account's activation).
+ * Before the anchor, the anchor itself.
+ */
+function reviewDate(anchor, day, count, unit) {
+  const a = ymd(anchor);
+  const d = ymd(day);
+  if (d <= a) return a;
+  if (unit === 'MONTHS') {
+    let k = 0;
+    while (addMonths(a, (k + 1) * count) <= d) k += 1;
+    return addMonths(a, k * count);
+  }
+  const step = count * (unit === 'WEEKS' ? 7 : 1);
+  const days = Math.round((Date.parse(`${d}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
+  const k = Math.floor(days / step);
+  return new Date(Date.parse(`${a}T00:00:00Z`) + k * step * 86400000).toISOString().slice(0, 10);
+}
+const REVIEW_UNITS = ['DAYS', 'WEEKS', 'MONTHS'];
+
 module.exports = {
+  reviewDate, REVIEW_UNITS,
   TYPES, CATEGORIES, RATE_TERMS, OD_RATE_TERMS, FREQUENCIES, BALANCES, DAY_COUNTS, APPLICATIONS, TERM_UNITS, ID_TYPES, MONTHLY_FEE_METHODS,
   hasTerm, yearDays, annualFactor, tierFor, creditOn, overdraftRateOn, addMonths, maturityDate, isAnniversary, isMonthEnd,
   isApplicationDate, isMonthlyFeeDate, productProblems,

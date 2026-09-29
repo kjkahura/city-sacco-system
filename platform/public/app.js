@@ -1058,7 +1058,8 @@ async function depositDetail(a, holder = null) {
       ${b.maturity && b.maturity.startedOn && b.status !== 'MATURED' && can('UNDO_MATURITY') ? '<button class="secondary" id="dep-unmature">Undo maturity</button>' : ''}
       ${b.interestRateTerms === 'FIXED' && can('EDIT_SAVINGS_ACCOUNT') && b.status !== 'CLOSED' ? '<button class="secondary" id="dep-rate">Change interest rate</button>' : ''}
       ${can('EDIT_SAVINGS_ACCOUNT') && b.status !== 'CLOSED' ? '<button class="secondary" id="dep-max">Maximum balance</button>' : ''}
-      ${can('EDIT_SAVINGS_ACCOUNT') ? '<button class="secondary" id="dep-edit">Edit account</button>' : ''}</div>`)}
+      ${can('EDIT_SAVINGS_ACCOUNT') ? '<button class="secondary" id="dep-edit">Edit account</button>' : ''}
+      ${can('EDIT_SAVINGS_ACCOUNT') && b.productType === 'CURRENT_ACCOUNT' && ['ACTIVE', 'IN_ARREARS', 'PENDING_APPROVAL', 'APPROVED'].includes(b.status) ? '<button class="secondary" id="dep-overdraft">Overdraft terms</button>' : ''}</div>`)}
       ${card('State', `<dl class="kv" id="deposit-state">
       <dt>State</dt><dd>${esc(String(b.accountState || b.status).replace(/_/g, ' ').toLowerCase())}</dd>
       ${b.approvedOn ? `<dt>Approved</dt><dd>${day(b.approvedOn)}</dd>` : ''}${b.activatedOn ? `<dt>Activated</dt><dd>${day(b.activatedOn)}</dd>` : ''}
@@ -1117,6 +1118,18 @@ async function depositDetail(a, holder = null) {
     if (d.termLength !== undefined && d.termLength !== '') body.termLength = Number(d.termLength);
     const res = await api('PATCH', `/api/savings/${a.id}`, body);
     toast(res.ok ? 'Saved' : res.error, !res.ok);
+    if (res.ok) again();
+  });
+  onDep('#dep-overdraft', async () => {
+    // The reference platform's Adjusting Overdraft Terms: the limit, the expiry date and the rate.
+    const d = await ask([{ label: 'Overdraft limit', name: 'limit', type: 'number', step: '0.01', value: b.overdraftLimit ?? 0 },
+      opt({ label: 'Expiry date (blank: none)', name: 'expiryDate', type: 'date', value: b.overdraftExpiryDate || '' }),
+      opt({ label: 'Overdraft rate, % a year (blank: unchanged)', name: 'interestRate', type: 'number', step: '0.0001' })], `Overdraft terms of ${b.accountNo}`);
+    if (!d) return;
+    const body = { limit: Number(d.limit), expiryDate: d.expiryDate || null };
+    if (d.interestRate !== '' && d.interestRate !== undefined) body.interestRate = Number(d.interestRate);
+    const res = await api('PUT', `/api/savings/${a.id}/overdraft`, body);
+    toast(res.ok ? 'Overdraft terms saved' : res.error, !res.ok);
     if (res.ok) again();
   });
   onDep('#dep-max', async () => {
@@ -3431,6 +3444,10 @@ const DEPOSIT_FIELDS = (p = {}) => [
   { label: 'Allow arbitrary fees', name: 'allowArbitraryFees', options: ['true', 'false'], value: String(p.allowArbitraryFees ?? true) },
   { label: 'New accounts start', name: 'initialState', options: ['ACTIVE', 'PENDING_APPROVAL', 'APPROVED'], value: p.initialState || 'ACTIVE' },
   { label: 'Allow accounts to be used for offset', name: 'allowOffset', options: ['false', 'true'], value: String(p.allowOffset ?? false) },
+  opt({ label: 'Index interest rate reviewed every (blank: daily)', name: 'interestReviewCount', type: 'number', value: p.interest?.review?.count ?? '' }),
+  { label: 'Review unit', name: 'interestReviewUnit', options: ['', 'DAYS', 'WEEKS', 'MONTHS'], value: p.interest?.review?.unit || '' },
+  opt({ label: 'Index overdraft rate reviewed every (blank: daily)', name: 'overdraftReviewCount', type: 'number', value: p.overdraft?.review?.count ?? '' }),
+  { label: 'Overdraft review unit', name: 'overdraftReviewUnit', options: ['', 'DAYS', 'WEEKS', 'MONTHS'], value: p.overdraft?.review?.unit || '' },
   opt({ label: 'Minimum balance to earn interest', name: 'minBalanceForInterest', type: 'number', step: '0.01', value: p.interest?.minBalanceForInterest ?? '' }),
   { label: 'Allow a negative rate', name: 'allowNegativeRate', options: ['false', 'true'], value: String(p.interest?.allowNegativeRate ?? false) },
   opt({ label: 'Withholding tax, percent (blank: none)', name: 'withholdingTaxPercent', type: 'number', step: '0.001', value: p.interest?.withholdingTaxPercent ?? '' }),
@@ -3483,7 +3500,9 @@ async function depositBody(d) {
     collectInterestWhenLocked: d.collectInterestWhenLocked !== 'false', accrueInterestAfterMaturity: d.accrueInterestAfterMaturity === 'true',
     ...term, minOpeningBalance: openMin, maxOpeningBalance: openMax, defaultOpeningBalance: openDefault,
     recommendedDepositAmount: num(d.recommendedDepositAmount), maxWithdrawalAmount: num(d.maxWithdrawalAmount), dormancyDays: num(d.dormancyDays),
-    allowArbitraryFees: d.allowArbitraryFees !== 'false', initialState: d.initialState || 'ACTIVE', allowOffset: d.allowOffset === 'true', overdraftRateTerms: d.overdraftRateTerms, overdraftRateMin: odMin, overdraftRateMax: odMax,
+    allowArbitraryFees: d.allowArbitraryFees !== 'false', initialState: d.initialState || 'ACTIVE', allowOffset: d.allowOffset === 'true',
+    interestReviewCount: num(d.interestReviewCount), interestReviewUnit: d.interestReviewUnit || null,
+    overdraftReviewCount: num(d.overdraftReviewCount), overdraftReviewUnit: d.overdraftReviewUnit || null, overdraftRateTerms: d.overdraftRateTerms, overdraftRateMin: odMin, overdraftRateMax: odMax,
     overdraftIndexSourceId: d.overdraftIndexSourceId || null, overdraftSpreadDefault: odSpreadDefault, overdraftSpreadMin: odSpreadMin,
     overdraftSpreadMax: odSpreadMax, overdraftRateTiers: tiers(d.odTiers), overdraftCalcBalance: d.overdraftCalcBalance,
   };

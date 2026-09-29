@@ -49,7 +49,7 @@ router.get('/', requireAuth(), async (req, res, next) => {
 // Bulk deposits (the reference platform's POST /deposits/deposit-transactions:bulk): each
 // deposit posts on its own, under the same checks as one; the outcome is
 // kept under a process key for GET /api/bulks/:key.
-router.post('/deposit-transactions\\:bulk', ...tx(async (c, req, res, { actor, user }) => {
+const bulkDeposits = tx(async (c, req, res, { actor, user }) => {
   const list = Array.isArray(req.body?.transactions) ? req.body.transactions : null;
   if (!list || !list.length) throw acct.err('TRANSACTIONS_IS_A_LIST', 400);
   if (list.length > 1000) throw acct.err('AT_MOST_1000_TRANSACTIONS', 400);
@@ -77,7 +77,8 @@ router.post('/deposit-transactions\\:bulk', ...tx(async (c, req, res, { actor, u
     VALUES ($1,'DEPOSIT',$2,$3,$4,$5,now())`, [key, status, JSON.stringify(items), JSON.stringify(errors), actor]);
   res.status(202);
   return { bulkProcessKey: key, status, processed: items.length, failed: errors.length };
-}));
+});
+router.post('/deposit-transactions\\:bulk', ...bulkDeposits);
 
 // Reverse several transactions at once (the reference platform's bulk deposit corrections), each on its own.
 router.post('/transactions/reversals', ...tx(async (c, req, _res, { actor }) => {
@@ -326,3 +327,4 @@ bulks.get('/:key', requireAuth(), async (req, res, next) => {
 module.exports = router;
 module.exports.accounting = accounting;
 module.exports.bulks = bulks;
+module.exports.bulkDeposits = bulkDeposits;
