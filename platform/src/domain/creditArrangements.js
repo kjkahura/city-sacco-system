@@ -5,6 +5,7 @@ const { can } = require('../lib/permissions');
 const acct = require('./accounting');
 const NUMBERS = require('./accountNumbers');
 const CF = require('./customFields');
+const SEARCH = require('../lib/searchCriteria');
 
 const { err, round2 } = acct;
 
@@ -43,7 +44,7 @@ const EXPOSURE_TYPES = ['APPROVED_AMOUNT', 'OUTSTANDING_AMOUNT'];
 const REQUIREMENTS = ['OPTIONAL', 'REQUIRED', 'NOT_REQUIRED'];
 const RUNNING = ['APPROVED', 'ACTIVE'];
 const LINKABLE_LOAN_STATES = ['PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'IN_ARREARS'];
-const OPEN_DEPOSIT_STATES = ['ACTIVE', 'DORMANT', 'LOCKED'];
+const OPEN_DEPOSIT_STATES = ['ACTIVE', 'IN_ARREARS', 'DORMANT', 'LOCKED'];
 
 // action: [from states, to (PREVIOUS: the state before closing), permission]
 const ACTIONS = {
@@ -186,6 +187,64 @@ async function accounts(c, ref) {
     depositAccounts: deposits.map((a) => ({
       encodedKey: a.id, id: a.account_no, productId: a.product_id, accountState: a.status, balance: Number(a.balance),
       overdraftLimit: Number(a.overdraft_limit), overdraftExpiryDate: ymd(a.overdraft_expires_on),
+    })),
+  };
+}
+
+// The reference platform's search fields for credit arrangements (POST /creditarrangements:search).
+const SEARCH_FIELDS = {
+  encodedKey: { sql: 'ca.id::text', type: 'text' }, id: { sql: 'ca.arrangement_no', type: 'text' },
+  holderKey: { sql: 'ca.holder_id::text', type: 'text' }, holderId: { sql: 'm.member_no', type: 'text' },
+  holderType: { sql: "CASE WHEN m.holder_type = 'GROUP' THEN 'GROUP' ELSE 'CLIENT' END", type: 'text' },
+  amount: { sql: 'ca.amount', type: 'number' }, state: { sql: 'ca.state', type: 'text' },
+  exposureLimitType: { sql: 'ca.exposure_limit_type', type: 'text' },
+  startDate: { sql: 'ca.start_date', type: 'date' }, expireDate: { sql: 'ca.expire_date', type: 'date' },
+  approvedDate: { sql: 'ca.approved_at', type: 'timestamp' }, closedDate: { sql: 'ca.closed_at', type: 'timestamp' },
+  creationDate: { sql: 'ca.created_at', type: 'timestamp' }, lastModifiedDate: { sql: 'ca.updated_at', type: 'timestamp' },
+  notes: { sql: 'ca.notes', type: 'text' },
+};
+
+/**
+ * Search (the reference platform's POST /creditarrangements:search): filterCriteria and
+ * sortingCriteria on the fields above, and custom fields as _set.field.
+ */
+async function search(c, body = {}, { offset = 0, limit = 50, user = null } = {}) {
+  const q = SEARCH.build(body, SEARCH_FIELDS, { customColumn: 'ca.custom_fields', today: await orgToday(c) });
+  const { rows } = await c.query(
+    `SELECT ca.*, m.member_no AS holder_no, m.holder_type, m.first_name, m.last_name, count(*) OVER () AS total_count
+       FROM credit_arrangements ca JOIN members m ON m.id = ca.holder_id
+      WHERE ${q.where}
+      ORDER BY ${q.order ? `${q.order}, ` : ''}ca.created_at, ca.arrangement_no
+      OFFSET $${q.params.length + 1} LIMIT $${q.params.length + 2}`, [...q.params, offset, limit]);
+  const items = [];
+  for (const r of rows) items.push(await out(c, r, { user }));
+  return { total: rows.length ? Number(rows[0].total_count) : 0, items };
+}
+
+// The reference platform's installment states; the platform's OVERDUE is the reference platform's LATE.
+const INSTALLMENT_STATE = { PENDING: 'PENDING', PARTIALLY_PAID: 'PARTIALLY_PAID', PAID: 'PAID', OVERDUE: 'LATE', GRACE: 'GRACE' };
+
+/**
+ * The schedule of the arrangement (the reference platform's GET /creditarrangements/{id}/schedule):
+ * the instalments of its loan accounts that are not closed, by due date.
+ */
+async function schedule(c, ref) {
+  const ca = await row(c, ref);
+  const { rows } = await c.query(
+    `SELECT i.*, l.id AS loan_id, l.account_no, l.status AS loan_status
+       FROM loan_installments i JOIN loan_accounts l ON l.id = i.loan_id
+      WHERE l.credit_arrangement_id = $1 AND l.status NOT LIKE 'CLOSED%'
+      ORDER BY i.due_date, l.account_no, i.number`, [ca.id]);
+  const money = (due, paid) => {
+    const expected = round2(due);
+    const p = round2(paid || 0);
+    return { amount: { expected, paid: p, due: round2(Math.max(0, expected - p)) } };
+  };
+  return {
+    installments: rows.map((i) => ({
+      encodedKey: i.id, parentAccountKey: i.loan_id, parentAccountId: i.account_no, number: String(i.number),
+      dueDate: ymd(i.due_date), state: INSTALLMENT_STATE[i.status] || i.status, isPaymentHoliday: Boolean(i.payment_holiday),
+      principal: money(i.principal_due, i.principal_paid), interest: money(i.interest_due, i.interest_paid), fee: money(i.fee_due, i.fee_paid),
     })),
   };
 }
@@ -557,6 +616,6 @@ async function assertRequirement(c, kind, productId, value) {
 
 module.exports = {
   STATES, EXPOSURE_TYPES, REQUIREMENTS, ACTIONS,
-  row, exposure, find, list, accounts, create, update, replace, remove, changeState, addAccount, removeAccount,
+  row, exposure, find, list, search, schedule, accounts, create, update, replace, remove, changeState, addAccount, removeAccount,
   onLoanApprove, onLoanDisburse, afterLoanDisburse, onLoanAmount, carry, onLoanReopen, onOverdraft, onOverdraw, assertRequirement,
 };

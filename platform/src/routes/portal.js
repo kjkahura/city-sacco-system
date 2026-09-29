@@ -195,7 +195,7 @@ router.get('/stats', ...read(async (c, req) => {
 /** A member's own savings account, or null if the number is not theirs. */
 async function ownSavings(c, memberId, accountNo) {
   const { rows: [a] } = await c.query(
-    "SELECT * FROM savings_accounts WHERE account_no = $1 AND member_id = $2 AND status = 'ACTIVE'",
+    "SELECT * FROM savings_accounts WHERE account_no = $1 AND member_id = $2 AND status IN ('ACTIVE', 'IN_ARREARS')",
     [accountNo, memberId]);
   return a || null;
 }

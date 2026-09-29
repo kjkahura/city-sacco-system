@@ -58,8 +58,8 @@ async function addGuarantor(c, loanId, { memberId, amount, createdBy = null, cus
   // The guarantor must actually have the deposits they are pledging, net of
   // anything already pledged elsewhere.
   const { rows: [bal] } = await c.query(
-    'SELECT COALESCE(SUM(balance), 0) AS total FROM savings_accounts WHERE member_id = $1 AND status = $2',
-    [memberId, 'ACTIVE']
+    'SELECT COALESCE(SUM(balance), 0) AS total FROM savings_accounts WHERE member_id = $1 AND status = ANY($2)',
+    [memberId, ['ACTIVE', 'IN_ARREARS']]
   );
   const alreadyPledged = await savings.pledgedAmount(c, memberId);
   const free = round2(bal.total - alreadyPledged);
@@ -150,7 +150,7 @@ async function checkEligibility(c, { memberId, productId, principal, loanId = nu
     refinancing = a?.refinance_of || null;
   }
   const { rows: [d] } = await c.query(
-    "SELECT COALESCE(SUM(balance), 0) AS total FROM savings_accounts WHERE member_id = $1 AND status = 'ACTIVE'",
+    "SELECT COALESCE(SUM(balance), 0) AS total FROM savings_accounts WHERE member_id = $1 AND status IN ('ACTIVE', 'IN_ARREARS')",
     [memberId]
   );
   const deposits = round2(d.total);

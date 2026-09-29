@@ -42,6 +42,8 @@ async function otherLoans(c, savingsAccountId, loanId) {
 async function check(c, l, a) {
   if (CLOSED.includes(l.status)) throw err(`LOAN_IS_CLOSED: ${l.status}`, 409);
   if (!l.settlement_enabled) throw err('PRODUCT_DOES_NOT_LINK_SETTLEMENT_ACCOUNTS', 409);
+  // The linked account of an offset loan is its offset account (the reference platform).
+  if (l.offset_enabled && !a.allow_offset) throw err(`DEPOSIT_PRODUCT_DOES_NOT_ALLOW_OFFSET: ${a.product_id}`, 409);
   if (a.status !== 'ACTIVE') throw err(`SETTLEMENT_ACCOUNT_NOT_ACTIVE: ${a.status}`, 409);
   if (a.member_id !== l.member_id) throw err('SETTLEMENT_ACCOUNT_BELONGS_TO_ANOTHER_MEMBER', 409);
   if (a.is_funding_account) throw err('A_FUNDING_ACCOUNT_CANNOT_SETTLE_A_LOAN', 409);
@@ -140,7 +142,7 @@ async function forLoan(c, loanId) {
   const { rows: loans } = await c.query(
     `SELECT id, account_no, settlement_linked_at FROM loan_accounts WHERE settlement_account_id = $1 AND status = ANY($2) ORDER BY settlement_linked_at, id`,
     [a.id, LIVE]);
-  return { loanId: l.id, linked: true, option: l.settlement_option, enabled: l.settlement_enabled, account: a, linkedAt: l.settlement_linked_at, settles: loans };
+  return { loanId: l.id, linked: true, option: l.settlement_option, enabled: l.settlement_enabled, offset: Boolean(l.offset_enabled), account: a, linkedAt: l.settlement_linked_at, settles: loans };
 }
 
 module.exports = { link, unlink, autoLink, moveLoan, forLoan, hasOverdraft, LIVE };

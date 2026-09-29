@@ -146,6 +146,12 @@ const GROUPS = [
     P('VIEW_SAVINGS_ACCOUNT_DETAILS', 'View deposit accounts'),
     P('CREATE_SAVINGS_ACCOUNT', 'Create deposit accounts'),
     P('EDIT_SAVINGS_ACCOUNT', 'Edit deposit accounts (overdraft)'),
+    P('DELETE_SAVINGS_ACCOUNT', 'Delete deposit accounts that never had a transaction'),
+    P('APPROVE_SAVINGS', 'Approve deposit accounts (and undo the approval or the activation)'),
+    P('LOCK_SAVINGS_ACCOUNT', 'Lock deposit accounts'),
+    P('UNLOCK_SAVINGS_ACCOUNT', 'Unlock deposit accounts'),
+    P('REOPEN_SAVINGS_ACCOUNT', 'Reopen closed current and savings accounts'),
+    P('REVERSE_SAVINGS_ACCOUNT_WRITE_OFF', 'Undo the write-off of a deposit account'),
     P('MAKE_DEPOSIT', 'Make deposits'),
     P('MAKE_WITHDRAWAL', 'Make withdrawals'),
     P('MAKE_EARLY_WITHDRAWALS', 'Make withdrawals during a fixed deposit or savings plan term'),
@@ -256,7 +262,8 @@ const MANAGEMENT = ['EDIT_CLIENT', 'APPROVE_CLIENT', 'REJECT_CLIENT', 'EXIT_CLIE
   'VIEW_DATA_IMPORTS', 'TRANSFER_SHARES', 'MANAGE_DIVIDENDS', 'MANAGE_PROVISIONING', 'RUN_PROVISIONING', 'CLOSE_FINANCIAL_YEAR',
   'MANAGE_RETURNS', 'MANAGE_EOD_PROCESSING', 'APPROVE_LINE_OF_CREDIT', 'UNDO_APPROVE_LINE_OF_CREDIT', 'REJECT_LINE_OF_CREDIT',
   'UNDO_REJECT_LINE_OF_CREDIT', 'UNDO_WITHDRAW_LINE_OF_CREDIT', 'CLOSE_LINES_OF_CREDIT', 'UNDO_MATURITY', 'MAKE_EARLY_WITHDRAWALS',
-  'POST_TRANSACTIONS_ON_DORMANT_ACCOUNTS'];
+  'POST_TRANSACTIONS_ON_DORMANT_ACCOUNTS', 'APPROVE_SAVINGS', 'LOCK_SAVINGS_ACCOUNT', 'UNLOCK_SAVINGS_ACCOUNT', 'REOPEN_SAVINGS_ACCOUNT',
+  'REVERSE_SAVINGS_ACCOUNT_WRITE_OFF'];
 
 /**
  * What the built-in roles hold, set so that every route lets in who the old

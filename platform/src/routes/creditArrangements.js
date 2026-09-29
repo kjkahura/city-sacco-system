@@ -52,6 +52,17 @@ async function listOut(c, req, res, filter = {}) {
   return r.items;
 }
 
+// POST /creditarrangements:search, mounted by the parent (the colon escaped).
+const search = run(async (c, req, res) => {
+  const body = req.body || {};
+  const { offset, limit } = pageParams({ ...req.query, ...body });
+  const r = await CA.search(c, body, { offset, limit, user: req.auth });
+  if (String(req.query.paginationDetails || '').toUpperCase() === 'ON') {
+    res.set('items-offset', String(offset)); res.set('items-limit', String(limit)); res.set('items-total', String(r.total));
+  }
+  return r.items;
+});
+
 const router = express.Router();
 router.get('/', ...run((c, req, res) => listOut(c, req, res)));
 router.post('/', ...run((c, req) => CA.create(c, req.body || {}, { user: req.auth, actor: req.auth.email }), { write: true, status: 201 }));
@@ -71,6 +82,7 @@ router.post('/:id\\:removeAccount', ...run((c, req) => {
 }, { write: true }));
 router.get('/:id', ...run((c, req) => CA.find(c, req.params.id, { user: req.auth })));
 router.get('/:id/accounts', ...run((c, req) => CA.accounts(c, req.params.id)));
+router.get('/:id/schedule', ...run((c, req) => CA.schedule(c, req.params.id)));
 router.put('/:id', ...run((c, req) => CA.replace(c, req.params.id, req.body || {}, { user: req.auth, actor: req.auth.email }), { write: true }));
 router.patch('/:id', ...run((c, req) => CA.update(c, req.params.id, patchOf(req.body), { user: req.auth, actor: req.auth.email }), { write: true }));
 router.delete('/:id', ...run(async (c, req, res) => {
@@ -78,4 +90,4 @@ router.delete('/:id', ...run(async (c, req, res) => {
   res.status(204).end();
 }, { write: true }));
 
-module.exports = { router, listOut };
+module.exports = { router, listOut, search };

@@ -33,6 +33,9 @@ const EOD = 'MANAGE_EOD_PROCESSING';
 const EDIT_HOLDER = ['EDIT_CLIENT', 'EDIT_GROUP', 'EDIT_CLIENT_ID', 'EDIT_GROUP_ID', 'CHANGE_CLIENT_TYPE', 'CHANGE_GROUP_TYPE',
   'MANAGE_CLIENT_ASSOCIATION', 'MANAGE_GROUP_ASSOCIATION', 'EDIT_BLACKLISTED_CLIENT_CFV'];
 const ASSOC = ['MANAGE_CLIENT_ASSOCIATION', 'MANAGE_GROUP_ASSOCIATION'];
+// Changing a deposit account's state, or its rate (../domain/savings ACTIONS).
+const DEP_STATE = ['EDIT_SAVINGS_ACCOUNT', 'APPROVE_SAVINGS', 'LOCK_SAVINGS_ACCOUNT', 'UNLOCK_SAVINGS_ACCOUNT', 'CLOSE_SAVINGS_ACCOUNTS',
+  'REOPEN_SAVINGS_ACCOUNT', 'REVERSE_SAVINGS_ACCOUNT_WRITE_OFF'];
 const STATE_ACTIONS = ['APPROVE_CLIENT', 'REJECT_CLIENT', 'EXIT_CLIENT', 'BLACKLIST_CLIENT', 'UNDO_CLIENT_STATE_CHANGED'];
 
 const RULES = [
@@ -104,7 +107,7 @@ const RULES = [
   // POST /creditarrangements/:id is the shape of :changeState, :addAccount and
   // :removeAccount; each checks the permission its action needs.
   ['GET', '/creditarrangements', 'VIEW_LINE_OF_CREDIT_DETAILS'], ['GET', '/creditarrangements/*', 'VIEW_LINE_OF_CREDIT_DETAILS'],
-  ['POST', '/creditarrangements', 'CREATE_LINES_OF_CREDIT'],
+  ['POST', '/creditarrangements', 'CREATE_LINES_OF_CREDIT'], ['POST', '/creditarrangements:search', 'VIEW_LINE_OF_CREDIT_DETAILS'],
   ['POST', '/creditarrangements/:id', ['APPROVE_LINE_OF_CREDIT', 'UNDO_APPROVE_LINE_OF_CREDIT', 'REJECT_LINE_OF_CREDIT',
     'UNDO_REJECT_LINE_OF_CREDIT', 'WITHDRAW_LINE_OF_CREDIT', 'UNDO_WITHDRAW_LINE_OF_CREDIT', 'CLOSE_LINES_OF_CREDIT',
     'ADD_ACCOUNTS_TO_LINE_OF_CREDIT', 'REMOTE_ACCOUNTS_FROM_LINE_OF_CREDIT']],
@@ -123,8 +126,10 @@ const RULES = [
   ['PUT', '/savings/:id/overdraft', 'EDIT_SAVINGS_ACCOUNT'], ['PATCH', '/savings/:id', 'EDIT_SAVINGS_ACCOUNT'],
   ['POST', '/savings/:id/maturity', 'ACTIVATE_MATURITY'], ['DELETE', '/savings/:id/maturity', 'UNDO_MATURITY'],
   ['POST', '/savings/:id/interest-rate', 'EDIT_SAVINGS_ACCOUNT'],
-  // POST /savings/:id is the shape of the reference platform's :changeInterestRate only.
-  ['POST', '/savings/:id', 'EDIT_SAVINGS_ACCOUNT'],
+  // POST /savings/:id is the shape of the reference platform's :changeInterestRate and
+  // :changeState; each checks the permission its action needs.
+  ['POST', '/savings/:id', DEP_STATE], ['POST', '/savings/:id/state', DEP_STATE],
+  ['DELETE', '/savings/:id', 'DELETE_SAVINGS_ACCOUNT'],
   ['POST', '/savings/:id/overdraft/write-off', 'CLOSE_SAVINGS_ACCOUNTS'], ['POST', '/savings/:id/close', 'CLOSE_SAVINGS_ACCOUNTS'],
   ['POST', '/savings/:id/interest', 'APPLY_ACCRUED_SAVINGS_INTEREST'],
   ['POST', '/savings/:id/branch', 'MANAGE_DEPOSIT_ASSOCIATION'],

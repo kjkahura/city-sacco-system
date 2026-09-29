@@ -49,14 +49,17 @@ const FIELDS = {
   overdraftIndexSourceId: 'od_index_source_id', overdraftSpreadMin: 'od_spread_min', overdraftSpreadMax: 'od_spread_max',
   overdraftSpreadDefault: 'od_spread_default', overdraftRateTiers: 'od_rate_tiers', overdraftDayCount: 'od_day_count',
   overdraftCalcBalance: 'od_calc_balance',
+  // Deposit Accounts (the reference platform): the state a new account starts in, and offset.
+  initialState: 'initial_state', allowOffset: 'allow_offset',
 };
 const ENUMS = {
   interest_calc_balance: DR.BALANCES,
   interest_day_count: DR.DAY_COUNTS,
   interest_application: DR.APPLICATIONS,
+  initial_state: ['ACTIVE', 'PENDING_APPROVAL', 'APPROVED'],
 };
 const BOOLS = ['is_active', 'withdrawable', 'is_funding_account', 'interest_paid_into_account', 'allow_negative_rate',
-  'allow_overdraft', 'allow_technical_overdraft', 'collect_interest_when_locked', 'accrue_interest_after_maturity', 'allow_arbitrary_fees'];
+  'allow_overdraft', 'allow_technical_overdraft', 'collect_interest_when_locked', 'accrue_interest_after_maturity', 'allow_arbitrary_fees', 'allow_offset'];
 // Settings that change how interest is worked out or what the account is,
 // frozen once accounts exist.
 const FROZEN_WITH_ACCOUNTS = ['is_funding_account', 'interest_calc_balance', 'interest_day_count'];
@@ -73,6 +76,7 @@ const publicProduct = (p) => ({
   },
   term: p.term_unit ? { unit: p.term_unit, min: p.term_min, max: p.term_max, default: p.term_default } : null,
   dormancyDays: p.dormancy_days ?? null, allowArbitraryFees: p.allow_arbitrary_fees,
+  initialState: p.initial_state || 'ACTIVE', allowOffset: Boolean(p.allow_offset),
   availableBranches: p.branch_ids || null, availableFor: p.available_for || ['INDIVIDUALS'], withholdingSourceId: p.withholding_source_id || null, customFields: p.custom_fields || {},
   creditArrangementRequirement: p.credit_arrangement_requirement || 'NOT_REQUIRED',
   withdrawable: p.withdrawable, minBalance: Number(p.min_balance),
@@ -129,7 +133,7 @@ function toColumns(body) {
   if (body) { const af = availableFor(body); if (af !== undefined) cols.available_for = af; }
   if (body && body.creditArrangementRequirement !== undefined) cols.credit_arrangement_requirement = body.creditArrangementRequirement;
   for (const k of ['interest_rate_tiers', 'od_rate_tiers']) if (cols[k] !== undefined) cols[k] = JSON.stringify(cols[k] || []);
-  for (const k of ['product_type', 'category', 'id_generator_type', 'interest_rate_terms', 'interest_rate_frequency', 'term_unit', 'od_rate_terms']) {
+  for (const k of ['initial_state', 'product_type', 'category', 'id_generator_type', 'interest_rate_terms', 'interest_rate_frequency', 'term_unit', 'od_rate_terms']) {
     if (typeof cols[k] === 'string') cols[k] = cols[k].toUpperCase();
   }
   for (const k of ['interest_index_source_id', 'od_index_source_id']) if (typeof cols[k] === 'string') cols[k] = cols[k].toUpperCase();
@@ -187,6 +191,12 @@ async function validate(c, cols, { before = null, accounts = 0 } = {}) {
     if (cols.allow_overdraft === false && before.allow_overdraft) {
       const { rows: [o] } = await c.query('SELECT count(*)::int AS n FROM savings_accounts WHERE product_id = $1 AND (overdraft_limit > 0 OR balance < 0)', [before.id]);
       if (o.n) problems.push(`allow_overdraft cannot be turned off while ${o.n} account(s) have an overdraft`);
+    }
+    if (cols.allow_offset === false && before.allow_offset) {
+      const { rows: [o] } = await c.query(
+        `SELECT count(*)::int AS n FROM loan_accounts l JOIN loan_products lp ON lp.id = l.product_id JOIN savings_accounts a ON a.id = l.settlement_account_id
+          WHERE a.product_id = $1 AND lp.offset_enabled AND l.status NOT LIKE 'CLOSED%'`, [before.id]);
+      if (o.n) problems.push(`allow_offset cannot be turned off while its accounts offset ${o.n} loan(s)`);
     }
   }
   const pa = await PA.validate(c, 'DEPOSIT', m, cols);

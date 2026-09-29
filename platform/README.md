@@ -113,7 +113,8 @@ src/
     accountingChanges.js  changing a product's accounting method in use
     branches.js        branches, inter-branch rules, closures, moving accounts
     savings.js         deposits: legs across zero, fees, interest, overdrafts,
-                       limits, maturity, dormancy, rate changes
+                       limits, maturity, dormancy, rate changes, the account
+                       life cycle (approval, lock, arrears, write-off, reopen)
     depositRules.js    what a deposit product gives its accounts: types, rates
                        on a day, days in a year, posting dates, the checks
     fees.js            product fees of every type, applying, waiving, settling
@@ -509,7 +510,9 @@ with `apply: true`), `POST /:id/branch`, and:
 - Dormancy: the end of day makes an account DORMANT after the product's days
   without financial activity (interest postings and fees the end of day
   charges do not count). Deposits and withdrawals on it need
-  POST_TRANSACTIONS_ON_DORMANT_ACCOUNTS, and make it ACTIVE again.
+  POST_TRANSACTIONS_ON_DORMANT_ACCOUNTS, and make it ACTIVE again. A
+  dormant account accrues no interest, credit or overdraft, and is charged
+  no monthly fee (the reference platform).
 - Fees: a monthly fee is charged on the last day of the month (the
   platform's first rule, which existing fees keep), on the first day of
   every month, or monthly from the account's activation
@@ -523,9 +526,68 @@ with `apply: true`), `POST /:id/branch`, and:
   Technical overdrafts are turned off only while the product has no
   accounts.
 - Not built from these pages: currencies per product (the ledger is in the
-  organization's currency), offset accounts, profit-sharing products,
-  solidarity groups as deposit holders, and the account's initial state and
-  approval (the Deposit Accounts section).
+  organization's currency), profit-sharing products and solidarity groups
+  as deposit holders.
+
+**The account life cycle** (the reference platform's Deposit Accounts). A product's
+`initialState` is the state new accounts start in: ACTIVE (the default,
+the platform's rule so far), PENDING_APPROVAL or APPROVED. An approved
+account becomes ACTIVE with its first transaction (a deposit, a withdrawal
+into an overdraft, a transfer or a loan disbursement into it) and earns
+from that day. `POST /api/savings/:id:changeState` (also `/:id/state`)
+takes an `action` and `notes`:
+
+| Action | From | To | Permission |
+|---|---|---|---|
+| APPROVE | PENDING_APPROVAL | APPROVED | APPROVE_SAVINGS |
+| UNDO_APPROVE | APPROVED | PENDING_APPROVAL | APPROVE_SAVINGS |
+| UNDO_ACTIVATE | ACTIVE (activated from APPROVED, no transactions standing) | APPROVED | APPROVE_SAVINGS |
+| CLOSE_REJECT | PENDING_APPROVAL | CLOSED (REJECTED) | CLOSE_SAVINGS_ACCOUNTS |
+| CLOSE_WITHDRAW | PENDING_APPROVAL, APPROVED | CLOSED (WITHDRAWN) | CLOSE_SAVINGS_ACCOUNTS |
+| LOCK | ACTIVE, IN_ARREARS, DORMANT | LOCKED | LOCK_SAVINGS_ACCOUNT |
+| UNLOCK | LOCKED | the state it was locked in | UNLOCK_SAVINGS_ACCOUNT |
+| CLOSE | ACTIVE, IN_ARREARS, DORMANT, MATURED (empty) | CLOSED | CLOSE_SAVINGS_ACCOUNTS |
+| CLOSE_WRITE_OFF | an overdrawn open account | CLOSED (WRITTEN_OFF) | CLOSE_SAVINGS_ACCOUNTS |
+| UNDO_CLOSE_WRITE_OFF | CLOSED (WRITTEN_OFF) | the state before, balances restored | REVERSE_SAVINGS_ACCOUNT_WRITE_OFF |
+| REOPEN | CLOSED, current and savings accounts | ACTIVE, earning from today | REOPEN_SAVINGS_ACCOUNT |
+
+- **How it closed:** a closed account keeps the state CLOSED, and
+  `closed_as` records REJECTED, WITHDRAWN or WRITTEN_OFF. The balance
+  gives the reference platform's account state as `accountState` (CLOSED_REJECTED,
+  WITHDRAWN, CLOSED_WRITTEN_OFF, ACTIVE_IN_ARREARS, and the rest as they
+  are).
+- **Locked:** no deposits, withdrawals, transfers or fees. Interest follows
+  the product's `collectInterestWhenLocked`.
+- **In Arrears:** an account overdrawn past its overdraft expiry date (the
+  end of day checks), or one whose limit was lowered below what it owes. A
+  deposit that brings it back within what the overdraft lends makes it
+  ACTIVE again. An account taken below zero by a fee or interest under a
+  technical overdraft stays ACTIVE, as before.
+- **Write-off:** CLOSE_WRITE_OFF writes off what is overdrawn, as
+  `POST /:id/overdraft/write-off` does, and closes the account. It needs any
+  credit interest accrued applied first, and no running loan settled from
+  the account. The undo reverses the entry and puts back the balance, the
+  charges owed, the overdraft interest and the limit. A write-off recorded
+  before this build cannot be undone. `POST /:id/overdraft/write-off` on
+  its own still leaves the account open.
+- **Delete:** `DELETE /api/savings/:id` (DELETE_SAVINGS_ACCOUNT) deletes an
+  account nothing was ever posted to and no loan, funding pledge, dividend
+  or credit arrangement points at.
+
+**Offset accounts** (the reference platform's offset loans). A loan product with
+`offsetEnabled` (a DYNAMIC_TERM product, REDUCING_EQUAL_INSTALLMENTS, SIMPLE
+interest on PRINCIPAL_AND_INTEREST) has its linked deposit account as its
+offset account; the setting turns linking on, and the settlement option may
+be NONE. The account must be under a deposit product with `allowOffset`.
+
+- The loan is not disbursed without the link (`MISSING_LINKED_OFFSET_ACCOUNT`).
+- Interest accrues on the principal and interest balance less the offset
+  account's balance, never below zero. The balance is the one the accrual
+  finds; the end of day accrues loans before deposits.
+- Reversals on an offset account are refused while the loan runs (the reference platform).
+- The offset account earns its own interest as usual.
+- `offsetEnabled` is frozen once the product has loans, and `allowOffset`
+  stays on while its accounts offset running loans.
 
 ### Branches, inter-branch rules and closures
 
@@ -1654,7 +1716,11 @@ who defaulted can be left out of the next cycle.
 headers), `POST`, `GET`, `PUT`, `PATCH` (JSON Patch or plain fields) and
 `DELETE /:id`, `POST /:id:changeState`, `POST /:id:addAccount` and
 `:removeAccount` (`accountId`, `accountType` LOAN or DEPOSIT), `GET
-/:id/accounts`, and `GET /api/clients/:id/creditarrangements` and
+/:id/accounts`, `GET /:id/schedule` (the instalments of its loans that are
+not closed, by due date, each with principal, interest and fees expected,
+paid and due), `POST /api/creditarrangements:search` (the reference platform's
+`filterCriteria` and `sortingCriteria` on the arrangement's fields and its
+custom fields), and `GET /api/clients/:id/creditarrangements` and
 `/api/groups/:id/creditarrangements`.
 
 - **Fields:** an amount, an ID (CA000001 onwards, or given), a start date
@@ -2214,7 +2280,8 @@ an `action` and an optional `reason`:
 
 ACTIVE and INACTIVE follow the accounts on their own, in the database: a
 member is ACTIVE while they have a running loan (active, in arrears or
-locked) or an open deposit account (active, dormant or locked). Share
+locked) or an open deposit account (active, in arrears, dormant, locked or
+matured). Share
 accounts do not count. Exiting needs no open loan or application, no open
 deposit account (`POST /api/savings/:id/close` closes an empty one), no
 pledged guarantee on a running loan, no shares held (a member transfers
@@ -2473,7 +2540,7 @@ approving imports, data dictionary comments, loan migration, resetting
 passwords), or any signed-in staff user (views, menu items, your own
 profile). A route the table does not list is refused to everyone but an
 administrator. The catalogue holds only permissions that are checked,
-172 of them: the reference platform's codes for what the platform has, and eleven of the platform's
+178 of them: the reference platform's codes for what the platform has, and eleven of the platform's
 own for what the reference platform does not have (shares and dividends, provisioning, the
 year-end close, regulatory returns, data extracts, data imports read-only,
 ID templates, approving write-off requests). A few permissions are checked

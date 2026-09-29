@@ -14,6 +14,7 @@ The same files are kept in the claude.ai project "CoreBanking Service" under `cl
 | 6 | Clients and Groups | 5f2c7f4 | [audit](audit-clients-and-groups.md), [build log](build-log-clients-and-groups.md) |
 | 7 | Open items from earlier sections, and the loan-engine audit | f6e92de | [audit](audit-loan-engine-open-items.md), [build log](build-log-open-items.md) |
 | 8 | Lines of credit and solidarity group loans (the loan-engine audit's build) | 7b74ec4 | [build log](build-log-credit-arrangements-and-solidarity-loans.md) |
-| 9 | Deposits > Deposit Products | the commit that adds these files | [audit](audit-deposit-products.md), [build log](build-log-deposit-products.md) |
+| 9 | Deposits > Deposit Products | 08b1ce6 | [audit](audit-deposit-products.md), [build log](build-log-deposit-products.md) |
+| 10 | Deposits > Deposit Accounts, offset loans, and the credit arrangement search and schedule | the commit that adds these files | [audit](audit-deposit-accounts.md), [build log](build-log-deposit-accounts.md) |
 
 Before section 5, the audit findings were recorded inside the build logs, with no separate audit file.

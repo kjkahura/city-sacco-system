@@ -54,7 +54,8 @@ async function disburseToDeposit(c, loanId, { savingsAccountId = null, valueDate
   if (!target) throw err('A_DEPOSIT_ACCOUNT_IS_REQUIRED', 400);
   const a = await savings.lock(c, String(target));
   if (a.member_id !== l.member_id) throw err('DISBURSEMENT_ACCOUNT_BELONGS_TO_ANOTHER_MEMBER', 409);
-  if (a.status !== 'ACTIVE') throw err(`ACCOUNT_NOT_ACTIVE: ${a.status}`, 409);
+  // An approved account is activated by the disbursement (its first transaction).
+  if (!['ACTIVE', 'APPROVED'].includes(a.status)) throw err(`ACCOUNT_NOT_ACTIVE: ${a.status}`, 409);
   if (a.is_funding_account) throw err('A_FUNDING_ACCOUNT_CANNOT_RECEIVE_A_DISBURSEMENT', 409);
   if (Number(a.balance) < 0) throw err('ACCOUNT_IS_OVERDRAWN: a loan is disbursed only into an account with a positive balance', 409);
   if ((l.accounting_method === 'NONE') !== (a.accounting_method === 'NONE')) {

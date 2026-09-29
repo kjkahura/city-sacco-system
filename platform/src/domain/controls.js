@@ -91,7 +91,7 @@ async function exposure(c, { memberId, loanId = null, refinancing = null, reques
   let deposits = 0;
   if (ctl.max_exposure_mode === 'SUM_MINUS_DEPOSITS') {
     const { rows: [d] } = await c.query(
-      "SELECT COALESCE(SUM(balance),0) AS t FROM savings_accounts WHERE member_id = $1 AND status = 'ACTIVE'", [memberId]);
+      "SELECT COALESCE(SUM(balance),0) AS t FROM savings_accounts WHERE member_id = $1 AND status IN ('ACTIVE', 'IN_ARREARS')", [memberId]);
     deposits = round2(d.t);
   }
   const exposed = round2(outstanding + Number(requested) - deposits);

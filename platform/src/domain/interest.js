@@ -80,7 +80,16 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
   const capped = type.accrualWindow(l, fromIso, date, installments);
   if (!capped) return null;
   date = capped;
-  const base = type.accrualBase(l, installments, fromIso);
+  let base = type.accrualBase(l, installments, fromIso);
+  // An offset loan (the reference platform): interest is on the principal and interest
+  // balance less the offset account's balance, never below zero. The
+  // balance is the one the accrual finds (the end of day runs loans first).
+  let offsetBalance = null;
+  if (l.offset_enabled && l.settlement_account_id) {
+    const { rows: [o] } = await c.query('SELECT balance FROM savings_accounts WHERE id = $1', [l.settlement_account_id]);
+    offsetBalance = Math.max(0, Number(o?.balance || 0));
+    base = Math.max(0, round2(base - offsetBalance));
+  }
 
   // The interest earned is computed unrounded and added to the fraction of
   // a cent the last run left over (interest_accrual_carry). Only whole cents
@@ -169,6 +178,7 @@ async function accrueInterest(c, loanId, { valueDate, createdBy } = {}) {
         from: fromIso, through, base, exact, carry, dayCount: t.convention, method: l.interest_accrual,
         interestType: t.interestType, productType: l.product_type, basis: type.basis,
         ...(fromArrears > 0 ? { interestFromArrears: fromArrears } : {}),
+        ...(offsetBalance !== null ? { offsetBalance } : {}),
         ...(tx.tax > 0 ? { tax: tx.tax, net: tx.income } : {}),
       },
       createdBy,

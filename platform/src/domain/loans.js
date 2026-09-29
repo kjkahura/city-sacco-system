@@ -241,6 +241,8 @@ async function disburse(c, loanId, { amount, channelId = null, valueDate, narrat
   if (!first && !again) throw err(`LOAN_NOT_APPROVED: ${l.status}`, 409);
   // A top-up application pays out by settling the loan it refinances.
   if (l.refinance_of) throw err('TOP_UP_APPLICATION_DISBURSES_THROUGH_REFINANCE', 409);
+  // The reference platform: a loan with offset is not disbursed without its offset account.
+  if (l.offset_enabled && !l.settlement_account_id) throw err('MISSING_LINKED_OFFSET_ACCOUNT: link a deposit account first', 409);
   const date = valueDate ? ymd(valueDate) : (await orgToday(c));
   // The channel given, else the one in the disbursement details, else bank.
   channelId = channelId || (first && l.disbursement_channel_id) || 'bank';

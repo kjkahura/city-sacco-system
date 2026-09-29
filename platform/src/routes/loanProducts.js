@@ -100,7 +100,7 @@ const FIELDS = {
   coverCountsDeposits: 'cover_counts_deposits', capIncludesAccrued: 'cap_includes_accrued',
   allowCustomAllocation: 'allow_custom_allocation',
   settlementEnabled: 'settlement_enabled', settlementProductId: 'settlement_product_id', settlementAutoSet: 'settlement_auto_set',
-  settlementAutoCreate: 'settlement_auto_create', settlementOption: 'settlement_option',
+  settlementAutoCreate: 'settlement_auto_create', settlementOption: 'settlement_option', offsetEnabled: 'offset_enabled',
   arrearsNonWorkingDays: 'arrears_non_working_days',
   chargeCapPercent: 'charge_cap_percent', chargeCapBase: 'charge_cap_base', chargeCapMode: 'charge_cap_mode',
   autoClosePaidOffDays: 'auto_close_paid_off_days', autoLockArrearsDays: 'auto_lock_arrears_days',
@@ -132,7 +132,7 @@ FIELDS.penaltyGraceDays = 'penalty_tolerance_days';
 // loan exists under the product.
 const FROZEN_WITH_LOANS = ['product_type', 'method', 'interest_type', 'simple_base', 'interest_posting', 'interest_rate_source',
   'rate_frequency', 'day_count', 'repayment_interval_unit', 'repayment_interval_count', 'fixed_days_of_month',
-  'tax_method', 'funding_enabled', 'funder_allocation'];
+  'tax_method', 'funding_enabled', 'funder_allocation', 'offset_enabled'];
 
 const num = (v) => (v === null || v === undefined ? null : Number(v));
 
@@ -171,6 +171,7 @@ const publicProduct = (p) => ({
   allowCustomAllocation: p.allow_custom_allocation,
   settlement: { enabled: p.settlement_enabled, productId: p.settlement_product_id, autoSet: p.settlement_auto_set,
     autoCreate: p.settlement_auto_create, option: p.settlement_option },
+  offsetEnabled: Boolean(p.offset_enabled),
   arrearsToleranceFloor: num(p.arrears_tolerance_floor), arrearsCountFrom: p.arrears_count_from,
   arrearsNonWorkingDays: p.arrears_non_working_days,
   chargeCapPercent: num(p.charge_cap_percent), chargeCapBase: p.charge_cap_base, chargeCapMode: p.charge_cap_mode,
@@ -226,6 +227,8 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
     if (cols[col] === null && NULLABLE_ENUMS.includes(col)) continue;
     if (!allowed.includes(cols[col])) problems.push(`${col} must be one of ${allowed.join(', ')}`);
   }
+  // Offset (the reference platform's Enable Offset) links the loan's deposit account, so it turns linking on.
+  if (cols.offset_enabled === true && cols.settlement_enabled === undefined && !(before && before.settlement_enabled)) cols.settlement_enabled = true;
   const merged = { ...(before || {}), ...cols };
   const type = merged.product_type || 'FIXED_TERM';
   const method = merged.method || 'FLAT';
@@ -254,6 +257,15 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
       if (merged.allow_prepayments === false) problems.push('interest_prepayment needs allow_prepayments');
     }
     if (merged.allow_postdated_payments && !['FIXED_TERM', 'INTEREST_FREE'].includes(type)) problems.push('postdated payments are for fixed-term products');
+  }
+  if (merged.offset_enabled) {
+    // The reference platform: a dynamic term loan, declining balance with equal instalments,
+    // simple interest calculated on principal and interest.
+    if (!(type === 'DYNAMIC_TERM' && method === 'REDUCING_EQUAL_INSTALLMENTS' && merged.interest_type === 'SIMPLE'
+      && merged.simple_base === 'PRINCIPAL_AND_INTEREST')) {
+      problems.push('offset_enabled needs a DYNAMIC_TERM product, method REDUCING_EQUAL_INSTALLMENTS, interest_type SIMPLE and simple_base PRINCIPAL_AND_INTEREST');
+    }
+    if (!merged.settlement_enabled) problems.push('offset_enabled needs settlement_enabled: the offset account is the linked deposit account');
   }
   {
     // Settlement deposit accounts (the reference platform's linked accounts).
@@ -337,7 +349,7 @@ async function validate(c, cols, { creating, before = null, loans = 0 }) {
     'credit_balance_enabled', 'enable_guarantors', 'enable_collateral', 'tax_on_interest', 'tax_on_fees', 'tax_on_penalties',
     'funding_enabled', 'lock_funds_at_approval', 'adjustable_rates', 'allow_negative_rate', 'allow_prepayments',
     'allow_postdated_payments', 'cover_counts_deposits', 'cap_includes_accrued', 'allow_custom_allocation', 'settlement_enabled', 'settlement_auto_set',
-    'settlement_auto_create']) {
+    'settlement_auto_create', 'offset_enabled']) {
     if (cols[col] !== undefined && !isBool(cols[col])) problems.push(`${col} must be true or false`);
   }
   const nonNeg = ['monthly_rate', 'rate_min', 'rate_max', 'processing_fee', 'penalty_rate', 'penalty_rate_min', 'penalty_rate_max',

@@ -206,7 +206,7 @@ async function changeDepositProduct(c, productId, { method, interestAccruedAccou
   const booksOf = (x) => x.accounting_method !== 'NONE';
 
   const { rows: open } = await c.query(
-    `SELECT id FROM savings_accounts WHERE product_id = $1 AND status IN ('ACTIVE','DORMANT','LOCKED') ORDER BY account_no`, [productId]);
+    `SELECT id FROM savings_accounts WHERE product_id = $1 AND status IN ('ACTIVE','IN_ARREARS','DORMANT','LOCKED','MATURED') ORDER BY account_no`, [productId]);
   const entryIds = [];
   const detail = [];
   for (const { id } of open) {

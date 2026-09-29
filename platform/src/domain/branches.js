@@ -104,7 +104,7 @@ async function detail(c, id) {
   const { rows: [counts] } = await c.query(
     `SELECT (SELECT count(*)::int FROM members WHERE branch_id = $1) AS members,
             (SELECT count(*)::int FROM loan_accounts WHERE branch_id = $1 AND status IN ('ACTIVE', 'IN_ARREARS', 'LOCKED')) AS active_loans,
-            (SELECT count(*)::int FROM savings_accounts WHERE branch_id = $1 AND status = 'ACTIVE') AS active_deposits`, [b.id]);
+            (SELECT count(*)::int FROM savings_accounts WHERE branch_id = $1 AND status IN ('ACTIVE', 'IN_ARREARS')) AS active_deposits`, [b.id]);
   const { rows: centres } = await c.query('SELECT * FROM centres WHERE branch_id = $1 ORDER BY code', [b.id]);
   const { rows: holidays } = await c.query('SELECT id, name AS description, holiday_date, recurring FROM holidays WHERE branch_id = $1 ORDER BY holiday_date', [b.id]);
   const { rows: activity } = await c.query(

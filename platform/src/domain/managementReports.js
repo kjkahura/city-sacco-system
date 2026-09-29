@@ -189,7 +189,7 @@ async function organization(c) {
     `SELECT b.id::text AS id, b.code, b.name, b.status,
             (SELECT count(*) FROM members m WHERE m.branch_id = b.id AND m.holder_type = 'CLIENT' AND m.status IN ('INACTIVE', 'ACTIVE'))::int AS members,
             (SELECT count(*) FROM centres ce WHERE ce.branch_id = b.id AND ce.status = 'ACTIVE')::int AS centres,
-            (SELECT COALESCE(SUM(GREATEST(a.balance, 0)), 0) FROM savings_accounts a WHERE a.branch_id = b.id AND a.status = 'ACTIVE') AS deposits
+            (SELECT COALESCE(SUM(GREATEST(a.balance, 0)), 0) FROM savings_accounts a WHERE a.branch_id = b.id AND a.status IN ('ACTIVE', 'IN_ARREARS')) AS deposits
      FROM branches b ORDER BY b.code`);
   const lb = byKey('branch_id');
   const { rows: officers } = await c.query(

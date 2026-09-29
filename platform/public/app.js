@@ -1013,7 +1013,21 @@ async function creditArrangementDetail(id, holder = null) {
   });
 }
 
-/** A deposit account: its balance, its transactions, closing it, and its report templates. */
+// The deposit account actions the console offers (../src/domain/savings ACTIONS decides).
+const DEP_ACTIONS = [
+  { action: 'APPROVE', label: 'Approve', code: 'APPROVE_SAVINGS', from: ['PENDING_APPROVAL'] },
+  { action: 'UNDO_APPROVE', label: 'Undo approval', code: 'APPROVE_SAVINGS', from: ['APPROVED'] },
+  { action: 'UNDO_ACTIVATE', label: 'Undo activation', code: 'APPROVE_SAVINGS', from: ['ACTIVE'], when: (b, t) => Boolean(b.activatedOn) && !t.length },
+  { action: 'CLOSE_REJECT', label: 'Reject', code: 'CLOSE_SAVINGS_ACCOUNTS', from: ['PENDING_APPROVAL'] },
+  { action: 'CLOSE_WITHDRAW', label: 'Withdraw', code: 'CLOSE_SAVINGS_ACCOUNTS', from: ['PENDING_APPROVAL', 'APPROVED'] },
+  { action: 'LOCK', label: 'Lock', code: 'LOCK_SAVINGS_ACCOUNT', from: ['ACTIVE', 'IN_ARREARS', 'DORMANT'] },
+  { action: 'UNLOCK', label: 'Unlock', code: 'UNLOCK_SAVINGS_ACCOUNT', from: ['LOCKED'] },
+  { action: 'CLOSE_WRITE_OFF', label: 'Close and write off', code: 'CLOSE_SAVINGS_ACCOUNTS', from: ['ACTIVE', 'IN_ARREARS', 'DORMANT', 'LOCKED', 'MATURED'], when: (b) => Number(b.balance) < 0 },
+  { action: 'UNDO_CLOSE_WRITE_OFF', label: 'Undo write-off', code: 'REVERSE_SAVINGS_ACCOUNT_WRITE_OFF', from: ['CLOSED'], when: (b) => b.closedAs === 'WRITTEN_OFF' },
+  { action: 'REOPEN', label: 'Reopen', code: 'REOPEN_SAVINGS_ACCOUNT', from: ['CLOSED'], when: (b) => !b.closedAs && ['CURRENT_ACCOUNT', 'SAVINGS_ACCOUNT'].includes(b.productType) },
+];
+
+/** A deposit account: its balance, its transactions, its state, closing it, and its report templates. */
 async function depositDetail(a, holder = null) {
   const [bal, tx] = await Promise.all([api('GET', `/api/savings/${a.id}/balance`), api('GET', `/api/savings/${a.id}/transactions?limit=50`)]);
   if (!bal.ok) throw new Error(bal.error);
@@ -1038,7 +1052,15 @@ async function depositDetail(a, holder = null) {
       ${b.maturity && !b.maturity.startedOn && b.status === 'ACTIVE' && can('ACTIVATE_MATURITY') ? '<button class="secondary" id="dep-mature">Start maturity</button>' : ''}
       ${b.maturity && b.maturity.startedOn && b.status !== 'MATURED' && can('UNDO_MATURITY') ? '<button class="secondary" id="dep-unmature">Undo maturity</button>' : ''}
       ${b.interestRateTerms === 'FIXED' && can('EDIT_SAVINGS_ACCOUNT') && b.status !== 'CLOSED' ? '<button class="secondary" id="dep-rate">Change interest rate</button>' : ''}
-      ${can('EDIT_SAVINGS_ACCOUNT') && b.status !== 'CLOSED' ? '<button class="secondary" id="dep-max">Maximum balance</button>' : ''}</div>`)}</div>
+      ${can('EDIT_SAVINGS_ACCOUNT') && b.status !== 'CLOSED' ? '<button class="secondary" id="dep-max">Maximum balance</button>' : ''}</div>`)}
+      ${card('State', `<dl class="kv" id="deposit-state">
+      <dt>State</dt><dd>${esc(String(b.accountState || b.status).replace(/_/g, ' ').toLowerCase())}</dd>
+      ${b.approvedOn ? `<dt>Approved</dt><dd>${day(b.approvedOn)}</dd>` : ''}${b.activatedOn ? `<dt>Activated</dt><dd>${day(b.activatedOn)}</dd>` : ''}
+      ${b.lockedOn ? `<dt>Locked</dt><dd>${day(b.lockedOn)} (from ${esc(String(b.stateBeforeLock || 'ACTIVE').toLowerCase())})</dd>` : ''}
+      ${b.inArrearsSince ? `<dt>In arrears since</dt><dd>${day(b.inArrearsSince)}</dd>` : ''}${b.closedOn ? `<dt>Closed</dt><dd>${day(b.closedOn)}</dd>` : ''}</dl>
+      <div class="toolbar">${DEP_ACTIONS.filter((x) => x.from.includes(b.status) && can(x.code) && (!x.when || x.when(b, tx.body || [])))
+    .map((x) => `<button class="secondary" id="dep-act-${x.action}">${esc(x.label)}</button>`).join('')}
+      ${can('DELETE_SAVINGS_ACCOUNT') && !(tx.body || []).length ? '<button class="secondary" id="dep-delete">Delete account</button>' : ''}</div>`)}</div>
     ${card('Transactions', table([
     { label: 'Date', value: (t) => day(t.value_date || t.created_at) }, { label: 'Kind', key: 'kind' }, { label: 'Reference', key: 'reference' },
     { label: 'Amount', num: true, value: (t) => money(t.amount) },
@@ -1074,6 +1096,21 @@ async function depositDetail(a, holder = null) {
     const res = await api('PATCH', `/api/savings/${a.id}`, { maxBalance: d.maxBalance === '' ? null : Number(d.maxBalance) });
     toast(res.ok ? 'Saved' : res.error, !res.ok);
     if (res.ok) again();
+  });
+  for (const x of DEP_ACTIONS) {
+    onDep(`#dep-act-${x.action}`, async () => {
+      const d = await ask([opt({ label: 'Notes', name: 'notes' })], `${x.label}: ${b.accountNo}`);
+      if (!d) return;
+      const res = await api('POST', `/api/savings/${a.id}:changeState`, { action: x.action, notes: d.notes || undefined });
+      toast(res.ok ? `${x.label}: done` : res.error, !res.ok);
+      if (res.ok) again();
+    });
+  }
+  onDep('#dep-delete', async () => {
+    if (!(await ask([], `Delete ${b.accountNo}? It cannot be undone.`))) return;
+    const res = await api('DELETE', `/api/savings/${a.id}`);
+    toast(res.ok ? `Deleted ${b.accountNo}` : res.error, !res.ok);
+    if (res.ok) (holder ? memberDetail(holder) : membersView());
   });
   const close = $('#dep-close');
   if (close) close.addEventListener('click', async () => {
@@ -3011,6 +3048,7 @@ const PRODUCT_FIELDS = (p = {}) => [
   { label: 'Auto-set the member\'s account of that product', name: 'settlementAutoSet', options: ['false', 'true'], value: String(p.settlement?.autoSet ?? false) },
   { label: 'Auto-create one when there is none', name: 'settlementAutoCreate', options: ['false', 'true'], value: String(p.settlement?.autoCreate ?? false) },
   { label: 'Settlement transfers', name: 'settlementOption', options: ['FULL_DUES', 'PARTIAL', 'NONE'], value: p.settlement?.option || 'FULL_DUES' },
+  { label: 'Offset: the linked deposit account lowers the balance interest is charged on (dynamic term, equal instalments, simple on principal and interest)', name: 'offsetEnabled', options: ['false', 'true'], value: String(p.offsetEnabled ?? false) },
   { label: 'Accounting (fixed once loans exist; use Change accounting method)', name: 'accountingMethod', options: ['ACCRUAL', 'CASH', 'NONE'], value: p.accountingMethod || 'ACCRUAL' },
   { label: 'Accrued interest reaches the ledger (ACCRUAL only)', name: 'interestAccruedAccounting', options: ['DAILY', 'MONTHLY', 'NONE'], value: p.interestAccruedAccounting || 'DAILY' },
   { label: 'Accrual entries', name: 'accrualGranularity', options: ['PER_ACCOUNT', 'AGGREGATED'], value: p.accrualGranularity || 'PER_ACCOUNT' },
@@ -3050,7 +3088,7 @@ const PRODUCT_NUM_FIELDS = ['monthlyRate', 'rateMin', 'rateMax', 'minPrincipal',
 const PRODUCT_BOOL_FIELDS = ['accrueLateInterest', 'allowArbitraryFees', 'enforceDepositMultiplier', 'requireGuarantorCover',
   'creditBalanceEnabled', 'enableGuarantors', 'enableCollateral', 'taxOnInterest', 'taxOnFees', 'taxOnPenalties', 'fundingEnabled', 'lockFundsAtApproval',
   'adjustableRates', 'allowNegativeRate', 'allowPrepayments', 'allowPostdatedPayments', 'coverCountsDeposits', 'capIncludesAccrued',
-  'settlementEnabled', 'settlementAutoSet', 'settlementAutoCreate'];
+  'settlementEnabled', 'settlementAutoSet', 'settlementAutoCreate', 'offsetEnabled'];
 // Optional numbers that a blank field sets back to "unset".
 const PRODUCT_NULLABLE = ['rateMin', 'rateMax', 'minPrincipal', 'defaultPrincipal', 'maxPrincipal', 'minTerm', 'defaultTerm',
   'amortizationPeriods', 'arrearsTolerancePercent', 'arrearsToleranceFloor', 'chargeCapPercent', 'autoLockArrearsDays',
@@ -3326,6 +3364,8 @@ const DEPOSIT_FIELDS = (p = {}) => [
   opt({ label: 'Maximum withdrawal in one transaction', name: 'maxWithdrawalAmount', type: 'number', step: '0.01', value: p.limits?.maxWithdrawalAmount ?? '' }),
   opt({ label: 'Days without activity before dormant', name: 'dormancyDays', type: 'number', value: p.dormancyDays ?? '' }),
   { label: 'Allow arbitrary fees', name: 'allowArbitraryFees', options: ['true', 'false'], value: String(p.allowArbitraryFees ?? true) },
+  { label: 'New accounts start', name: 'initialState', options: ['ACTIVE', 'PENDING_APPROVAL', 'APPROVED'], value: p.initialState || 'ACTIVE' },
+  { label: 'Allow accounts to be used for offset', name: 'allowOffset', options: ['false', 'true'], value: String(p.allowOffset ?? false) },
   opt({ label: 'Minimum balance to earn interest', name: 'minBalanceForInterest', type: 'number', step: '0.01', value: p.interest?.minBalanceForInterest ?? '' }),
   { label: 'Allow a negative rate', name: 'allowNegativeRate', options: ['false', 'true'], value: String(p.interest?.allowNegativeRate ?? false) },
   opt({ label: 'Withholding tax, percent (blank: none)', name: 'withholdingTaxPercent', type: 'number', step: '0.001', value: p.interest?.withholdingTaxPercent ?? '' }),
@@ -3378,7 +3418,7 @@ async function depositBody(d) {
     collectInterestWhenLocked: d.collectInterestWhenLocked !== 'false', accrueInterestAfterMaturity: d.accrueInterestAfterMaturity === 'true',
     ...term, minOpeningBalance: openMin, maxOpeningBalance: openMax, defaultOpeningBalance: openDefault,
     recommendedDepositAmount: num(d.recommendedDepositAmount), maxWithdrawalAmount: num(d.maxWithdrawalAmount), dormancyDays: num(d.dormancyDays),
-    allowArbitraryFees: d.allowArbitraryFees !== 'false', overdraftRateTerms: d.overdraftRateTerms, overdraftRateMin: odMin, overdraftRateMax: odMax,
+    allowArbitraryFees: d.allowArbitraryFees !== 'false', initialState: d.initialState || 'ACTIVE', allowOffset: d.allowOffset === 'true', overdraftRateTerms: d.overdraftRateTerms, overdraftRateMin: odMin, overdraftRateMax: odMax,
     overdraftIndexSourceId: d.overdraftIndexSourceId || null, overdraftSpreadDefault: odSpreadDefault, overdraftSpreadMin: odSpreadMin,
     overdraftSpreadMax: odSpreadMax, overdraftRateTiers: tiers(d.odTiers), overdraftCalcBalance: d.overdraftCalcBalance,
   };
@@ -3424,6 +3464,8 @@ async function depositProductDetail(p0) {
         <dt>Term</dt><dd>${p.term ? `${p.term.default} ${esc(p.term.unit.toLowerCase())} (${p.term.min ?? '—'} to ${p.term.max ?? '—'})` : 'none'}</dd>
         <dt>Maximum withdrawal</dt><dd>${p.limits.maxWithdrawalAmount ?? 'none'}</dd><dt>Dormant after</dt><dd>${p.dormancyDays ? `${p.dormancyDays} days` : 'never'}</dd>
         <dt>Arbitrary fees</dt><dd>${p.allowArbitraryFees ? 'allowed' : 'not allowed'}</dd>
+        <dt>New accounts start</dt><dd>${esc(String(p.initialState || 'ACTIVE').replace(/_/g, ' ').toLowerCase())}</dd>
+        <dt>Offset</dt><dd>${p.allowOffset ? 'accounts may offset loans' : 'no'}</dd>
       </dl>`)}
       ${card('Interest', `<dl class="kv">
         <dt>Paid</dt><dd>${p.interest.paidIntoAccount ? `${p.interest.annualRate}% a year on the ${esc(p.interest.calcBalance.toLowerCase().replace(/_/g, ' '))} balance, ${esc(p.interest.dayCount)}, applied ${esc(p.interest.application.toLowerCase().replace('_', ' '))}` : 'no interest'}</dd>

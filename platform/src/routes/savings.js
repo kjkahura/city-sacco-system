@@ -1,6 +1,7 @@
 'use strict';
 
 const CTL = require('../domain/controls');
+const { can } = require('../lib/permissions');
 
 const reportRoutes = require('./reports');
 const { orgToday } = require('../lib/orgDate');
@@ -97,11 +98,27 @@ router.post('/:id/maturity', ...tx((c, req, _res, { actor }) =>
 router.delete('/:id/maturity', ...tx((c, req, _res, { actor }) => S.undoMaturity(c, req.params.id, { createdBy: actor })));
 
 // The account's credit interest rate from a value date (the reference platform's POST /deposits/{id}:changeInterestRate).
-const changeRate = tx((c, req, _res, { actor }) => S.changeInterestRate(c, req.params.id, {
-  interestRate: req.body?.interestRate, valueDate: req.body?.valueDate || null, notes: req.body?.notes || null, createdBy: actor,
-}));
+const changeRate = tx((c, req, _res, { actor, user }) => {
+  // POST /savings/:id is shared with :changeState in the permission table; this one needs EDIT_SAVINGS_ACCOUNT.
+  if (!can(user, 'EDIT_SAVINGS_ACCOUNT')) throw acct.err('PERMISSION_REQUIRED: EDIT_SAVINGS_ACCOUNT', 403);
+  return S.changeInterestRate(c, req.params.id, {
+    interestRate: req.body?.interestRate, valueDate: req.body?.valueDate || null, notes: req.body?.notes || null, createdBy: actor,
+  });
+});
 router.post('/:id\\:changeInterestRate', ...changeRate);
 router.post('/:id/interest-rate', ...changeRate);
+
+// The account's state (the reference platform's POST /deposits/{id}:changeState): APPROVE,
+// UNDO_APPROVE, LOCK, UNLOCK, CLOSE, CLOSE_WITHDRAW, CLOSE_REJECT,
+// CLOSE_WRITE_OFF, and UNDO_ACTIVATE, UNDO_CLOSE_WRITE_OFF and REOPEN. Each
+// action checks its own permission (../domain/savings ACTIONS).
+const changeState = tx((c, req, _res, { actor, user }) =>
+  S.changeState(c, req.params.id, req.body?.action, { notes: req.body?.notes || null, user, createdBy: actor }));
+router.post('/:id\\:changeState', ...changeState);
+router.post('/:id/state', ...changeState);
+
+// Delete an account nothing was ever posted to (DELETE_SAVINGS_ACCOUNT).
+router.delete('/:id', ...tx((c, req, _res, { actor }) => S.deleteAccount(c, req.params.id, { createdBy: actor })));
 
 router.post('/:id/fees', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
