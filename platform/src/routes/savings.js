@@ -83,10 +83,25 @@ router.post('/:id/withdrawals', ...tx(async (c, req, res, { actor, user }) => {
   return CF.applyToTransaction(c, t, body.customFields, { user });
 }));
 
-router.post('/:id/transfers', ...tx(async (c, req, res, { actor }) => {
+router.post('/:id/transfers', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
-  return await S.transfer(c, req.params.id, { ...req.body, createdBy: actor });
+  return await S.transfer(c, req.params.id, { ...req.body, createdBy: actor, user });
 }));
+
+// The account's own settings: its maximum balance (the reference platform's maxDepositBalance) and notes.
+router.patch('/:id', ...tx((c, req, _res, { actor }) => S.updateAccount(c, req.params.id, req.body || {}, { createdBy: actor })));
+
+// A fixed deposit's or savings plan's maturity (the reference platform's Activate Maturity and Undo Maturity).
+router.post('/:id/maturity', ...tx((c, req, _res, { actor }) =>
+  S.startMaturity(c, req.params.id, { termLength: req.body?.termLength ?? null, createdBy: actor })));
+router.delete('/:id/maturity', ...tx((c, req, _res, { actor }) => S.undoMaturity(c, req.params.id, { createdBy: actor })));
+
+// The account's credit interest rate from a value date (the reference platform's POST /deposits/{id}:changeInterestRate).
+const changeRate = tx((c, req, _res, { actor }) => S.changeInterestRate(c, req.params.id, {
+  interestRate: req.body?.interestRate, valueDate: req.body?.valueDate || null, notes: req.body?.notes || null, createdBy: actor,
+}));
+router.post('/:id\\:changeInterestRate', ...changeRate);
+router.post('/:id/interest-rate', ...changeRate);
 
 router.post('/:id/fees', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
@@ -95,7 +110,10 @@ router.post('/:id/fees', ...tx(async (c, req, res, { actor, user }) => {
 }));
 
 router.put('/:id/overdraft', ...tx((c, req, _res, { actor }) =>
-  S.setOverdraftLimit(c, req.params.id, { limit: req.body?.limit, expiryDate: req.body && 'expiryDate' in req.body ? req.body.expiryDate : req.body?.overdraftExpiryDate, createdBy: actor })));
+  S.setOverdraftLimit(c, req.params.id, {
+    limit: req.body?.limit, expiryDate: req.body && 'expiryDate' in req.body ? req.body.expiryDate : req.body?.overdraftExpiryDate,
+    interestRate: req.body?.interestRate, interestSpread: req.body?.interestSpread, createdBy: actor,
+  })));
 
 // Close an empty account (the reference platform's Close).
 router.post('/:id/close', ...tx(async (c, req, _res, { actor }) => S.closeAccount(c, req.params.id, { createdBy: actor, notes: req.body?.notes || null })));

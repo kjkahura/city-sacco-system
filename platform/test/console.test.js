@@ -433,6 +433,8 @@ const T = (fn) => withTenant(SCHEMA, fn);
       await page.click('tr[data-tbl="dep"]');
       await page.waitForSelector('#deposit-detail');
       check('a deposit account opens on its own page', /Balance/.test(await page.textContent('#deposit-detail')));
+      check('with its terms: the type, the interest rate and its limits', /savings account/.test(await page.textContent('#deposit-terms'))
+        && /Interest rate/.test(await page.textContent('#deposit-terms')) && await page.locator('#dep-rate').count() === 1);
     } else check('the member has a deposit account to open', false);
     await page.evaluate((m) => memberDetail(m), mid);
     await page.waitForSelector('#credit-arrangements #ca-new');
@@ -670,6 +672,8 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForSelector('#d-method');
     check('it opens to its interest and accounting rules',
       /6% a year/.test(await page.textContent('main')) && /interestPayable 200-110/.test(await page.textContent('main')), await page.textContent('main'));
+    check('and its type, account numbers and limits', /savings account/.test(await page.textContent('#deposit-product-type'))
+      && /the shared SA series/.test(await page.textContent('#deposit-product-type')) && await page.locator('#d-delete').count() === 1);
     await page.click('nav button[data-view=accounting]');
     await page.waitForSelector('#k-new');
     check('the accounting screen shows branches, inter-branch rules and closures',

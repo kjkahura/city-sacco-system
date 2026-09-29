@@ -9,6 +9,7 @@ const B = require('../domain/branches');
 const CF = require('../domain/customFields');
 const AC = require('../domain/accountingChanges');
 const CA = require('../domain/creditArrangements');
+const DR = require('../domain/depositRules');
 
 /**
  * Deposit products: interest, withholding tax, overdrafts, fees, and the
@@ -33,14 +34,29 @@ const FIELDS = {
   glNegativeInterestIncome: 'gl_neg_interest_inc', glNegativeInterestReceivable: 'gl_neg_interest_rec',
   glOverdraftPortfolio: 'gl_od_portfolio', glOverdraftWriteOff: 'gl_od_writeoff',
   glOverdraftInterestIncome: 'gl_od_interest_inc', glOverdraftInterestReceivable: 'gl_od_interest_rec',
+  // Deposit Products (the reference platform): type, numbering, interest, limits, term, dormancy, fees, overdraft interest.
+  productType: 'product_type', category: 'category', idGeneratorType: 'id_generator_type', idPattern: 'id_pattern',
+  interestRateTerms: 'interest_rate_terms', interestRateMin: 'interest_rate_min', interestRateMax: 'interest_rate_max',
+  interestRateFrequency: 'interest_rate_frequency', interestRateXDays: 'interest_rate_x_days',
+  interestIndexSourceId: 'interest_index_source_id', interestSpreadMin: 'interest_spread_min', interestSpreadMax: 'interest_spread_max',
+  interestSpreadDefault: 'interest_spread_default', interestRateTiers: 'interest_rate_tiers', interestMaxBalance: 'interest_max_balance',
+  interestFixedDates: 'interest_fixed_dates', collectInterestWhenLocked: 'collect_interest_when_locked',
+  accrueInterestAfterMaturity: 'accrue_interest_after_maturity', recommendedDepositAmount: 'recommended_deposit_amount',
+  maxWithdrawalAmount: 'max_withdrawal_amount', minOpeningBalance: 'min_opening_balance', maxOpeningBalance: 'max_opening_balance',
+  defaultOpeningBalance: 'default_opening_balance', termUnit: 'term_unit', termMin: 'term_min', termMax: 'term_max',
+  termDefault: 'term_default', dormancyDays: 'dormancy_days', allowArbitraryFees: 'allow_arbitrary_fees',
+  overdraftRateTerms: 'od_rate_terms', overdraftRateMin: 'od_rate_min', overdraftRateMax: 'od_rate_max',
+  overdraftIndexSourceId: 'od_index_source_id', overdraftSpreadMin: 'od_spread_min', overdraftSpreadMax: 'od_spread_max',
+  overdraftSpreadDefault: 'od_spread_default', overdraftRateTiers: 'od_rate_tiers', overdraftDayCount: 'od_day_count',
+  overdraftCalcBalance: 'od_calc_balance',
 };
 const ENUMS = {
-  interest_calc_balance: ['END_OF_DAY', 'MINIMUM'],
-  interest_day_count: ['ACTUAL_365', 'ACTUAL_360', 'THIRTY_360'],
-  interest_application: ['MONTHLY', 'QUARTERLY', 'SEMI_ANNUAL', 'ANNUAL'],
+  interest_calc_balance: DR.BALANCES,
+  interest_day_count: DR.DAY_COUNTS,
+  interest_application: DR.APPLICATIONS,
 };
 const BOOLS = ['is_active', 'withdrawable', 'is_funding_account', 'interest_paid_into_account', 'allow_negative_rate',
-  'allow_overdraft', 'allow_technical_overdraft'];
+  'allow_overdraft', 'allow_technical_overdraft', 'collect_interest_when_locked', 'accrue_interest_after_maturity', 'allow_arbitrary_fees'];
 // Settings that change how interest is worked out or what the account is,
 // frozen once accounts exist.
 const FROZEN_WITH_ACCOUNTS = ['is_funding_account', 'interest_calc_balance', 'interest_day_count'];
@@ -49,6 +65,14 @@ const num = (v) => (v === null || v === undefined ? null : Number(v));
 
 const publicProduct = (p) => ({
   id: p.id, name: p.name, description: p.description, isActive: p.is_active, isFundingAccount: p.is_funding_account,
+  productType: p.product_type, category: p.category,
+  newAccounts: { idGeneratorType: p.id_generator_type || null, idPattern: p.id_pattern || null },
+  limits: {
+    recommendedDepositAmount: num(p.recommended_deposit_amount), maxWithdrawalAmount: num(p.max_withdrawal_amount),
+    openingBalance: { min: num(p.min_opening_balance), max: num(p.max_opening_balance), default: num(p.default_opening_balance) },
+  },
+  term: p.term_unit ? { unit: p.term_unit, min: p.term_min, max: p.term_max, default: p.term_default } : null,
+  dormancyDays: p.dormancy_days ?? null, allowArbitraryFees: p.allow_arbitrary_fees,
   availableBranches: p.branch_ids || null, availableFor: p.available_for || ['INDIVIDUALS'], withholdingSourceId: p.withholding_source_id || null, customFields: p.custom_fields || {},
   creditArrangementRequirement: p.credit_arrangement_requirement || 'NOT_REQUIRED',
   withdrawable: p.withdrawable, minBalance: Number(p.min_balance),
@@ -56,10 +80,19 @@ const publicProduct = (p) => ({
     paidIntoAccount: p.interest_paid_into_account, annualRate: Number(p.annual_rate), calcBalance: p.interest_calc_balance,
     dayCount: p.interest_day_count, application: p.interest_application, minBalanceForInterest: num(p.min_balance_for_interest),
     allowNegativeRate: p.allow_negative_rate, withholdingTaxPercent: num(p.withholding_tax_percent),
+    rateTerms: p.interest_rate_terms, rateMin: num(p.interest_rate_min), rateMax: num(p.interest_rate_max),
+    rateFrequency: p.interest_rate_frequency, rateXDays: p.interest_rate_x_days ?? null,
+    indexSourceId: p.interest_index_source_id || null,
+    spread: { min: num(p.interest_spread_min), max: num(p.interest_spread_max), default: num(p.interest_spread_default) },
+    tiers: p.interest_rate_tiers || [], maxBalance: num(p.interest_max_balance), fixedDates: p.interest_fixed_dates || [],
+    collectWhenLocked: p.collect_interest_when_locked, accrueAfterMaturity: p.accrue_interest_after_maturity,
   },
   overdraft: {
     allowed: p.allow_overdraft, maxLimit: num(p.max_overdraft_limit), annualRate: Number(p.overdraft_annual_rate),
     technicalAllowed: p.allow_technical_overdraft,
+    rateTerms: p.od_rate_terms, rateMin: num(p.od_rate_min), rateMax: num(p.od_rate_max), indexSourceId: p.od_index_source_id || null,
+    spread: { min: num(p.od_spread_min), max: num(p.od_spread_max), default: num(p.od_spread_default) },
+    tiers: p.od_rate_tiers || [], dayCount: p.od_day_count || p.interest_day_count, calcBalance: p.od_calc_balance,
   },
   accountingMethod: p.accounting_method, interestAccruedAccounting: p.interest_accrued_accounting,
   accrualGranularity: p.accrual_granularity,
@@ -71,7 +104,8 @@ const publicProduct = (p) => ({
     overdraftWriteOff: p.gl_od_writeoff, overdraftInterestIncome: p.gl_od_interest_inc,
     overdraftInterestReceivable: p.gl_od_interest_rec,
   },
-  fees: (p.fees || []).map((f) => ({ id: f.id, code: f.code, name: f.name, trigger: f.trigger, amount: num(f.amount), glIncome: f.gl_income, isActive: f.is_active })),
+  fees: (p.fees || []).map((f) => ({ id: f.id, code: f.code, name: f.name, trigger: f.trigger, applyDateMethod: f.apply_date_method || null,
+    amount: num(f.amount), glIncome: f.gl_income, isActive: f.is_active })),
   accounts: p.accounts === undefined ? undefined : p.accounts,
 });
 
@@ -94,6 +128,11 @@ function toColumns(body) {
   if (body && body.withholdingSourceId !== undefined) cols.withholding_source_id = body.withholdingSourceId;
   if (body) { const af = availableFor(body); if (af !== undefined) cols.available_for = af; }
   if (body && body.creditArrangementRequirement !== undefined) cols.credit_arrangement_requirement = body.creditArrangementRequirement;
+  for (const k of ['interest_rate_tiers', 'od_rate_tiers']) if (cols[k] !== undefined) cols[k] = JSON.stringify(cols[k] || []);
+  for (const k of ['product_type', 'category', 'id_generator_type', 'interest_rate_terms', 'interest_rate_frequency', 'term_unit', 'od_rate_terms']) {
+    if (typeof cols[k] === 'string') cols[k] = cols[k].toUpperCase();
+  }
+  for (const k of ['interest_index_source_id', 'od_index_source_id']) if (typeof cols[k] === 'string') cols[k] = cols[k].toUpperCase();
   return cols;
 }
 
@@ -113,7 +152,28 @@ async function validate(c, cols, { before = null, accounts = 0 } = {}) {
   }
   if (cols.withholding_tax_percent !== undefined && cols.withholding_tax_percent !== null
     && !(Number(cols.withholding_tax_percent) >= 0 && Number(cols.withholding_tax_percent) <= 100)) problems.push('withholding_tax_percent must be 0 to 100');
-  const m = { ...(before ? {} : await PA.tableDefaults(c, 'savings_products')), ...(before || {}), ...cols };
+  // The type follows the settings where the request does not name one: a
+  // funding product is an investor account, and a product given overdrafts
+  // a current account (the reference platform's definition); a fixed deposit or savings plan
+  // posts interest on maturity unless told otherwise.
+  const base = { ...(before ? {} : await PA.tableDefaults(c, 'savings_products')), ...(before || {}) };
+  if (cols.product_type === undefined) {
+    if (cols.is_funding_account === true) cols.product_type = 'INVESTOR_ACCOUNT';
+    else if (cols.is_funding_account === false && base.product_type === 'INVESTOR_ACCOUNT') cols.product_type = 'SAVINGS_ACCOUNT';
+    else if ((cols.allow_overdraft === true || cols.allow_technical_overdraft === true) && (!before || base.product_type === 'SAVINGS_ACCOUNT')) cols.product_type = 'CURRENT_ACCOUNT';
+  }
+  if (cols.product_type !== undefined && cols.is_funding_account === undefined) cols.is_funding_account = cols.product_type === 'INVESTOR_ACCOUNT';
+  if (!before && DR.hasTerm(cols.product_type) && cols.interest_application === undefined) cols.interest_application = 'ON_MATURITY';
+  const m = { ...base, ...cols };
+  if (typeof m.interest_rate_tiers === 'string') m.interest_rate_tiers = JSON.parse(m.interest_rate_tiers);
+  if (typeof m.od_rate_tiers === 'string') m.od_rate_tiers = JSON.parse(m.od_rate_tiers);
+  problems.push(...DR.productProblems(m, cols, { before, accounts }));
+  for (const [col, kind] of [['interest_index_source_id', 'INTEREST'], ['od_index_source_id', 'INTEREST']]) {
+    if (cols[col]) {
+      const { rows: [src] } = await c.query('SELECT kind FROM index_rate_sources WHERE id = $1', [cols[col]]);
+      if (!src || src.kind !== kind) problems.push(`${col} must be an interest rate source`);
+    }
+  }
   if (m.annual_rate !== undefined && m.annual_rate !== null && Number(m.annual_rate) < 0 && !m.allow_negative_rate) {
     problems.push('a negative annual_rate needs allow_negative_rate');
   }
@@ -139,6 +199,69 @@ async function withFees(c, p) {
   const { rows } = await c.query('SELECT * FROM savings_product_fees WHERE product_id = $1 ORDER BY code', [p.id]);
   return { ...p, fees: rows };
 }
+
+/**
+ * A change to the product's rates, for the accounts it already has (the reference platform):
+ * the credit rate reaches all existing accounts (applyTo ALL_ACCOUNTS, the
+ * default: each follows the product's rate again) or new accounts only
+ * (NEW_ACCOUNTS: each existing account keeps the rate it had). The new rate
+ * accrues from the next accrual; what has accrued stays. The overdraft rate
+ * reaches new accounts only, as in the reference platform.
+ */
+async function rateChanges(c, before, cols, body, { actor }) {
+  const scope = String(body.applyTo || 'ALL_ACCOUNTS').toUpperCase();
+  if (!['ALL_ACCOUNTS', 'NEW_ACCOUNTS'].includes(scope)) throw Object.assign(new Error('APPLY_TO_IS_ALL_ACCOUNTS_OR_NEW_ACCOUNTS'), { status: 400 });
+  const today = (await c.query('SELECT current_date::text AS d')).rows[0].d;
+  const open = "status NOT IN ('CLOSED')";
+  if (cols.annual_rate !== undefined && Number(cols.annual_rate) !== Number(before.annual_rate)) {
+    if (scope === 'NEW_ACCOUNTS') {
+      if ((before.interest_rate_terms || 'FIXED') !== 'FIXED') {
+        throw Object.assign(new Error('NEW_ACCOUNTS_ONLY_IS_FOR_A_FIXED_RATE: tiered and index products change for every account'), { status: 400 });
+      }
+      await c.query(`UPDATE savings_accounts SET interest_rate = $2 WHERE product_id = $1 AND interest_rate IS NULL AND ${open}`, [before.id, before.annual_rate]);
+    } else {
+      await c.query(`UPDATE savings_accounts SET interest_rate = NULL WHERE product_id = $1 AND ${open}`, [before.id]);
+    }
+    await c.query(`INSERT INTO savings_interest_rate_changes (product_id, kind, scope, value_date, old_rate, new_rate, notes, created_by)
+      VALUES ($1,'CREDIT',$2,$3,$4,$5,$6,$7)`, [before.id, scope, today, before.annual_rate, cols.annual_rate, body.notes || null, actor]);
+  }
+  if (cols.overdraft_annual_rate !== undefined && Number(cols.overdraft_annual_rate) !== Number(before.overdraft_annual_rate)) {
+    await c.query(`UPDATE savings_accounts SET overdraft_rate = $2 WHERE product_id = $1 AND overdraft_rate IS NULL AND ${open}`,
+      [before.id, before.overdraft_annual_rate]);
+    await c.query(`INSERT INTO savings_interest_rate_changes (product_id, kind, scope, value_date, old_rate, new_rate, notes, created_by)
+      VALUES ($1,'OVERDRAFT','NEW_ACCOUNTS',$2,$3,$4,$5,$6)`, [before.id, today, before.overdraft_annual_rate, cols.overdraft_annual_rate, body.notes || null, actor]);
+  }
+}
+
+// A product that never had an account is deleted (the reference platform); one that had is deactivated instead.
+router.delete('/:id', requireAuth(), async (req, res, next) => {
+  try {
+    const out = await withTenant(req.tenant.schema_name, async (c) => {
+      const { rows: [p] } = await c.query('SELECT * FROM savings_products WHERE id = $1 FOR UPDATE', [req.params.id]);
+      if (!p) return { missing: true };
+      const n = await accountsUnder(c, p.id);
+      if (n) return { used: n };
+      await c.query('SAVEPOINT product_delete');
+      try {
+        await c.query('DELETE FROM savings_interest_rate_changes WHERE product_id = $1', [p.id]);
+        await c.query('DELETE FROM savings_product_fees WHERE product_id = $1', [p.id]);
+        await c.query('DELETE FROM savings_products WHERE id = $1', [p.id]);
+        await c.query('RELEASE SAVEPOINT product_delete');
+      } catch (e) {
+        await c.query('ROLLBACK TO SAVEPOINT product_delete');
+        if (e.code === '23503') return { referenced: e.table };
+        throw e;
+      }
+      await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'DEPOSIT_PRODUCT_DELETED','savings_product',$2,$3)`,
+        [req.auth.email, p.id, JSON.stringify(p)]);
+      return { ok: true };
+    });
+    if (out.missing) return notFound(res, 'deposit product');
+    if (out.used) return apiError(res, 409, 409, `PRODUCT_HAS_ACCOUNTS: ${out.used}; deactivate it instead`);
+    if (out.referenced) return apiError(res, 409, 409, `PRODUCT_IS_REFERENCED: ${out.referenced}`);
+    res.status(204).end();
+  } catch (e) { next(e); }
+});
 
 router.get('/', requireAuth(), async (req, res, next) => {
   try {
@@ -231,6 +354,7 @@ router.patch('/:id', requireAuth(), async (req, res, next) => {
       if (cols.credit_arrangement_requirement !== undefined) cols.credit_arrangement_requirement = await CA.assertRequirement(c, 'DEPOSIT', before.id, cols.credit_arrangement_requirement);
       const problems = await validate(c, cols, { before, accounts });
       if (problems.length) return { problems };
+      await rateChanges(c, before, cols, req.body || {}, { actor: req.auth.email });
       const keys = Object.keys(cols);
       const { rows: [after] } = await c.query(
         `UPDATE savings_products SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`,
@@ -274,7 +398,8 @@ router.get('/:id/gl-mapping-history', requireAuth(), async (req, res, next) => {
 
 // --- fees -----------------------------------------------------------------
 
-const FEE_FIELDS = { code: 'code', name: 'name', trigger: 'trigger', amount: 'amount', glIncome: 'gl_income', isActive: 'is_active' };
+const FEE_FIELDS = { code: 'code', name: 'name', trigger: 'trigger', amount: 'amount', glIncome: 'gl_income', isActive: 'is_active',
+  applyDateMethod: 'apply_date_method' };
 const feeCols = (body) => Object.fromEntries(Object.entries(body || {}).filter(([k]) => FEE_FIELDS[k]).map(([k, v]) => [FEE_FIELDS[k], v]));
 
 async function validateFee(c, cols, before) {
@@ -284,6 +409,13 @@ async function validateFee(c, cols, before) {
   if (!before && !cols.name) problems.push('name is required');
   if (m.trigger && !['MANUAL', 'MONTHLY'].includes(m.trigger)) problems.push('trigger must be MANUAL or MONTHLY');
   if (m.trigger === 'MONTHLY' && !(Number(m.amount) > 0)) problems.push('a MONTHLY fee needs an amount');
+  // A monthly fee is dated monthly from activation, on the first day of every month (the reference platform), or on the last day (the platform's first rule).
+  if (m.trigger === 'MONTHLY' && !m.apply_date_method) cols.apply_date_method = m.apply_date_method = 'END_OF_MONTH';
+  if (m.trigger !== 'MONTHLY' && m.apply_date_method) {
+    if (cols.apply_date_method) problems.push('apply_date_method is for MONTHLY fees');
+    else cols.apply_date_method = null;
+  }
+  if (m.trigger === 'MONTHLY' && !DR.MONTHLY_FEE_METHODS.includes(m.apply_date_method)) problems.push(`apply_date_method must be one of ${DR.MONTHLY_FEE_METHODS.join(', ')}`);
   if (cols.amount !== undefined && cols.amount !== null && !(Number(cols.amount) >= 0)) problems.push('amount must be zero or more');
   problems.push(...await PA.validateFeeAccounts(c, cols));
   return problems;
@@ -335,6 +467,28 @@ router.patch('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
     if (out.missing) return notFound(res, 'fee');
     if (out.problems) return apiError(res, 400, 400, 'INVALID_FEE', out.problems.join('; '));
     res.json(out.row);
+  } catch (e) { next(e); }
+});
+
+// A fee is deleted only if it was never applied (the reference platform); otherwise it is deactivated.
+router.delete('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
+  try {
+    const out = await withTenant(req.tenant.schema_name, async (c) => {
+      const { rows: [f] } = await c.query(
+        'SELECT * FROM savings_product_fees WHERE product_id = $1 AND (id::text = $2 OR code = $2) FOR UPDATE', [req.params.id, req.params.feeId]);
+      if (!f) return { missing: true };
+      const { rows: [n] } = await c.query(
+        `SELECT count(*)::int AS n FROM transactions t JOIN savings_accounts a ON a.id = t.savings_account_id
+          WHERE a.product_id = $1 AND t.kind = 'SAVINGS_FEE' AND t.allocation->>'fee' = $2`, [req.params.id, f.code]);
+      if (n.n) return { applied: n.n };
+      await c.query('DELETE FROM savings_product_fees WHERE id = $1', [f.id]);
+      await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'DEPOSIT_PRODUCT_FEE_DELETED','savings_product_fee',$2,$3)`,
+        [req.auth.email, f.id, JSON.stringify(f)]);
+      return { ok: true };
+    });
+    if (out.missing) return notFound(res, 'fee');
+    if (out.applied) return apiError(res, 409, 409, `FEE_HAS_BEEN_APPLIED: ${out.applied} time(s); deactivate it instead`);
+    res.status(204).end();
   } catch (e) { next(e); }
 });
 

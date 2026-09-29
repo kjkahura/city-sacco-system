@@ -69,34 +69,8 @@ const ops = { lock, buildSchedule, reschedule, accrueInterest, fees };
 // Account numbers
 // --------------------------------------------------------------------------
 
-const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';   // no I or O, which read as 1 and 0
-const DIGITS = '0123456789';
-const pick = (s) => s[Math.floor(Math.random() * s.length)];
-
-/**
- * Fill a product's id_pattern. '#' is a digit, '@' a letter, '$' either,
- * anything else literal. Under INCREMENTAL the run of '#' carries the
- * sequence number, zero-padded; under RANDOM every placeholder is drawn.
- */
-function fillPattern(pattern, sequence = null) {
-  const hashes = (pattern.match(/#/g) || []).length;
-  let digits = sequence === null ? null : String(sequence).padStart(hashes, '0');
-  if (digits && digits.length > hashes) {
-    // The sequence outgrew the pattern; the extra digits go on the front of
-    // the run rather than the number being refused.
-    const extra = digits.length - hashes;
-    pattern = pattern.replace('#', '#'.repeat(extra + 1));
-  }
-  let di = 0;
-  let out = '';
-  for (const ch of pattern) {
-    if (ch === '#') out += digits ? digits[di++] : pick(DIGITS);
-    else if (ch === '@') out += pick(LETTERS);
-    else if (ch === '$') out += pick(LETTERS + DIGITS);
-    else out += ch;
-  }
-  return out;
-}
+// The pattern filler is shared with deposit accounts (./accountNumbers).
+const { fillPattern } = require('./accountNumbers');
 
 async function nextAccountNo(c, p) {
   const pattern = p.id_pattern || 'LN######';

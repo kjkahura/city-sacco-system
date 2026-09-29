@@ -1025,12 +1025,56 @@ async function depositDetail(a, holder = null) {
       <dt>Product</dt><dd>${esc(b.productId)}</dd><dt>Balance</dt><dd>${money(b.balance)}</dd><dt>Available</dt><dd>${money(b.available)}</dd>
       <dt>Pledged (member)</dt><dd>${money(b.pledged)}</dd><dt>Overdraft limit</dt><dd>${money(b.overdraftLimit)}${b.overdraftExpiryDate ? ` (expires ${day(b.overdraftExpiryDate)}${b.overdraftExpired ? ', expired' : ''})` : ''}</dd>
       <dt>Interest accrued</dt><dd>${money(b.interest.accrued)}</dd><dt>Interest last applied</dt><dd>${esc(b.interest.lastApplied || '—')}</dd></dl>
-      ${can('CLOSE_SAVINGS_ACCOUNTS') && ['ACTIVE', 'DORMANT'].includes(b.status) && Number(b.balance) === 0 ? '<button class="secondary" id="dep-close">Close account</button>' : ''}`)}</div>
+      ${can('CLOSE_SAVINGS_ACCOUNTS') && ['ACTIVE', 'DORMANT', 'MATURED'].includes(b.status) && Number(b.balance) === 0 ? '<button class="secondary" id="dep-close">Close account</button>' : ''}`)}
+      ${card('Terms', `<dl class="kv" id="deposit-terms">
+      <dt>Type</dt><dd>${esc(String(b.productType || '').replace(/_/g, ' ').toLowerCase())}</dd>
+      <dt>Interest rate</dt><dd>${b.interestRate === null ? esc(String(b.interestRateTerms || '').replace(/_/g, ' ').toLowerCase()) : `${esc(b.interestRate)}%${b.interestRateOwn ? ' (the account\'s own)' : ''}`}</dd>
+      <dt>Maximum balance</dt><dd>${b.maxBalance === null ? 'none' : money(b.maxBalance)}</dd>
+      <dt>Maximum withdrawal</dt><dd>${b.maxWithdrawalAmount === null ? 'none' : money(b.maxWithdrawalAmount)}</dd>
+      ${b.maturity ? `<dt>Term</dt><dd>${esc(b.maturity.termLength)} ${esc(String(b.maturity.termUnit || '').toLowerCase())}</dd>
+      <dt>Maturity</dt><dd>${b.maturity.startedOn ? `started ${day(b.maturity.startedOn)}, matures ${day(b.maturity.maturityDate)}` : `not started${b.maturity.minOpeningBalance ? ` (opening balance ${money(b.maturity.minOpeningBalance)})` : ''}`}</dd>` : ''}
+      <dt>Last activity</dt><dd>${day(b.lastActivityOn) || '—'}</dd></dl>
+      <div class="toolbar">
+      ${b.maturity && !b.maturity.startedOn && b.status === 'ACTIVE' && can('ACTIVATE_MATURITY') ? '<button class="secondary" id="dep-mature">Start maturity</button>' : ''}
+      ${b.maturity && b.maturity.startedOn && b.status !== 'MATURED' && can('UNDO_MATURITY') ? '<button class="secondary" id="dep-unmature">Undo maturity</button>' : ''}
+      ${b.interestRateTerms === 'FIXED' && can('EDIT_SAVINGS_ACCOUNT') && b.status !== 'CLOSED' ? '<button class="secondary" id="dep-rate">Change interest rate</button>' : ''}
+      ${can('EDIT_SAVINGS_ACCOUNT') && b.status !== 'CLOSED' ? '<button class="secondary" id="dep-max">Maximum balance</button>' : ''}</div>`)}</div>
     ${card('Transactions', table([
     { label: 'Date', value: (t) => day(t.value_date || t.created_at) }, { label: 'Kind', key: 'kind' }, { label: 'Reference', key: 'reference' },
     { label: 'Amount', num: true, value: (t) => money(t.amount) },
   ], tx.body || [], { empty: 'No transactions' }))}`;
   $('#back').addEventListener('click', () => (holder ? memberDetail(holder) : membersView()));
+  const again = () => depositDetail(a, holder);
+  const onDep = (sel, fn) => { const x = $(sel); if (x) x.addEventListener('click', fn); };
+  onDep('#dep-mature', async () => {
+    const d = await ask([opt({ label: `Term in ${String(b.maturity.termUnit || '').toLowerCase()} (blank: ${b.maturity.termLength})`, name: 'termLength', type: 'number' })], `Start the maturity of ${b.accountNo}`);
+    if (!d) return;
+    const res = await api('POST', `/api/savings/${a.id}/maturity`, { termLength: d.termLength ? Number(d.termLength) : undefined });
+    toast(res.ok ? `Matures ${day(res.body.maturity_date)}` : res.error, !res.ok);
+    if (res.ok) again();
+  });
+  onDep('#dep-unmature', async () => {
+    if (!(await ask([], `Undo the maturity of ${b.accountNo}?`))) return;
+    const res = await api('DELETE', `/api/savings/${a.id}/maturity`);
+    toast(res.ok ? 'Maturity undone' : res.error, !res.ok);
+    if (res.ok) again();
+  });
+  onDep('#dep-rate', async () => {
+    const d = await ask([{ label: 'Interest rate, percent', name: 'interestRate', type: 'number', step: '0.0001', value: b.interestRate ?? '' },
+      opt({ label: 'From (blank: today; back to the day after the last application)', name: 'valueDate', type: 'date' }),
+      opt({ label: 'Notes', name: 'notes' })], `Interest rate of ${b.accountNo}`);
+    if (!d) return;
+    const res = await api('POST', `/api/savings/${a.id}:changeInterestRate`, { interestRate: Number(d.interestRate), valueDate: d.valueDate || undefined, notes: d.notes || undefined });
+    toast(res.ok ? `Now ${res.body.interestRate}%${res.body.accruedChange ? `, accrued interest changed by ${money(res.body.accruedChange)}` : ''}` : res.error, !res.ok);
+    if (res.ok) again();
+  });
+  onDep('#dep-max', async () => {
+    const d = await ask([opt({ label: 'Maximum balance (blank: none)', name: 'maxBalance', type: 'number', step: '0.01', value: b.maxBalance ?? '' })], `Maximum balance of ${b.accountNo}`);
+    if (!d) return;
+    const res = await api('PATCH', `/api/savings/${a.id}`, { maxBalance: d.maxBalance === '' ? null : Number(d.maxBalance) });
+    toast(res.ok ? 'Saved' : res.error, !res.ok);
+    if (res.ok) again();
+  });
   const close = $('#dep-close');
   if (close) close.addEventListener('click', async () => {
     const res = await api('POST', `/api/savings/${a.id}/close`, {});
@@ -3246,21 +3290,54 @@ async function changeMethod(kind, p, reload) {
 // Deposit products
 // --------------------------------------------------------------------------
 
+const DEPOSIT_TYPES = ['SAVINGS_ACCOUNT', 'CURRENT_ACCOUNT', 'FIXED_DEPOSIT', 'SAVINGS_PLAN', 'INVESTOR_ACCOUNT'];
+const DEPOSIT_CATEGORIES = ['UNCATEGORIZED', 'PERSONAL_DEPOSIT', 'BUSINESS_DEPOSIT', 'DAILY_BANKING', 'BUSINESS_BANKING', 'STORED_VALUE'];
+const INTEREST_POSTING = ['MONTHLY', 'QUARTERLY', 'SEMI_ANNUAL', 'ANNUAL', 'DAILY', 'FIRST_DAY_OF_MONTH', 'WEEKLY', 'EVERY_OTHER_WEEK',
+  'MONTHLY_FROM_ACTIVATION', 'QUARTERLY_FROM_ACTIVATION', 'SEMI_ANNUAL_FROM_ACTIVATION', 'ANNUAL_FROM_ACTIVATION', 'FIXED_DATES', 'ON_MATURITY'];
 const DEPOSIT_FIELDS = (p = {}) => [
   { label: 'Name', name: 'name', value: p.name || '' },
+  { label: 'Type (fixed once accounts exist)', name: 'productType', options: DEPOSIT_TYPES, value: p.productType || 'SAVINGS_ACCOUNT' },
+  { label: 'Category', name: 'category', options: DEPOSIT_CATEGORIES, value: p.category || 'UNCATEGORIZED' },
+  { label: 'New account numbers', name: 'idGeneratorType', options: ['SHARED_SA_SERIES', 'INCREMENTAL_NUMBER', 'RANDOM_PATTERN'], value: p.newAccounts?.idGeneratorType || 'SHARED_SA_SERIES' },
+  opt({ label: 'Starting number or pattern (# digit, @ letter, $ either)', name: 'idPattern', value: p.newAccounts?.idPattern || '' }),
   { label: 'Withdrawable', name: 'withdrawable', options: ['true', 'false'], value: String(p.withdrawable ?? true) },
   { label: 'Minimum balance', name: 'minBalance', type: 'number', step: '0.01', value: p.minBalance ?? 0 },
   { label: 'Pays interest into the account', name: 'interestPaidIntoAccount', options: ['false', 'true'], value: String(p.interest?.paidIntoAccount ?? false) },
-  { label: 'Annual rate, percent', name: 'annualRate', type: 'number', step: '0.0001', value: p.interest?.annualRate ?? 0 },
-  { label: 'Interest on', name: 'interestCalcBalance', options: ['END_OF_DAY', 'MINIMUM'], value: p.interest?.calcBalance || 'END_OF_DAY' },
-  { label: 'Day count', name: 'interestDayCount', options: ['ACTUAL_365', 'ACTUAL_360', 'THIRTY_360'], value: p.interest?.dayCount || 'ACTUAL_365' },
-  { label: 'Applied', name: 'interestApplication', options: ['MONTHLY', 'QUARTERLY', 'SEMI_ANNUAL', 'ANNUAL'], value: p.interest?.application || 'MONTHLY' },
+  { label: 'Rate terms', name: 'interestRateTerms', options: ['FIXED', 'INDEX', 'TIERED_BALANCE', 'TIERED_BANDS', 'TIERED_PERIOD'], value: p.interest?.rateTerms || 'FIXED' },
+  { label: 'Rate, percent (the default for FIXED)', name: 'annualRate', type: 'number', step: '0.0001', value: p.interest?.annualRate ?? 0 },
+  opt({ label: 'Lowest and highest account rate (FIXED), e.g. 2,8', name: 'rateRange', value: p.interest?.rateMin !== null && p.interest?.rateMin !== undefined ? `${p.interest.rateMin},${p.interest.rateMax ?? ''}` : '' }),
+  { label: 'Rate given per', name: 'interestRateFrequency', options: ['ANNUALIZED', 'EVERY_MONTH', 'EVERY_FOUR_WEEKS', 'EVERY_WEEK', 'EVERY_X_DAYS'], value: p.interest?.rateFrequency || 'ANNUALIZED' },
+  opt({ label: 'X days (EVERY_X_DAYS)', name: 'interestRateXDays', type: 'number', value: p.interest?.rateXDays ?? '' }),
+  opt({ label: 'Index rate source (INDEX)', name: 'interestIndexSourceId', value: p.interest?.indexSourceId || '' }),
+  opt({ label: 'Spread default, lowest, highest (INDEX), e.g. 1.5,0,3', name: 'spread', value: p.interest?.spread?.default !== null && p.interest?.spread?.default !== undefined ? `${p.interest.spread.default},${p.interest.spread.min ?? ''},${p.interest.spread.max ?? ''}` : '' }),
+  opt({ label: 'Tiers (TIERED_*): ending:rate, comma separated, last ending blank, e.g. 50000:2,:5', name: 'tiers', value: (p.interest?.tiers || []).map((t) => `${t.ending ?? ''}:${t.rate}`).join(',') }),
+  { label: 'Interest on', name: 'interestCalcBalance', options: ['END_OF_DAY', 'MINIMUM_DAILY', 'AVERAGE_DAILY', 'MINIMUM'], value: p.interest?.calcBalance || 'END_OF_DAY',
+    hint: 'MINIMUM is the lowest balance in the interest period (the platform\'s first rule); MINIMUM_DAILY and AVERAGE_DAILY are the reference platform\'s.' },
+  opt({ label: 'Maximum balance earning interest (END_OF_DAY)', name: 'interestMaxBalance', type: 'number', step: '0.01', value: p.interest?.maxBalance ?? '' }),
+  { label: 'Day count', name: 'interestDayCount', options: ['ACTUAL_365', 'ACTUAL_360', 'THIRTY_360', 'ACTUAL_ACTUAL_ISDA'], value: p.interest?.dayCount || 'ACTUAL_365' },
+  { label: 'Applied', name: 'interestApplication', options: INTEREST_POSTING, value: p.interest?.application || 'MONTHLY' },
+  opt({ label: 'Fixed dates (FIXED_DATES), MM-DD comma separated', name: 'interestFixedDates', value: (p.interest?.fixedDates || []).join(',') }),
+  { label: 'A locked account earns interest', name: 'collectInterestWhenLocked', options: ['true', 'false'], value: String(p.interest?.collectWhenLocked ?? true) },
+  { label: 'Interest after maturity', name: 'accrueInterestAfterMaturity', options: ['false', 'true'], value: String(p.interest?.accrueAfterMaturity ?? false) },
+  opt({ label: 'Term unit (fixed deposit, savings plan)', name: 'termUnit', options: ['', 'DAYS', 'WEEKS', 'MONTHS'], value: p.term?.unit || '' }),
+  opt({ label: 'Term default, lowest, highest, e.g. 6,3,12', name: 'termRange', value: p.term ? `${p.term.default ?? ''},${p.term.min ?? ''},${p.term.max ?? ''}` : '' }),
+  opt({ label: 'Opening balance lowest, highest, default', name: 'openingRange', value: p.limits ? [p.limits.openingBalance.min, p.limits.openingBalance.max, p.limits.openingBalance.default].map((x) => x ?? '').join(',') : '' }),
+  opt({ label: 'Recommended deposit (fixed deposit, savings plan)', name: 'recommendedDepositAmount', type: 'number', step: '0.01', value: p.limits?.recommendedDepositAmount ?? '' }),
+  opt({ label: 'Maximum withdrawal in one transaction', name: 'maxWithdrawalAmount', type: 'number', step: '0.01', value: p.limits?.maxWithdrawalAmount ?? '' }),
+  opt({ label: 'Days without activity before dormant', name: 'dormancyDays', type: 'number', value: p.dormancyDays ?? '' }),
+  { label: 'Allow arbitrary fees', name: 'allowArbitraryFees', options: ['true', 'false'], value: String(p.allowArbitraryFees ?? true) },
   opt({ label: 'Minimum balance to earn interest', name: 'minBalanceForInterest', type: 'number', step: '0.01', value: p.interest?.minBalanceForInterest ?? '' }),
   { label: 'Allow a negative rate', name: 'allowNegativeRate', options: ['false', 'true'], value: String(p.interest?.allowNegativeRate ?? false) },
   opt({ label: 'Withholding tax, percent (blank: none)', name: 'withholdingTaxPercent', type: 'number', step: '0.001', value: p.interest?.withholdingTaxPercent ?? '' }),
   { label: 'Allow overdrafts', name: 'allowOverdraft', options: ['false', 'true'], value: String(p.overdraft?.allowed ?? false) },
   opt({ label: 'Maximum overdraft limit', name: 'maxOverdraftLimit', type: 'number', step: '0.01', value: p.overdraft?.maxLimit ?? '' }),
-  { label: 'Overdraft annual rate, percent', name: 'overdraftAnnualRate', type: 'number', step: '0.0001', value: p.overdraft?.annualRate ?? 0 },
+  { label: 'Overdraft rate terms', name: 'overdraftRateTerms', options: ['FIXED', 'INDEX', 'TIERED_BALANCE'], value: p.overdraft?.rateTerms || 'FIXED' },
+  { label: 'Overdraft annual rate, percent (the default for FIXED)', name: 'overdraftAnnualRate', type: 'number', step: '0.0001', value: p.overdraft?.annualRate ?? 0 },
+  opt({ label: 'Lowest and highest account overdraft rate, e.g. 10,30', name: 'odRange', value: p.overdraft?.rateMin !== null && p.overdraft?.rateMin !== undefined ? `${p.overdraft.rateMin},${p.overdraft.rateMax ?? ''}` : '' }),
+  opt({ label: 'Overdraft index source (INDEX)', name: 'overdraftIndexSourceId', value: p.overdraft?.indexSourceId || '' }),
+  opt({ label: 'Overdraft spread default, lowest, highest (INDEX)', name: 'odSpread', value: p.overdraft?.spread?.default !== null && p.overdraft?.spread?.default !== undefined ? `${p.overdraft.spread.default},${p.overdraft.spread.min ?? ''},${p.overdraft.spread.max ?? ''}` : '' }),
+  opt({ label: 'Overdraft tiers by amount overdrawn: ending:rate', name: 'odTiers', value: (p.overdraft?.tiers || []).map((t) => `${t.ending ?? ''}:${t.rate}`).join(',') }),
+  { label: 'Overdraft interest on', name: 'overdraftCalcBalance', options: ['END_OF_DAY', 'MINIMUM_DAILY'], value: p.overdraft?.calcBalance || 'END_OF_DAY' },
   { label: 'Allow technical overdrafts (charges past zero)', name: 'allowTechnicalOverdraft', options: ['false', 'true'], value: String(p.overdraft?.technicalAllowed ?? false) },
   { label: 'Accounting (fixed once accounts exist; use Change accounting method)', name: 'accountingMethod', options: ['CASH', 'ACCRUAL', 'NONE'], value: p.accountingMethod || 'CASH' },
   { label: 'Accrued interest reaches the ledger (ACCRUAL only)', name: 'interestAccruedAccounting', options: ['NONE', 'DAILY', 'MONTHLY'], value: p.interestAccruedAccounting || 'NONE' },
@@ -3282,7 +3359,31 @@ const DEPOSIT_FIELDS = (p = {}) => [
 // send only those: a product refuses an account it would never post to.
 async function depositBody(d) {
   const num = (v) => (v === '' || v === undefined ? null : Number(v));
+  const parts = (v, n) => { const x = String(v || '').split(',').map((y) => num(y.trim())); while (x.length < n) x.push(null); return x; };
+  const tiers = (v) => String(v || '').split(',').filter((x) => x.includes(':')).map((x) => { const [e, r] = x.split(':'); return { ending: num(e.trim()), rate: Number(r) }; });
+  const [rateMin, rateMax] = parts(d.rateRange, 2);
+  const [spreadDefault, spreadMin, spreadMax] = parts(d.spread, 3);
+  const [termDefault, termMin, termMax] = parts(d.termRange, 3);
+  const [openMin, openMax, openDefault] = parts(d.openingRange, 3);
+  const [odMin, odMax] = parts(d.odRange, 2);
+  const [odSpreadDefault, odSpreadMin, odSpreadMax] = parts(d.odSpread, 3);
+  const term = d.termUnit ? { termUnit: d.termUnit, termDefault, termMin, termMax } : {};
+  const extra = {
+    productType: d.productType, category: d.category,
+    idGeneratorType: d.idGeneratorType === 'SHARED_SA_SERIES' ? null : d.idGeneratorType, idPattern: d.idGeneratorType === 'SHARED_SA_SERIES' ? null : d.idPattern || null,
+    interestRateTerms: d.interestRateTerms, interestRateMin: rateMin, interestRateMax: rateMax, interestRateFrequency: d.interestRateFrequency,
+    interestRateXDays: num(d.interestRateXDays), interestIndexSourceId: d.interestIndexSourceId || null,
+    interestSpreadDefault: spreadDefault, interestSpreadMin: spreadMin, interestSpreadMax: spreadMax, interestRateTiers: tiers(d.tiers),
+    interestMaxBalance: num(d.interestMaxBalance), interestFixedDates: String(d.interestFixedDates || '').split(',').map((x) => x.trim()).filter(Boolean),
+    collectInterestWhenLocked: d.collectInterestWhenLocked !== 'false', accrueInterestAfterMaturity: d.accrueInterestAfterMaturity === 'true',
+    ...term, minOpeningBalance: openMin, maxOpeningBalance: openMax, defaultOpeningBalance: openDefault,
+    recommendedDepositAmount: num(d.recommendedDepositAmount), maxWithdrawalAmount: num(d.maxWithdrawalAmount), dormancyDays: num(d.dormancyDays),
+    allowArbitraryFees: d.allowArbitraryFees !== 'false', overdraftRateTerms: d.overdraftRateTerms, overdraftRateMin: odMin, overdraftRateMax: odMax,
+    overdraftIndexSourceId: d.overdraftIndexSourceId || null, overdraftSpreadDefault: odSpreadDefault, overdraftSpreadMin: odSpreadMin,
+    overdraftSpreadMax: odSpreadMax, overdraftRateTiers: tiers(d.odTiers), overdraftCalcBalance: d.overdraftCalcBalance,
+  };
   const out = {
+    ...extra,
     name: d.name, withdrawable: d.withdrawable === 'true', minBalance: num(d.minBalance) ?? 0,
     interestPaidIntoAccount: d.interestPaidIntoAccount === 'true', annualRate: num(d.annualRate) ?? 0,
     interestCalcBalance: d.interestCalcBalance, interestDayCount: d.interestDayCount, interestApplication: d.interestApplication,
@@ -3313,8 +3414,17 @@ async function depositProductDetail(p0) {
   view().innerHTML = `
     <button class="secondary" id="back">← Products</button>
     <div class="toolbar"><h1>${esc(p.id)} · ${esc(p.name)}</h1><span class="spacer"></span>
-      <button id="d-edit" class="secondary">Edit settings</button><button id="d-method" class="secondary">Change accounting method</button><button id="d-fee">Add fee</button></div>
+      <button id="d-edit" class="secondary">Edit settings</button><button id="d-method" class="secondary">Change accounting method</button><button id="d-fee">Add fee</button>
+      ${p.accounts === 0 && can('DELETE_SAVINGS_PRODUCT') ? '<button id="d-delete" class="secondary">Delete</button>' : ''}</div>
     <div class="grid">
+      ${card('Type and limits', `<dl class="kv" id="deposit-product-type">
+        <dt>Type</dt><dd>${esc(String(p.productType).replace(/_/g, ' ').toLowerCase())} · ${esc(String(p.category).replace(/_/g, ' ').toLowerCase())}</dd>
+        <dt>Account numbers</dt><dd>${p.newAccounts.idGeneratorType ? `${esc(p.newAccounts.idGeneratorType.replace(/_/g, ' ').toLowerCase())} ${esc(p.newAccounts.idPattern)}` : 'the shared SA series'}</dd>
+        <dt>Rate terms</dt><dd>${esc(p.interest.rateTerms)}${p.interest.rateTerms === 'FIXED' && p.interest.rateMin !== null ? `, ${p.interest.rateMin}% to ${p.interest.rateMax ?? 'any'}%` : ''}${p.interest.tiers.length ? `, tiers ${p.interest.tiers.map((t) => `${t.ending ?? 'above'}: ${t.rate}%`).join(' · ')}` : ''}${p.interest.indexSourceId ? `, ${esc(p.interest.indexSourceId)} + ${p.interest.spread.default ?? 0}` : ''}</dd>
+        <dt>Term</dt><dd>${p.term ? `${p.term.default} ${esc(p.term.unit.toLowerCase())} (${p.term.min ?? '—'} to ${p.term.max ?? '—'})` : 'none'}</dd>
+        <dt>Maximum withdrawal</dt><dd>${p.limits.maxWithdrawalAmount ?? 'none'}</dd><dt>Dormant after</dt><dd>${p.dormancyDays ? `${p.dormancyDays} days` : 'never'}</dd>
+        <dt>Arbitrary fees</dt><dd>${p.allowArbitraryFees ? 'allowed' : 'not allowed'}</dd>
+      </dl>`)}
       ${card('Interest', `<dl class="kv">
         <dt>Paid</dt><dd>${p.interest.paidIntoAccount ? `${p.interest.annualRate}% a year on the ${esc(p.interest.calcBalance.toLowerCase().replace(/_/g, ' '))} balance, ${esc(p.interest.dayCount)}, applied ${esc(p.interest.application.toLowerCase().replace('_', ' '))}` : 'no interest'}</dd>
         <dt>Threshold</dt><dd>${p.interest.minBalanceForInterest ?? 'none'}</dd>
@@ -3331,7 +3441,8 @@ async function depositProductDetail(p0) {
       </dl>`)}
     </div>
     ${card('Fees', table([
-    { label: 'Code', key: 'code' }, { label: 'Fee', key: 'name' }, { label: 'When', key: 'trigger' },
+    { label: 'Code', key: 'code' }, { label: 'Fee', key: 'name' }, { label: 'When', value: (f) => `${f.trigger}${f.applyDateMethod ? ` · ${f.applyDateMethod.replace(/_/g, ' ').toLowerCase()}` : ''}` },
+    { label: '', html: true, value: (f) => `<button class="link" data-fee-drop="${esc(f.code)}">delete</button>` },
     { label: 'Amount', num: true, value: (f) => (f.amount === null ? 'set when charged' : money(f.amount)) },
     { label: 'Income GL', value: (f) => f.glIncome || 'product default' },
   ], p.fees, { empty: 'No fees defined.' }))}`;
@@ -3346,16 +3457,30 @@ async function depositProductDetail(p0) {
     if (res.ok) depositProductDetail(p);
   });
   $('#d-method').addEventListener('click', () => changeMethod('deposit-products', p, depositProductDetail));
+  const del = $('#d-delete');
+  if (del) del.addEventListener('click', async () => {
+    if (!(await ask([], `Delete ${p.id}? Only a product that never had accounts is deleted.`))) return;
+    const res = await api('DELETE', `/api/deposit-products/${p.id}`);
+    toast(res.ok ? `${p.id} deleted` : res.error, !res.ok);
+    if (res.ok) productsView();
+  });
+  view().querySelectorAll('[data-fee-drop]').forEach((b) => b.addEventListener('click', async () => {
+    const res = await api('DELETE', `/api/deposit-products/${p.id}/fees/${b.dataset.feeDrop}`);
+    toast(res.ok ? 'Fee deleted' : res.error, !res.ok);
+    if (res.ok) depositProductDetail(p);
+  }));
   $('#d-fee').addEventListener('click', async () => {
     const d = await ask([
       { label: 'Code', name: 'code' }, { label: 'Name', name: 'name' },
       { label: 'When', name: 'trigger', options: ['MANUAL', 'MONTHLY'], value: 'MANUAL' },
+      { label: 'Monthly fees are charged', name: 'applyDateMethod', options: ['END_OF_MONTH', 'FIRST_DAY_OF_MONTH', 'MONTHLY_FROM_ACTIVATION'], value: 'END_OF_MONTH' },
       opt({ label: 'Amount', name: 'amount', type: 'number', step: '0.01', value: '' }),
       opt({ label: 'Income GL (blank: product default)', name: 'glIncome', value: '' }),
     ], `New fee on ${p.id}`);
     if (!d) return;
     const res = await api('POST', `/api/deposit-products/${p.id}/fees`, {
       code: d.code.toUpperCase(), name: d.name, trigger: d.trigger, amount: d.amount === '' ? null : Number(d.amount), glIncome: d.glIncome || null,
+      applyDateMethod: d.trigger === 'MONTHLY' ? d.applyDateMethod : undefined,
     });
     toast(res.ok ? `Fee ${res.body.code} added` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) depositProductDetail(p);

@@ -26,4 +26,58 @@ async function next(c, kind) {
   throw Object.assign(new Error(`NO_FREE_ACCOUNT_NUMBER: ${kind}`), { status: 409 });
 }
 
-module.exports = { next };
+const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';   // no I or O, which read as 1 and 0
+const DIGITS = '0123456789';
+const pick = (s) => s[Math.floor(Math.random() * s.length)];
+
+/**
+ * Fill an ID pattern. '#' is a digit, '@' a letter, '$' either, anything
+ * else literal. With a sequence number the run of '#' carries it,
+ * zero-padded; the extra digits of a number that outgrew the run go on its
+ * front. Without one every placeholder is drawn.
+ */
+function fillPattern(pattern, sequence = null) {
+  const hashes = (pattern.match(/#/g) || []).length;
+  const digits = sequence === null ? null : String(sequence).padStart(hashes, '0');
+  if (digits && digits.length > hashes) pattern = pattern.replace('#', '#'.repeat(digits.length - hashes + 1));
+  let di = 0;
+  let out = '';
+  for (const ch of pattern) {
+    if (ch === '#') out += digits ? digits[di++] : pick(DIGITS);
+    else if (ch === '@') out += pick(LETTERS);
+    else if (ch === '$') out += pick(LETTERS + DIGITS);
+    else out += ch;
+  }
+  return out;
+}
+
+/**
+ * A deposit account number under its product's new account settings
+ * (The reference platform): INCREMENTAL_NUMBER counts from the product's starting number,
+ * digits only; RANDOM_PATTERN fills the pattern. A product with neither
+ * uses the shared SA series. Numbers already taken are stepped over.
+ */
+async function forProduct(c, p) {
+  if (!p.id_generator_type) return next(c, 'SAVINGS');
+  if (p.id_generator_type === 'INCREMENTAL_NUMBER') {
+    const { rows: [r] } = await c.query(
+      'UPDATE savings_products SET id_next = COALESCE(id_next, $2::bigint) + 1 WHERE id = $1 RETURNING id_next - 1 AS n', [p.id, Number(p.id_pattern)]);
+    let n = Number(r.n);
+    for (let tries = 0; tries < 100000; tries += 1, n += 1) {
+      const { rows: [t] } = await c.query("SELECT account_no_taken('SAVINGS', $1) AS taken", [String(n)]);
+      if (!t.taken) {
+        await c.query('UPDATE savings_products SET id_next = GREATEST(id_next, $2::bigint) WHERE id = $1', [p.id, n + 1]);
+        return String(n);
+      }
+    }
+    throw Object.assign(new Error(`NO_FREE_ACCOUNT_NUMBER: ${p.id}`), { status: 409 });
+  }
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const no = fillPattern(p.id_pattern);
+    const { rows: [t] } = await c.query("SELECT account_no_taken('SAVINGS', $1) AS taken", [no]);
+    if (!t.taken) return no;
+  }
+  throw Object.assign(new Error(`ID_PATTERN_EXHAUSTED: ${p.id_pattern}`), { status: 409 });
+}
+
+module.exports = { next, fillPattern, forProduct };

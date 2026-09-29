@@ -112,7 +112,10 @@ src/
                        daily or monthly
     accountingChanges.js  changing a product's accounting method in use
     branches.js        branches, inter-branch rules, closures, moving accounts
-    savings.js         deposits: legs across zero, fees, interest, overdrafts
+    savings.js         deposits: legs across zero, fees, interest, overdrafts,
+                       limits, maturity, dormancy, rate changes
+    depositRules.js    what a deposit product gives its accounts: types, rates
+                       on a day, days in a year, posting dates, the checks
     fees.js            product fees of every type, applying, waiving, settling
     workflow.js        states and undo, amendments by state, arrears, cap on
                        charges
@@ -395,17 +398,60 @@ postings always read the current mapping, so a change applies from then on.
 
 ### Deposit products
 
-`GET/POST/PATCH /api/deposit-products`, with `/:id/fees` and `POST
-/accounting-rules` (the mappings a set of settings would need, before it is
-saved). A deposit product carries:
+`GET/POST/PATCH/DELETE /api/deposit-products`, with `/:id/fees` (and `DELETE
+/:id/fees/:feeId` for a fee never applied) and `POST /accounting-rules` (the
+mappings a set of settings would need, before it is saved). A product that
+never had accounts is deleted (`DELETE_SAVINGS_PRODUCT`); one that had is
+deactivated instead. A deposit product carries:
 
+- **Type and category** (the reference platform): `productType` CURRENT_ACCOUNT (the only
+  type with overdrafts and technical overdrafts), SAVINGS_ACCOUNT,
+  FIXED_DEPOSIT, SAVINGS_PLAN or INVESTOR_ACCOUNT (a funding product), and a
+  `category` label. A product given overdrafts without a type named is a
+  current account, a funding one an investor account, the rest savings
+  accounts; products saved before this took their type the same way.
+- **New account numbers**: `idGeneratorType` INCREMENTAL_NUMBER (from the
+  first number in `idPattern`, digits only) or RANDOM_PATTERN (`#` a digit,
+  `@` a letter, `$` either). A product that sets neither keeps the shared
+  SA series.
 - **Interest**: `interest_paid_into_account` (off unless switched on, so an
-  upgraded tenant does not start paying interest nobody configured), annual
-  rate, `END_OF_DAY` or `MINIMUM` balance, `ACTUAL_365`, `ACTUAL_360` or
-  `THIRTY_360`, applied `MONTHLY`, `QUARTERLY`, `SEMI_ANNUAL` or `ANNUAL` on the
-  period's last day, a minimum balance to earn it, and negative rates when
-  allowed. Interest accrues to six decimal places so the sub-cent remainder
-  carries into the next period.
+  upgraded tenant does not start paying interest nobody configured), and:
+  - `interestRateTerms`: FIXED (the rate, and optional `interestRateMin` and
+    `interestRateMax` for a rate per account), INDEX (an interest rate
+    source plus a spread with a default, minimum and maximum), or
+    TIERED_BALANCE (the whole balance at its tier's rate), TIERED_BANDS
+    (each portion at its band's rate) or TIERED_PERIOD (the rate of the
+    account's age in days), from `interestRateTiers` `[{ ending, rate }]`;
+  - `interestRateFrequency`: the rate per year (ANNUALIZED), EVERY_MONTH,
+    EVERY_FOUR_WEEKS, EVERY_WEEK or EVERY_X_DAYS;
+  - the balance: END_OF_DAY (optionally capped at `interestMaxBalance`),
+    MINIMUM_DAILY and AVERAGE_DAILY (the reference platform's: from the day's movements, the
+    lowest balance and the average of the balances after each), or MINIMUM
+    (the lowest balance of the interest period, the platform's first rule);
+  - the days in a year: ACTUAL_365, ACTUAL_360, THIRTY_360 or
+    ACTUAL_ACTUAL_ISDA;
+  - applied MONTHLY, QUARTERLY, SEMI_ANNUAL or ANNUAL on the calendar
+    period's last day, or DAILY, FIRST_DAY_OF_MONTH, WEEKLY or
+    EVERY_OTHER_WEEK and the MONTHLY, QUARTERLY, SEMI_ANNUAL and ANNUAL
+    `_FROM_ACTIVATION` schedules (clamped at month end), FIXED_DATES (up to
+    12, MM-DD) or ON_MATURITY (fixed deposits and savings plans, their
+    default);
+  - a minimum balance to earn it, negative rates when allowed, whether a
+    locked account earns (`collectInterestWhenLocked`, on) and whether a
+    matured one does (`accrueInterestAfterMaturity`, off).
+  Interest accrues to six decimal places so the sub-cent remainder carries
+  into the next period. A change to a product's rate reaches every open
+  account (`applyTo: ALL_ACCOUNTS`, the default) or new accounts only
+  (`NEW_ACCOUNTS`, fixed rates: each existing account keeps the rate it
+  had), from the next accrual; what has accrued stays. Changes are kept in
+  `savings_interest_rate_changes`.
+- **Deposits and withdrawals**: a maximum withdrawal in one transaction, an
+  opening balance (minimum, maximum, default), and for fixed deposits and
+  savings plans a recommended deposit (a guideline).
+- **Term** (fixed deposits and savings plans): a unit (DAYS, WEEKS, MONTHS)
+  and a default, minimum and maximum.
+- **Dormancy**: the days without financial activity after which an account
+  becomes dormant (not for products with a maturity date).
 - **Withholding tax**: a percentage of interest applied, shipped unset.
 - **Overdrafts**: authorised (a product maximum and an account limit, with
   its own annual rate) and technical (charges the system applies when there
@@ -438,9 +484,48 @@ cash; here the application clears the payable explicitly, so the expense is
 recognised once.
 
 Accounts: `POST /api/savings/:id/fees`, `PUT /:id/overdraft` (`limit`,
-`expiryDate`; either may be left out, and a null `expiryDate` clears it), `POST
+`expiryDate`, and `interestRate` or `interestSpread` within the product's
+range; each may be left out, and a null `expiryDate` clears it), `POST
 /:id/overdraft/write-off`, `POST /:id/interest` (accrue to a date, and apply
-with `apply: true`), `POST /:id/branch`.
+with `apply: true`), `POST /:id/branch`, and:
+
+- `PATCH /api/savings/:id`: `maxBalance` (the reference platform's maximum deposit balance:
+  deposits and transfers in beyond it are refused with
+  `MAXIMUM_DEPOSIT_BALANCE_EXCEEDED`) and `notes`.
+- Opening an account takes its own `interestRate` (FIXED, within the range),
+  `interestSpread` (INDEX), `overdraftRate`, `overdraftSpread`, `maxBalance`
+  and `termLength`.
+- `POST /api/savings/:id:changeInterestRate` (also `/:id/interest-rate`):
+  a fixed-rate account's rate from a value date, today or back to the day
+  after the last interest application, never forward. What accrued from
+  the value date is priced again and booked.
+- `POST /api/savings/:id/maturity` (ACTIVATE_MATURITY) starts a fixed
+  deposit's or savings plan's term once the opening balance is reached;
+  `DELETE` undoes it before the date (UNDO_MATURITY). A fixed deposit takes
+  no deposits once its maturity has started, and a savings plan none after
+  maturity. Neither pays out during the term without
+  MAKE_EARLY_WITHDRAWALS. At its date the end of day makes the account
+  MATURED: it pays out, takes nothing in, and closes when empty.
+- Dormancy: the end of day makes an account DORMANT after the product's days
+  without financial activity (interest postings and fees the end of day
+  charges do not count). Deposits and withdrawals on it need
+  POST_TRANSACTIONS_ON_DORMANT_ACCOUNTS, and make it ACTIVE again.
+- Fees: a monthly fee is charged on the last day of the month (the
+  platform's first rule, which existing fees keep), on the first day of
+  every month, or monthly from the account's activation
+  (`applyDateMethod`). A fee not defined on the product is charged only
+  where the product allows arbitrary fees (on unless turned off).
+- Overdraft interest: FIXED (the rate, with a range for a rate per account),
+  INDEX (a source plus spread, never below zero) or TIERED_BALANCE (by the
+  amount overdrawn), with its own day count and balance (END_OF_DAY or
+  MINIMUM_DAILY). A change to the product's overdraft rate reaches new
+  accounts only (the reference platform): existing accounts keep the rate they had.
+  Technical overdrafts are turned off only while the product has no
+  accounts.
+- Not built from these pages: currencies per product (the ledger is in the
+  organization's currency), offset accounts, profit-sharing products,
+  solidarity groups as deposit holders, and the account's initial state and
+  approval (the Deposit Accounts section).
 
 ### Branches, inter-branch rules and closures
 
@@ -2388,7 +2473,7 @@ approving imports, data dictionary comments, loan migration, resetting
 passwords), or any signed-in staff user (views, menu items, your own
 profile). A route the table does not list is refused to everyone but an
 administrator. The catalogue holds only permissions that are checked,
-167 of them: the reference platform's codes for what the platform has, and eleven of the platform's
+172 of them: the reference platform's codes for what the platform has, and eleven of the platform's
 own for what the reference platform does not have (shares and dividends, provisioning, the
 year-end close, regulatory returns, data extracts, data imports read-only,
 ID templates, approving write-off requests). A few permissions are checked

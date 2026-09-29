@@ -120,7 +120,11 @@ const RULES = [
   ['POST', '/savings', 'CREATE_SAVINGS_ACCOUNT'],
   ['POST', '/savings/:id/deposits', 'MAKE_DEPOSIT'], ['POST', '/savings/:id/withdrawals', 'MAKE_WITHDRAWAL'],
   ['POST', '/savings/:id/transfers', 'MAKE_TRANSFER'], ['POST', '/savings/:id/fees', 'APPLY_SAVINGS_FEES'],
-  ['PUT', '/savings/:id/overdraft', 'EDIT_SAVINGS_ACCOUNT'],
+  ['PUT', '/savings/:id/overdraft', 'EDIT_SAVINGS_ACCOUNT'], ['PATCH', '/savings/:id', 'EDIT_SAVINGS_ACCOUNT'],
+  ['POST', '/savings/:id/maturity', 'ACTIVATE_MATURITY'], ['DELETE', '/savings/:id/maturity', 'UNDO_MATURITY'],
+  ['POST', '/savings/:id/interest-rate', 'EDIT_SAVINGS_ACCOUNT'],
+  // POST /savings/:id is the shape of the reference platform's :changeInterestRate only.
+  ['POST', '/savings/:id', 'EDIT_SAVINGS_ACCOUNT'],
   ['POST', '/savings/:id/overdraft/write-off', 'CLOSE_SAVINGS_ACCOUNTS'], ['POST', '/savings/:id/close', 'CLOSE_SAVINGS_ACCOUNTS'],
   ['POST', '/savings/:id/interest', 'APPLY_ACCRUED_SAVINGS_INTEREST'],
   ['POST', '/savings/:id/branch', 'MANAGE_DEPOSIT_ASSOCIATION'],
@@ -198,7 +202,8 @@ const RULES = [
   ['POST', '/deposit-products/accounting-rules', 'VIEW_SAVINGS_PRODUCT_DETAILS'],
   ['POST', '/deposit-products', 'CREATE_SAVINGS_PRODUCT'], ['PATCH', '/deposit-products/:id', 'EDIT_SAVINGS_PRODUCT'],
   ['POST', '/deposit-products/:id/accounting-method', 'EDIT_SAVINGS_PRODUCT'], ['POST', '/deposit-products/:id/fees', 'EDIT_SAVINGS_PRODUCT'],
-  ['PATCH', '/deposit-products/:id/fees/:feeId', 'EDIT_SAVINGS_PRODUCT'],
+  ['PATCH', '/deposit-products/:id/fees/:feeId', 'EDIT_SAVINGS_PRODUCT'], ['DELETE', '/deposit-products/:id/fees/:feeId', 'EDIT_SAVINGS_PRODUCT'],
+  ['DELETE', '/deposit-products/:id', 'DELETE_SAVINGS_PRODUCT'],
   ['GET', '/index-rates', OPEN], ['GET', '/index-rates/*', OPEN],
   ['*', '/index-rates', 'MANAGE_INDEX_RATES'], ['*', '/index-rates/*', 'MANAGE_INDEX_RATES'],
 
