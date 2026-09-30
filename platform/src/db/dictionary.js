@@ -338,7 +338,7 @@ const COLUMNS = {
   // custom fields and documents
   'custom_field_definitions.set_id': 'The set (custom_field_sets.id); NULL on guarantors and collateral.',
   'custom_field_definitions.entity': 'The entity the field belongs to, for example MEMBER or LOAN_ACCOUNT.',
-  'custom_field_definitions.field_type': 'FREE_TEXT, SELECTION, NUMBER, CHECKBOX, DATE, DATE_TIME, MEMBER_LINK or USER_LINK.',
+  'custom_field_definitions.field_type': 'FREE_TEXT, SELECTION, NUMBER, CHECKBOX, DATE, DATE_TIME, CLIENT_LINK, GROUP_LINK or USER_LINK.',
   'custom_field_definitions.long_field': 'Whether the UI shows it as a long field.',
   'custom_field_definitions.format': 'Input mask for free text.',
   'custom_field_definitions.unique_value': 'Whether no two records may share a value.',

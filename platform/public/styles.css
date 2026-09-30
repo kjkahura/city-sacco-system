@@ -165,3 +165,8 @@ textarea { width: 100%; font: inherit; font-family: ui-monospace, Menlo, Consola
 
 /* The import's background check: a bar that fills as it runs. */
 #imp-progress progress { width: 260px; vertical-align: middle; accent-color: var(--accent); }
+/* Administration > Fields: the definition form's sections, and a grouped set edited as rows. */
+dialog form.card fieldset { border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 10px; margin: 0 0 10px; }
+dialog form.card fieldset legend { font-weight: 600; padding: 0 4px; }
+table.grouped-editor td input, table.grouped-editor td select { width: 100%; min-width: 90px; }
+#org-cf .toolbar label { display: inline-flex; gap: 6px; align-items: center; margin-right: 12px; }

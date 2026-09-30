@@ -271,9 +271,14 @@ const RULES = [
   ['PUT', '/custom-fields/sets/order', 'EDIT_CUSTOM_FIELD'], ['PUT', '/custom-fields/definitions/order', 'EDIT_CUSTOM_FIELD'],
   ['PATCH', '/custom-fields/sets/:id', 'EDIT_CUSTOM_FIELD'], ['PATCH', '/custom-fields/definitions/:id', 'EDIT_CUSTOM_FIELD'],
   ['DELETE', '/custom-fields/sets/:id', 'DELETE_CUSTOM_FIELD'], ['DELETE', '/custom-fields/definitions/:id', 'DELETE_CUSTOM_FIELD'],
-  // A value's own rights (the definition's roles) decide which fields; this decides who may write values at all.
+  // The entity's permission, branch and member rules are checked in the handler (customFields.assertAccess); the definition's roles decide which fields.
+  // The reference platform's API v2 metadata and configuration as code (a PUT creates, edits and deactivates).
+  ['GET', '/customfields/:id', 'VIEW_CUSTOM_FIELD'], ['GET', '/customfieldsets', 'VIEW_CUSTOM_FIELD'],
+  ['GET', '/customfieldsets/:id/customfields', 'VIEW_CUSTOM_FIELD'],
+  ['GET', '/configuration/customfields.yaml', 'VIEW_CUSTOM_FIELD'], ['GET', '/configuration/customfields/template.yaml', 'VIEW_CUSTOM_FIELD'],
+  ['PUT', '/configuration/customfields.yaml', { all: ['CREATE_CUSTOM_FIELD', 'EDIT_CUSTOM_FIELD', 'DELETE_CUSTOM_FIELD'] }],
   ['GET', '/custom-fields/values/:entity/:id', OPEN],
-  ['PUT', '/custom-fields/values/:entity/:id', ['EDIT_CLIENT', 'EDIT_LOAN_ACCOUNT', 'EDIT_SAVINGS_ACCOUNT', 'EDIT_USER', 'EDIT_BRANCH', 'EDIT_CENTRE']],
+  ['PUT', '/custom-fields/values/:entity/:id', OPEN],
   ['GET', '/documents/*', 'VIEW_DOCUMENTS'],
   ['POST', '/documents/templates/:kind/:productId', 'CREATE_PRODUCT_DOCUMENT_TEMPLATES'],
   ['PATCH', '/documents/templates/:id', 'EDIT_PRODUCT_DOCUMENT_TEMPLATES'],

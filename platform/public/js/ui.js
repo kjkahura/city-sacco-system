@@ -61,6 +61,8 @@ export async function ask(fields, title) {
         ${f.options
     ? `<select name="${esc(f.name)}">${f.options.map((o) =>
       `<option value="${esc(o)}" ${String(o) === String(f.value) ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`
+    : f.datalist
+      ? `<input name="${esc(f.name)}" list="dl-${esc(f.name)}" value="${esc(f.value ?? '')}" ${f.required === false ? '' : 'required'}><datalist id="dl-${esc(f.name)}">${f.datalist.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</datalist>`
     : f.type === 'textarea'
       ? `<textarea name="${esc(f.name)}" rows="${f.rows || 8}" ${f.required === false ? '' : 'required'}>${esc(f.value ?? '')}</textarea>`
       : `<input name="${esc(f.name)}" type="${f.type || 'text'}" value="${esc(f.value ?? '')}"

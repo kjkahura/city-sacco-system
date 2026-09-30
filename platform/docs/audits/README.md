@@ -21,6 +21,6 @@ The same files are kept in the claude.ai project "CoreBanking Service" under `cl
 | 13 | Accounting (setup docs and APIs) | audit 4c9962d, build 6bd401d | [audit](audit-accounting.md), [build log](build-log-accounting.md) |
 | 14 | Auditing (the audit trail and tracking activities) | audit d8a0050, build 5da21e7 | [audit](audit-auditing.md), [build log](build-log-auditing.md) |
 | 15 | Code refactoring (no change in behaviour) | the four "Refactor:" commits | [build log](build-log-refactoring.md) |
-| 16 | Custom Fields | audit at 076e51b | [audit](audit-custom-fields.md) |
+| 16 | Custom Fields | audit 0b0985f, build in the "Custom fields, after the reference platform" commit | [audit](audit-custom-fields.md), [build log](build-log-custom-fields.md) |
 
 Before section 5, the audit findings were recorded inside the build logs, with no separate audit file.

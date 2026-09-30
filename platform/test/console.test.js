@@ -468,6 +468,65 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.fill('dialog[open] input[name=date]', '2026-10-20');
     await page.click('dialog[open] button[value=ok]');
     await page.waitForFunction(() => /Mashujaa Day/.test(document.querySelector('#org-holidays')?.textContent || ''));
+
+    section('administration: fields');
+    await page.selectOption('#cf-entity', 'LOAN_ACCOUNT');
+    await page.waitForSelector('#cf-item');
+    await page.click('#cf-set-add');
+    await page.waitForSelector('dialog[open] input[name=name]');
+    await page.fill('dialog[open] input[name=name]', 'Collateral');
+    await page.selectOption('dialog[open] select[name=type]', 'GROUPED');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForSelector('[data-cf-def-add="_collateral"]');
+    check('a set is created for loan accounts', /Collateral/.test(await page.textContent('#org-cf')) && /grouped/.test(await page.textContent('#org-cf')));
+    const addField = async (name, type, perItem) => {
+      await page.click('[data-cf-def-add="_collateral"]');
+      await page.waitForSelector('dialog[open] input[name=name]');
+      await page.fill('dialog[open] input[name=name]', name);
+      await page.selectOption('dialog[open] select[name=type]', type);
+      if (perItem) {
+        await page.uncheck('dialog[open] input[name=availableForAll]');
+        await page.selectOption('dialog[open] select[name^="item|"] >> nth=0', 'REQUIRED');
+      }
+      await page.click('dialog[open] button[value=ok]');
+      await page.waitForFunction((n) => (document.querySelector('#org-cf')?.textContent || '').includes(n), name);
+    };
+    await addField('Asset', 'FREE_TEXT', true);
+    await addField('Value', 'NUMBER', false);
+    check('a field is created with usage per loan product', /: required/.test(await page.textContent('#org-cf')), await page.textContent('#org-cf'));
+    await page.click('[data-cf-def-up="value"]');
+    await page.waitForFunction(() => {
+      const rows = [...document.querySelectorAll('#org-cf tbody tr')].map((r) => r.textContent);
+      return rows.findIndex((t) => t.includes('Value')) < rows.findIndex((t) => t.includes('Asset'));
+    });
+    check('and fields are rearranged', true);
+    await page.click('[data-cf-def-active="asset"]');
+    await page.waitForFunction(() => ![...document.querySelectorAll('#org-cf tbody tr')].some((r) => /Asset/.test(r.textContent)));
+    await page.check('#cf-disabled');
+    await page.waitForFunction(() => /Asset \(disabled\)/.test(document.querySelector('#org-cf')?.textContent || ''));
+    check('a deactivated field shows with Show disabled fields', true);
+    await page.click('[data-cf-def-edit="value"]');
+    await page.waitForSelector('dialog[open] input[name=editRoles]');
+    await page.fill('dialog[open] input[name=editRoles]', 'MANAGER');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /MANAGER/.test(document.querySelector('#org-cf')?.textContent || ''));
+    check('a field\'s rights are edited in its form', true);
+    await T(async (c) => {
+      const CF = require('../src/domain/customFields');
+      await CF.createSet(c, { entity: 'MEMBER', name: 'Next of kin', id: '_kin', type: 'GROUPED' }, { createdBy: 'test' });
+      await CF.createDefinition(c, { entity: 'MEMBER', setId: '_kin', id: 'kinName', name: 'Name', type: 'FREE_TEXT' }, { createdBy: 'test' });
+    });
+    await page.evaluate(async (m) => (await import('/console/js/members.js')).memberDetail(m), mid);
+    await page.waitForSelector('[data-cf-rows="_kin"]');
+    await page.click('[data-cf-rows="_kin"]');
+    await page.waitForSelector('dialog[open] [data-add]');
+    await page.click('dialog[open] [data-add]');
+    await page.fill('dialog[open] input[data-f=kinName]', 'Wairimu');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /Wairimu/.test(document.querySelector('#custom-fields')?.textContent || ''));
+    check('a grouped set is edited as rows on the record', true);
+    await page.click('nav button[data-view=organization]');
+    await page.waitForSelector('#org-details');
     check('a holiday is added from the page, and the calendar shows it needs a sync', await page.locator('#calendar-pending').count() === 1);
     await page.click('nav button[data-view=loans]');
     await page.waitForSelector('#collection-sheet');

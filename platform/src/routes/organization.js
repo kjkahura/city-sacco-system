@@ -11,6 +11,7 @@ const CH = require('../domain/channels');
 const IDT = require('../domain/idTemplates');
 const CUR = require('../domain/currencies');
 const CF = require('../domain/customFields');
+const CFC = require('../domain/customFieldConfig');
 const DOCS = require('../domain/productDocuments');
 const eod = require('../ops/eod');
 const { run } = require('../lib/handlers');
@@ -145,18 +146,38 @@ customFields.put('/definitions/order', ...W((c, req) => CF.rearrangeDefinitions(
 customFields.get('/definitions/:id', ...run((c, req) => CF.findDefinition(c, req.params.id)));
 customFields.patch('/definitions/:id', ...W((c, req) => CF.updateDefinition(c, req.params.id, req.body || {}, by(req))));
 customFields.delete('/definitions/:id', ...W((c, req) => CF.deleteDefinition(c, req.params.id, by(req))));
-// The values on any record, any state; each field's edit rights decide.
-// Values on users are for tenant admins.
-customFields.get('/values/:entity/:id', ...run((c, req) => CF.getValues(c, req.params.entity, req.params.id, { user: req.auth })));
-customFields.put('/values/:entity/:id', requireAuth(), async (req, res, next) => {
-  try {
-    if (String(req.params.entity).toUpperCase() === 'USER' && !PERMS.can(req.auth, 'EDIT_USER')) {
-      return next(Object.assign(new Error('PERMISSION_REQUIRED: EDIT_USER'), { status: 403 }));
-    }
-    const out = await withTenant(req.tenant.schema_name, (c) => CF.setValues(c, req.params.entity, req.params.id, req.body || {}, by(req)));
-    res.json(out);
-  } catch (e) { next(e); }
-});
+// The values on any record, any state. The entity's own permission, the
+// user's branches and the member rules decide who may read or write them
+// (CF.assertAccess); each field's rights decide which fields.
+customFields.get('/values/:entity/:id', ...run(async (c, req) => {
+  const e = CF.entityOf(req.params.entity);
+  const r = await CF.assertAccess(c, e.name, req.params.id, req.auth, 'view');
+  return CF.getValues(c, e.name, r[e.key], { user: req.auth, record: r });
+}));
+customFields.put('/values/:entity/:id', ...W(async (c, req) => {
+  const e = CF.entityOf(req.params.entity);
+  const r = await CF.assertAccess(c, e.name, req.params.id, req.auth, 'edit');
+  return CF.setValues(c, e.name, r[e.key], req.body || {}, by(req));
+}));
+
+// The reference platform's API v2 metadata: GET /customfields/:id,
+// /customfieldsets and /customfieldsets/:id/customfields (../domain/customFieldConfig).
+const customFieldsMeta = express.Router();
+customFieldsMeta.get('/:id', ...run((c, req) => CFC.customField(c, req.params.id)));
+const customFieldSetsMeta = express.Router();
+customFieldSetsMeta.get('/', ...run((c, req) => CFC.customFieldSets(c, { availableFor: req.query.availableFor || null })));
+customFieldSetsMeta.get('/:id/customfields', ...run((c, req) => CFC.fieldsOfSet(c, req.params.id)));
+
+// Configuration as code: GET and PUT /configuration/customfields.yaml, and the template.
+const configuration = express.Router();
+const YAML_TYPE = 'application/yaml; charset=utf-8';
+configuration.get('/customfields.yaml', ...run(async (c, req, res) => {
+  res.type(YAML_TYPE).send(await CFC.configurationYaml(c));
+}));
+configuration.get('/customfields/template.yaml', requireAuth(), (req, res) => res.type(YAML_TYPE).send(CFC.template()));
+configuration.put('/customfields.yaml',
+  express.text({ type: ['application/yaml', 'application/x-yaml', 'text/yaml', 'text/x-yaml', 'text/plain', 'application/vnd.*+yaml'], limit: '2mb' }),
+  ...W((c, req) => CFC.applyConfiguration(c, typeof req.body === 'string' ? req.body : (req.body || {}), by(req))));
 
 // --- product documents -------------------------------------------------------------
 
@@ -185,4 +206,4 @@ documents.get('/:kind/:accountId/:docId', requireAuth(), async (req, res, next) 
   } catch (e) { next(e); }
 });
 
-module.exports = { organization, centres, holidays, channels, idTemplates, currencies, customFields, documents };
+module.exports = { organization, centres, holidays, channels, idTemplates, currencies, customFields, customFieldsMeta, customFieldSetsMeta, configuration, documents };

@@ -20,19 +20,22 @@ const { err } = acct;
  * Types: FREE_TEXT (an input mask of # digit, @ letter, $ either, other
  * characters literal; a unique value flag), SELECTION (options with scores,
  * and options that depend on a parent selection field in the same set),
- * NUMBER, CHECKBOX, DATE, DATE_TIME, MEMBER_LINK and USER_LINK. A value is at
- * most 2048 characters.
+ * NUMBER, CHECKBOX, DATE, DATE_TIME, CLIENT_LINK (an individual), GROUP_LINK
+ * (a group) and USER_LINK. MEMBER_LINK is still taken as a name for
+ * CLIENT_LINK. A value is at most 2048 characters.
  *
  * Usage: Available, Default and Required (Required implies Default implies
  * Available). Loan accounts are set per loan product, deposit accounts per
- * deposit product, transactions per channel, members per client type and
- * groups per group type; the other entities as a whole. A dependent field takes its parent's usage.
+ * deposit product, deposit products per product type, transactions per
+ * channel, transfers per transaction type (TRANSFER), members per client type
+ * and groups per group type; the other entities as a whole. A dependent field
+ * takes its parent's usage, including whether it is available for all.
  *
  * Rights: view and edit roles per definition (NULL: every role). A user
  * without edit rights cannot enter a value, and may save the record without
  * a required one (the reference platform). A definition with values is deactivated, not
  * deleted: its values stay and no new ones are taken. At most 200 values
- * per record (the reference platform's quota).
+ * per record, and 25 on a transaction (the reference platform's quotas).
  */
 
 const ENTITIES = {
@@ -41,20 +44,32 @@ const ENTITIES = {
   GROUP: { table: 'members', key: 'id', item: 'client_type_id', itemLabel: 'group type' },
   LOAN_ACCOUNT: { table: 'loan_accounts', key: 'id', item: 'product_id', itemLabel: 'loan product' },
   SAVINGS_ACCOUNT: { table: 'savings_accounts', key: 'id', item: 'product_id', itemLabel: 'deposit product' },
-  SAVINGS_PRODUCT: { table: 'savings_products', key: 'id' },
+  SAVINGS_PRODUCT: { table: 'savings_products', key: 'id', item: 'product_type', itemLabel: 'deposit product type' },
   GUARANTOR: { table: 'loan_guarantors', key: 'id', noSets: true },
   COLLATERAL: { table: 'loan_collateral', key: 'id', noSets: true },
   BRANCH: { table: 'branches', key: 'id' },
   CENTRE: { table: 'centres', key: 'id' },
   USER: { table: 'platform.users', key: 'id', platform: true },
-  TRANSACTION_CHANNEL: { table: 'transactions', key: 'id', item: 'channel_id', itemLabel: 'transaction channel' },
+  TRANSACTION_CHANNEL: { table: 'transactions', key: 'id', item: 'channel_id', itemLabel: 'transaction channel', quota: 25 },
+  // Transactions by type: transfers only, as in the reference platform. Same column as the channel's fields.
+  TRANSACTION_TYPE: { table: 'transactions', key: 'id', item: 'transaction_type', itemLabel: 'transaction type', quota: 25, items: ['TRANSFER'] },
   CREDIT_ARRANGEMENT: { table: 'credit_arrangements', key: 'id' },
 };
-const TYPES = ['FREE_TEXT', 'SELECTION', 'NUMBER', 'CHECKBOX', 'DATE', 'DATE_TIME', 'MEMBER_LINK', 'USER_LINK'];
+const TYPES = ['FREE_TEXT', 'SELECTION', 'NUMBER', 'CHECKBOX', 'DATE', 'DATE_TIME', 'CLIENT_LINK', 'GROUP_LINK', 'USER_LINK'];
+const TYPE_ALIASES = { MEMBER_LINK: 'CLIENT_LINK' };
+// The kinds of transaction that are transfers (transactions by type).
+const TRANSFER_KINDS = ['SAVINGS_TRANSFER'];
 const ROLE = require('./roles');
 const { recordAudit } = require('../lib/auditLog');
 const MAX_LENGTH = 2048;
 const QUOTA = 200;
+
+/** The item a record's fields are set for: its product, channel, client type, and so on. */
+function itemOf(e, r) {
+  if (!e.item || !r) return null;
+  if (e.name === 'TRANSACTION_TYPE') return TRANSFER_KINDS.includes(r.kind) ? 'TRANSFER' : null;
+  return r[e.item] ?? null;
+}
 
 function entityOf(name) {
   const e = ENTITIES[String(name || '').toUpperCase()];
@@ -115,8 +130,10 @@ async function findSet(c, id) {
 
 async function updateSet(c, id, { name, notes } = {}, { createdBy } = {}) {
   const s = await findSet(c, id);
-  const { rows: [after] } = await c.query('UPDATE custom_field_sets SET name = COALESCE($2, name), notes = COALESCE($3, notes) WHERE id = $1 RETURNING *',
-    [s.id, name || null, notes ?? null]);
+  // Notes are cleared with null or an empty string; left out, they stay.
+  const { rows: [after] } = await c.query(
+    'UPDATE custom_field_sets SET name = COALESCE($2, name), notes = CASE WHEN $4 THEN $3 ELSE notes END WHERE id = $1 RETURNING *',
+    [s.id, name || null, notes || null, notes !== undefined]);
   await audit(c, createdBy, 'CUSTOM_FIELD_SET_CHANGED', 'custom_field_set', s.id, s, after);
   return after;
 }
@@ -176,7 +193,8 @@ function normOptions(options, parentOptions = null) {
   return options.map((o, k) => {
     const label = String(o.label ?? o.value ?? '').trim();
     if (!label) throw err(`OPTION_${k + 1}_NEEDS_A_LABEL`, 400);
-    const id = String(o.id || autoId(label)).slice(0, 64);
+    const id = o.id === undefined || o.id === null || o.id === '' ? autoId(label).slice(0, 64) : String(o.id);
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw err(`OPTION_ID_IS_LETTERS_DIGITS_DASHES_UNDERSCORES: ${id}`, 400);
     if (seen.has(id)) throw err(`DUPLICATE_OPTION_ID: ${id}`, 400);
     seen.add(id);
     const out = { id, label };
@@ -215,7 +233,8 @@ async function shapeDefinition(c, body, before = null) {
       if (s.entity !== e.name) throw err(`SET_${s.id}_IS_FOR_${s.entity}`, 400);
       out.set_id = s.id;
     }
-    const type = String(body.type || '').toUpperCase();
+    const given = String(body.type || '').toUpperCase();
+    const type = TYPE_ALIASES[given] || given;
     if (!TYPES.includes(type)) throw err(`CUSTOM_FIELD_TYPE_IS_ONE_OF: ${TYPES.join(', ')}`, 400);
     out.field_type = type;
   }
@@ -252,8 +271,12 @@ async function shapeDefinition(c, body, before = null) {
   if (e.item) {
     if (body.availableForAll !== undefined) out.available_for_all = body.availableForAll !== false;
   } else out.available_for_all = true;
+  if (e.items && body.usage?.items) {
+    const bad = Object.keys(body.usage.items).filter((k) => !e.items.includes(k));
+    if (bad.length) throw err(`${e.name}_USAGE_IS_FOR: ${e.items.join(', ')}`, 400);
+  }
   const all = out.available_for_all ?? before?.available_for_all ?? true;
-  if (parent) out.usage = JSON.stringify(parent.usage);
+  if (parent) { out.usage = JSON.stringify(parent.usage); out.available_for_all = parent.available_for_all; }
   else if (body.usage !== undefined || body.availableForAll !== undefined || !before) out.usage = JSON.stringify(normUsage(e, all, body.usage || {}));
   if (body.viewRoles !== undefined) out.view_roles = await rolesOrNull(c, body.viewRoles, 'VIEW_ROLES');
   if (body.editRoles !== undefined) out.edit_roles = await rolesOrNull(c, body.editRoles, 'EDIT_ROLES');
@@ -279,7 +302,14 @@ async function definitions(c, { entity = null, setId = null, includeInactive = t
 async function createDefinition(c, body = {}, { createdBy } = {}) {
   const cols = await shapeDefinition(c, body);
   const { rows: [n] } = await c.query(
-    'SELECT COALESCE(max(sort_order), 0) + 1 AS n FROM custom_field_definitions WHERE entity = $1 AND set_id IS NOT DISTINCT FROM $2', [cols.entity, cols.set_id]);
+    `SELECT COALESCE(max(d.sort_order), 0) + 1 AS n
+       FROM custom_field_definitions d LEFT JOIN custom_field_sets s ON s.id = d.set_id,
+            (SELECT sort_order AS so FROM custom_field_sets WHERE id = $2) me
+      WHERE d.entity = $1 AND (d.set_id IS NULL OR s.sort_order < me.so OR (s.sort_order = me.so AND s.id <= $2))
+     UNION ALL SELECT COALESCE(max(sort_order), 0) + 1 FROM custom_field_definitions WHERE entity = $1 AND $2::text IS NULL
+     ORDER BY 1 DESC LIMIT 1`, [cols.entity, cols.set_id]);
+  // Definitions are numbered across the entity: make room after the last field of the set.
+  await c.query('UPDATE custom_field_definitions SET sort_order = sort_order + 1 WHERE entity = $1 AND sort_order >= $2', [cols.entity, n.n]);
   cols.sort_order = n.n;
   cols.created_by = createdBy || 'SYSTEM';
   const keys = Object.keys(cols);
@@ -293,7 +323,8 @@ async function createDefinition(c, body = {}, { createdBy } = {}) {
 
 async function updateDefinition(c, id, body = {}, { createdBy } = {}) {
   const before = await findDefinition(c, id);
-  if (body.type !== undefined && String(body.type).toUpperCase() !== before.field_type) throw err('A_CUSTOM_FIELD_TYPE_CANNOT_CHANGE', 409);
+  const askedType = body.type === undefined ? undefined : (TYPE_ALIASES[String(body.type).toUpperCase()] || String(body.type).toUpperCase());
+  if (askedType !== undefined && askedType !== before.field_type) throw err('A_CUSTOM_FIELD_TYPE_CANNOT_CHANGE', 409);
   const cols = await shapeDefinition(c, body, before);
   const keys = Object.keys(cols);
   if (!keys.length) throw err('NO_UPDATABLE_FIELDS', 400);
@@ -301,7 +332,10 @@ async function updateDefinition(c, id, body = {}, { createdBy } = {}) {
     `UPDATE custom_field_definitions SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`,
     [before.id, ...keys.map((k) => cols[k])]);
   // Dependent fields follow their parent's usage.
-  if (cols.usage) await c.query('UPDATE custom_field_definitions SET usage = $2 WHERE dependent_on = $1', [before.id, cols.usage]);
+  if (cols.usage || cols.available_for_all !== undefined) {
+    await c.query('UPDATE custom_field_definitions SET usage = $2, available_for_all = $3 WHERE dependent_on = $1',
+      [before.id, JSON.stringify(after.usage), after.available_for_all]);
+  }
   await audit(c, createdBy, 'CUSTOM_FIELD_CHANGED', 'custom_field_definition', before.id, before, after);
   return after;
 }
@@ -380,9 +414,12 @@ async function coerce(c, d, raw, group, label) {
       if (!Number.isFinite(v)) throw bad('a number');
       return v;
     }
-    case 'CHECKBOX':
-      if (![true, false, 'true', 'false'].includes(raw)) throw bad('true or false');
-      return raw === true || raw === 'true';
+    case 'CHECKBOX': {
+      // The reference platform writes TRUE and FALSE.
+      const v = typeof raw === 'string' ? raw.toLowerCase() : raw;
+      if (![true, false, 'true', 'false'].includes(v)) throw bad('TRUE or FALSE');
+      return v === true || v === 'true';
+    }
     case 'DATE': {
       const v = String(raw).slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(Date.parse(v))) throw bad('a date YYYY-MM-DD');
@@ -402,9 +439,12 @@ async function coerce(c, d, raw, group, label) {
       }
       return o.id;
     }
-    case 'MEMBER_LINK': {
-      const { rows: [m] } = await c.query('SELECT id FROM members WHERE id::text = $1 OR member_no = $1', [String(raw)]);
-      if (!m) throw bad('no such member');
+    case 'CLIENT_LINK':
+    case 'GROUP_LINK': {
+      const group = d.field_type === 'GROUP_LINK';
+      const { rows: [m] } = await c.query(
+        `SELECT id FROM members WHERE (id::text = $1 OR member_no = $1) AND (COALESCE(holder_type, '') = 'GROUP') = $2`, [String(raw), group]);
+      if (!m) throw bad(group ? 'no such group' : 'no such client');
       return m.id;
     }
     case 'USER_LINK': {
@@ -426,6 +466,8 @@ const countValues = (v) => Object.values(v || {}).reduce((n, x) => {
 }, 0);
 
 async function assertUnique(c, e, d, value, recordId) {
+  // One save at a time per unique field, so two records cannot take a value together.
+  await c.query("SELECT pg_advisory_xact_lock(hashtext('custom_field_unique'), hashtext($1))", [d.id]);
   const filter = e.noSets ? { [d.id]: value } : null;
   const std = e.noSets ? null : { [d.set_id]: { [d.id]: value } };
   const grp = e.noSets ? null : { [d.set_id]: [{ [d.id]: value }] };
@@ -518,18 +560,88 @@ async function prepare(c, entity, { item = null, patch = {}, previous = {}, user
         : !(merged[d.set_id] && merged[d.set_id][d.id] !== undefined);
     if (missing) throw err(`CUSTOM_FIELD_REQUIRED: ${e.noSets ? '' : `${d.set_id}.`}${d.id} (${d.name})`, 400);
   }
-  if (countValues(merged) > QUOTA) throw err(`CUSTOM_FIELD_VALUES_QUOTA_EXCEEDED: at most ${QUOTA} per record`, 409);
+  // A unique value is unique within the record's own grouped entries too.
+  for (const d of defs.filter((x) => x.unique_value && x.set_id && Array.isArray(merged[x.set_id]))) {
+    const seen = new Set();
+    for (const g of merged[d.set_id]) {
+      if (g[d.id] === undefined) continue;
+      const k = JSON.stringify(g[d.id]);
+      if (seen.has(k)) throw err(`DUPLICATE_UNIQUE_VALUE: ${d.id} = ${g[d.id]} appears twice in ${d.set_id} (926)`, 409);
+      seen.add(k);
+    }
+  }
+  const quota = e.quota || QUOTA;
+  // The entity's own sets only: a transaction's column holds channel and type fields side by side.
+  const own = e.noSets ? merged : Object.fromEntries(Object.entries(merged).filter(([sid]) => defs.some((d) => d.set_id === sid)));
+  if (countValues(own) > quota) throw err(`CUSTOM_FIELD_VALUES_QUOTA_EXCEEDED: at most ${quota} per record`, 409);
   return merged;
 }
 
-async function loadRecord(c, e, id) {
+async function loadRecord(c, e, id, { lock = true } = {}) {
   const scope = e.platform ? ' AND tenant_id = (SELECT id FROM platform.tenants WHERE schema_name = current_schema())' : '';
   const alt = e.name === 'LOAN_ACCOUNT' || e.name === 'SAVINGS_ACCOUNT' ? ' OR account_no = $1'
-    : e.name === 'MEMBER' ? ' OR member_no = $1' : ['BRANCH', 'CENTRE'].includes(e.name) ? ' OR code = $1'
-      : e.name === 'TRANSACTION_CHANNEL' ? ' OR reference = $1' : '';
-  const { rows: [r] } = await c.query(`SELECT * FROM ${e.table} WHERE (${e.key}::text = $1${alt})${scope} FOR UPDATE`, [String(id)]);
+    : e.name === 'MEMBER' || e.name === 'GROUP' ? ' OR member_no = $1' : ['BRANCH', 'CENTRE'].includes(e.name) ? ' OR code = $1'
+      : e.name === 'TRANSACTION_CHANNEL' || e.name === 'TRANSACTION_TYPE' ? ' OR reference = $1' : '';
+  const { rows: [r] } = await c.query(`SELECT * FROM ${e.table} WHERE (${e.key}::text = $1${alt})${scope}${lock ? ' FOR UPDATE' : ''}`, [String(id)]);
   if (!r) throw err(`${e.name}_NOT_FOUND: ${id}`, 404);
   if (e.name === 'TRANSACTION_CHANNEL' && !r.channel_id) throw err('ONLY_A_TRANSACTION_POSTED_THROUGH_A_CHANNEL_TAKES_CUSTOM_FIELDS', 409);
+  if (e.name === 'TRANSACTION_TYPE' && !itemOf(e, r)) throw err('ONLY_A_TRANSFER_TAKES_TRANSACTION_TYPE_CUSTOM_FIELDS', 409);
+  return r;
+}
+
+// --------------------------------------------------------------------------
+// Who may read and write a record's values through /api/custom-fields/values
+// --------------------------------------------------------------------------
+
+// The permission that views the record and the one that edits it.
+const ACCESS = {
+  MEMBER: ['VIEW_CLIENT_DETAILS', 'EDIT_CLIENT'], GROUP: ['VIEW_GROUP_DETAILS', 'EDIT_GROUP'],
+  LOAN_ACCOUNT: ['VIEW_LOAN_ACCOUNT_DETAILS', 'EDIT_LOAN_ACCOUNT'], SAVINGS_ACCOUNT: ['VIEW_SAVINGS_ACCOUNT_DETAILS', 'EDIT_SAVINGS_ACCOUNT'],
+  SAVINGS_PRODUCT: ['VIEW_SAVINGS_PRODUCT_DETAILS', 'EDIT_SAVINGS_PRODUCT'],
+  GUARANTOR: ['VIEW_LOAN_ACCOUNT_DETAILS', 'EDIT_SECURITIES'], COLLATERAL: ['VIEW_LOAN_ACCOUNT_DETAILS', 'EDIT_SECURITIES'],
+  BRANCH: ['VIEW_BRANCH_DETAILS', 'EDIT_BRANCH'], CENTRE: ['VIEW_CENTRE_DETAILS', 'EDIT_CENTRE'], USER: ['VIEW_USER_DETAILS', 'EDIT_USER'],
+  CREDIT_ARRANGEMENT: ['VIEW_LINE_OF_CREDIT_DETAILS', 'EDIT_LINES_OF_CREDIT'],
+};
+
+/** The branch a record belongs to, for a user limited to some branches (null: not branch-bound). */
+async function branchOf(c, e, r) {
+  if (['MEMBER', 'GROUP', 'LOAN_ACCOUNT', 'SAVINGS_ACCOUNT', 'CENTRE', 'TRANSACTION_CHANNEL', 'TRANSACTION_TYPE'].includes(e.name)) return r.branch_id || null;
+  if (e.name === 'BRANCH') return r.id;
+  const q = async (sql, v) => (await c.query(sql, [v])).rows[0]?.branch_id || null;
+  if (e.name === 'GUARANTOR' || e.name === 'COLLATERAL') return q('SELECT branch_id FROM loan_accounts WHERE id = $1', r.loan_id);
+  if (e.name === 'CREDIT_ARRANGEMENT') return q('SELECT branch_id FROM members WHERE id = $1', r.holder_id);
+  return null;
+}
+
+/**
+ * Check that a user may read ('view') or write ('edit') a record's values
+ * here: the entity's own permission, the user's branches, and for members
+ * and groups the rules /clients applies (a blacklisted client's values need
+ * EDIT_BLACKLISTED_CLIENT_CFV; an anonymized member takes none). Returns
+ * the record.
+ */
+async function assertAccess(c, entity, id, user, mode) {
+  const e = entityOf(entity);
+  const PERMS = require('../lib/permissions');
+  const r = await loadRecord(c, e, id, { lock: mode === 'edit' });
+  if (!user) return r;
+  const holder = (x) => (x ? x.holder_type === 'GROUP' : false);
+  if (e.name === 'MEMBER' && holder(r)) throw err('THIS_IS_A_GROUP: use GROUP', 400);
+  if (e.name === 'GROUP' && !holder(r)) throw err('THIS_IS_NOT_A_GROUP: use MEMBER', 400);
+  let [view, edit] = ACCESS[e.name] || [];
+  if (e.name === 'TRANSACTION_CHANNEL' || e.name === 'TRANSACTION_TYPE') {
+    [view, edit] = r.loan_account_id ? ACCESS.LOAN_ACCOUNT : ACCESS.SAVINGS_ACCOUNT;
+  }
+  const code = mode === 'edit' ? edit : view;
+  if (code && !PERMS.can(user, code)) throw err(`PERMISSION_REQUIRED: ${code}`, 403);
+  if (Array.isArray(user.branches)) {
+    const b = await branchOf(c, e, r);
+    if (b && !user.branches.includes(b)) throw err('OUTSIDE_YOUR_BRANCH_ACCESS', 403);
+  }
+  if (mode === 'edit' && (e.name === 'MEMBER' || e.name === 'GROUP')) {
+    if (r.anonymized_at) throw err('THE_MEMBER_IS_ANONYMIZED', 409);
+    if (r.status === 'BLACKLISTED' && !PERMS.can(user, 'EDIT_BLACKLISTED_CLIENT_CFV')) throw err('PERMISSION_REQUIRED: EDIT_BLACKLISTED_CLIENT_CFV', 403);
+  }
   return r;
 }
 
@@ -537,7 +649,7 @@ async function loadRecord(c, e, id) {
 async function setValues(c, entity, id, patch, { user = null, createdBy } = {}) {
   const e = entityOf(entity);
   const r = await loadRecord(c, e, id);
-  const values = await prepare(c, e.name, { item: e.item ? r[e.item] : null, patch, previous: r.custom_fields || {}, user, recordId: r[e.key] });
+  const values = await prepare(c, e.name, { item: itemOf(e, r), patch, previous: r.custom_fields || {}, user, recordId: r[e.key] });
   await c.query(`UPDATE ${e.table} SET custom_fields = $2 WHERE ${e.key} = $1`, [r[e.key], JSON.stringify(values)]);
   await audit(c, createdBy, 'CUSTOM_FIELDS_CHANGED', e.name.toLowerCase(), r[e.key], r.custom_fields, values);
   return getValues(c, e.name, r[e.key], { user, record: { ...r, custom_fields: values } });
@@ -552,7 +664,7 @@ async function getValues(c, entity, id, { user = null, record = null } = {}) {
     if (!x) throw err(`${e.name}_NOT_FOUND: ${id}`, 404);
     return x;
   })();
-  const item = e.item ? r[e.item] : null;
+  const item = itemOf(e, r);
   const defs = (await definitions(c, { entity: e.name })).filter((d) => mayView(d, user));
   const values = visible(defs, r.custom_fields || {}, e);
   return {
@@ -594,6 +706,109 @@ function scores(defs, values) {
   return out;
 }
 
+// --------------------------------------------------------------------------
+// Values in the reference platform's API shape (/clients, /groups, /deposits, /creditarrangements)
+// --------------------------------------------------------------------------
+
+/** A stored value as the reference platform writes it: a string, a checkbox as TRUE or FALSE. */
+function apiValue(d, v) {
+  if (v === undefined || v === null) return v;
+  if (d && d.type === 'CHECKBOX') return v ? 'TRUE' : 'FALSE';
+  return String(v);
+}
+
+/**
+ * getValues output as the reference platform's `_set` properties: every
+ * value a string, and each entry of a grouped set with its `_index`.
+ */
+function toApi(cf) {
+  const out = {};
+  const byId = new Map((cf.definitions || []).map((d) => [d.id, d]));
+  for (const [sid, content] of Object.entries(cf.values || {})) {
+    const conv = (g) => Object.fromEntries(Object.entries(g).map(([k, v]) => [k, apiValue(byId.get(k), v)]));
+    if (Array.isArray(content)) out[sid] = content.map((g, i) => ({ _index: String(i), ...conv(g) }));
+    else if (content && typeof content === 'object') out[sid] = conv(content);
+    else out[sid] = apiValue(byId.get(sid), content);
+  }
+  return out;
+}
+
+/** Custom field properties (`_set`) only with detailsLevel=FULL, as in the reference platform. */
+function detailed(req, objOrList) {
+  if (String(req.query?.detailsLevel || '').toUpperCase() === 'FULL') return objOrList;
+  const strip = (o) => (o && typeof o === 'object' ? Object.fromEntries(Object.entries(o).filter(([k]) => !k.startsWith('_'))) : o);
+  return Array.isArray(objOrList) ? objOrList.map(strip) : strip(objOrList);
+}
+
+/**
+ * Custom field properties from a reference-shaped body, as a patch for
+ * prepare(). A value may not be null or an empty string (the reference
+ * platform removes a value with a JSON Patch REMOVE). A grouped entry's
+ * `_index` orders the entries and is not stored.
+ */
+function fromApi(body, { allowNull = false } = {}) {
+  const out = {};
+  const check = (v, where) => {
+    if (!allowNull && (v === null || v === '')) throw err(`CUSTOM_FIELD_VALUE_CANNOT_BE_EMPTY: ${where}; remove it with a JSON Patch REMOVE`, 400);
+    return v;
+  };
+  for (const [sid, content] of Object.entries(body || {})) {
+    if (!sid.startsWith('_')) continue;
+    if (Array.isArray(content)) {
+      const entries = content.map((g, i) => ({ g, i, at: g && g._index !== undefined ? Number(g._index) : i }));
+      entries.sort((x, y) => x.at - y.at || x.i - y.i);
+      out[sid] = entries.map(({ g }, k) => {
+        if (!g || typeof g !== 'object' || Array.isArray(g)) throw err(`GROUPED_SET_ENTRY_IS_AN_OBJECT: ${sid}[${k}]`, 400);
+        return Object.fromEntries(Object.entries(g).filter(([f]) => f !== '_index').map(([f, v]) => [f, check(v, `${sid}[${k}].${f}`)]));
+      });
+    } else if (content && typeof content === 'object') {
+      out[sid] = Object.fromEntries(Object.entries(content).map(([f, v]) => [f, check(v, `${sid}.${f}`)]));
+    } else out[sid] = check(content, sid);
+  }
+  return out;
+}
+
+/**
+ * The patch for prepare() from a reference object before and after a JSON
+ * Patch: the sets that changed, with a field the patch removed set to null
+ * (prepare keeps fields a set leaves out, so the ones the user cannot see
+ * survive) and a removed set as null.
+ */
+function patchFromApi(before, after) {
+  const out = {};
+  const keys = new Set([...Object.keys(before || {}), ...Object.keys(after || {})].filter((k) => k.startsWith('_')));
+  for (const sid of keys) {
+    const a = before ? before[sid] : undefined; const b = after ? after[sid] : undefined;
+    if (JSON.stringify(a ?? null) === JSON.stringify(b ?? null)) continue;
+    if (b === undefined || b === null) { out[sid] = null; continue; }
+    const cleared = (prev, next) => {
+      const g = { ...next };
+      delete g._index;
+      for (const f of Object.keys(prev || {})) if (f !== '_index' && !(f in g)) g[f] = null;
+      return g;
+    };
+    if (Array.isArray(b)) {
+      out[sid] = b.map((g, i) => cleared(Array.isArray(a) ? a[i] : null, g));
+    } else out[sid] = cleared(a && typeof a === 'object' && !Array.isArray(a) ? a : {}, b);
+  }
+  return out;
+}
+
+const SEARCH_TYPES = { NUMBER: 'number', DATE: 'date', DATE_TIME: 'timestamp', CHECKBOX: 'boolean' };
+
+/**
+ * The entity's fields for a :search body (../lib/searchCriteria), keyed
+ * `_set.field`: their type, and whether they sit in a grouped set.
+ */
+async function searchFields(c, entity) {
+  const out = {};
+  for (const d of await definitions(c, { entity: entityOf(entity).name })) {
+    if (!d.set_id) continue;
+    out[`${d.set_id}.${d.id}`] = { type: SEARCH_TYPES[d.field_type] || 'text', grouped: d.set_type === 'GROUPED' };
+  }
+  return out;
+}
+
 /** Custom field values as display text, keyed `setId.fieldId`, for document placeholders. */
 async function displayValues(c, entity, values) {
   const e = entityOf(entity);
@@ -622,9 +837,14 @@ async function displayValues(c, entity, values) {
 async function applyToTransaction(c, tx, patch, { user = null } = {}) {
   const row = tx && (tx.id ? tx : tx.transaction || tx.loanTransaction || null);
   if (!row || !row.id) return tx;
-  const { rows: [t] } = await c.query('SELECT id, channel_id, custom_fields FROM transactions WHERE id = $1', [row.id]);
-  if (!t || !t.channel_id) return tx;
-  const values = await prepare(c, 'TRANSACTION_CHANNEL', { item: t.channel_id, patch: patch || {}, previous: t.custom_fields || {}, user, recordId: t.id, creating: true });
+  const { rows: [t] } = await c.query('SELECT id, kind, channel_id, custom_fields FROM transactions WHERE id = $1', [row.id]);
+  if (!t) return tx;
+  // A transfer takes the fields of its type (TRANSFER); any other transaction those of its channel.
+  const transfer = TRANSFER_KINDS.includes(t.kind);
+  if (!transfer && !t.channel_id) return tx;
+  const values = transfer
+    ? await prepare(c, 'TRANSACTION_TYPE', { item: 'TRANSFER', patch: patch || {}, previous: t.custom_fields || {}, user, recordId: t.id, creating: true })
+    : await prepare(c, 'TRANSACTION_CHANNEL', { item: t.channel_id, patch: patch || {}, previous: t.custom_fields || {}, user, recordId: t.id, creating: true });
   if (Object.keys(values).length || Object.keys(t.custom_fields || {}).length) {
     await c.query('UPDATE transactions SET custom_fields = $2 WHERE id = $1', [t.id, JSON.stringify(values)]);
     if (row === tx) tx.custom_fields = values; else row.custom_fields = values;
@@ -644,7 +864,7 @@ async function carry(c, entity, item, values) {
 
 module.exports = {
   applyToTransaction, carry,
-  ENTITIES, TYPES, sets, createSet, updateSet, deleteSet, rearrangeSets,
+  ENTITIES, TYPES, TYPE_ALIASES, TRANSFER_KINDS, itemOf, sets, createSet, updateSet, deleteSet, rearrangeSets,
   definitions, createDefinition, updateDefinition, deleteDefinition, rearrangeDefinitions, findDefinition,
-  prepare, setValues, getValues, displayValues, usageFor, maskMatches, entityOf,
+  prepare, setValues, getValues, assertAccess, displayValues, searchFields, toApi, detailed, fromApi, patchFromApi, usageFor, maskMatches, entityOf,
 };

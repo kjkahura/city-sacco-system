@@ -15,16 +15,35 @@ const { err } = require('./errors');
  * LESS_THAN, BETWEEN, ON, AFTER, AFTER_INCLUSIVE, BEFORE, BEFORE_INCLUSIVE,
  * STARTS_WITH, STARTS_WITH_CASE_SENSITIVE, IN, TODAY, THIS_WEEK, THIS_MONTH,
  * THIS_YEAR, LAST_DAYS, EMPTY, NOT_EMPTY.
+ *
+ * `custom` (from customFields.searchFields) gives each custom field's type,
+ * so numbers, dates and checkboxes compare as such, and says which fields sit
+ * in a grouped set: those match when any entry matches (EMPTY and
+ * DIFFERENT_THAN: when no entry has the value). With `custom`, a field that
+ * is not a definition of the entity is refused.
  */
 
 
-function build(body = {}, fields, { params = [], customColumn = 'm.custom_fields', today = null } = {}) {
+const CAST = { number: '::numeric', date: '::date', timestamp: '::timestamptz', boolean: '::boolean' };
+
+function build(body = {}, fields, { params = [], customColumn = 'm.custom_fields', today = null, custom = null } = {}) {
   const where = [];
   const p = (v) => { params.push(v); return `$${params.length}`; };
   const expr = (field) => {
     if (fields[field]) return fields[field];
     const m = String(field || '').match(/^(_[A-Za-z0-9_]{1,64})\.([A-Za-z0-9_]{1,64})$/);
-    if (m) return { sql: `(${customColumn} -> ${p(m[1])} ->> ${p(m[2])})`, type: 'text' };
+    if (m) {
+      const def = custom ? custom[`${m[1]}.${m[2]}`] : { type: 'text' };
+      if (!def) throw err(`UNKNOWN_CUSTOM_FIELD: ${field}`);
+      const type = def.type || 'text';
+      if (def.grouped) {
+        // The entry's value; the criterion is wrapped in EXISTS over the set's entries.
+        const raw = `(g.value ->> ${p(m[2])})`;
+        return { sql: CAST[type] ? `(${raw})${CAST[type]}` : raw, type, grouped: `${customColumn} -> ${p(m[1])}` };
+      }
+      const raw = `(${customColumn} -> ${p(m[1])} ->> ${p(m[2])})`;
+      return { sql: CAST[type] ? `(${raw})${CAST[type]}` : raw, type };
+    }
     throw err(`UNKNOWN_SEARCH_FIELD: ${field}; one of ${Object.keys(fields).join(', ')}, or _set.field`);
   };
   const criteria = body.filterCriteria === undefined ? [] : body.filterCriteria;
@@ -34,7 +53,8 @@ function build(body = {}, fields, { params = [], customColumn = 'm.custom_fields
   for (const cr of criteria) {
     const f = expr(cr.field);
     const col = f.sql;
-    const cast = f.type === 'number' ? '::numeric' : f.type === 'date' ? '::date' : f.type === 'timestamp' ? '::timestamptz' : '';
+    const cast = CAST[f.type] || '';
+    const before = where.length;
     const asDate = f.type === 'timestamp' ? `(${col})::date` : col;
     const op = String(cr.operator || 'EQUALS').toUpperCase();
     const v = cr.value;
@@ -55,7 +75,7 @@ function build(body = {}, fields, { params = [], customColumn = 'm.custom_fields
       case 'IN': {
         const list = Array.isArray(cr.values) ? cr.values : Array.isArray(v) ? v : [v];
         where.push(f.type === 'text' ? `lower(${col}) = ANY(${p(list.map((x) => String(x).toLowerCase()))}::text[])`
-          : `${col} = ANY(${p(list)}${f.type === 'number' ? '::numeric[]' : f.type === 'date' ? '::date[]' : '::text[]'})`);
+          : `${col} = ANY(${p(list)}${f.type === 'number' ? '::numeric[]' : f.type === 'date' ? '::date[]' : f.type === 'boolean' ? '::boolean[]' : f.type === 'timestamp' ? '::timestamptz[]' : '::text[]'})`);
         break;
       }
       case 'TODAY': where.push(`${asDate} = ${day()}`); break;
@@ -67,10 +87,19 @@ function build(body = {}, fields, { params = [], customColumn = 'm.custom_fields
       case 'NOT_EMPTY': where.push(`(${col} IS NOT NULL${f.type === 'text' ? ` AND ${col} <> ''` : ''})`); break;
       default: throw err(`UNKNOWN_SEARCH_OPERATOR: ${cr.operator}`);
     }
+    if (f.grouped && where.length > before) {
+      const entries = `jsonb_array_elements(CASE WHEN jsonb_typeof(${f.grouped}) = 'array' THEN ${f.grouped} ELSE '[]'::jsonb END) g`;
+      const crit = where.pop();
+      if (op === 'EMPTY') where.push(`NOT EXISTS (SELECT 1 FROM ${entries} WHERE ${col} IS NOT NULL${f.type === 'text' ? ` AND ${col} <> ''` : ''})`);
+      // The criterion's own parameters are reused: an unused parameter is an error in Postgres.
+      else if (op === 'DIFFERENT_THAN') where.push(`NOT EXISTS (SELECT 1 FROM ${entries} WHERE ${crit.replace(' IS DISTINCT FROM ', ' = ')})`);
+      else where.push(`EXISTS (SELECT 1 FROM ${entries} WHERE ${crit})`);
+    }
   }
   let order = null;
   if (body.sortingCriteria && body.sortingCriteria.field) {
     const f = expr(body.sortingCriteria.field);
+    if (f.grouped) throw err(`CANNOT_SORT_BY_A_FIELD_OF_A_GROUPED_SET: ${body.sortingCriteria.field}`);
     order = `${f.sql} ${String(body.sortingCriteria.order || 'ASC').toUpperCase() === 'DESC' ? 'DESC' : 'ASC'} NULLS LAST`;
   }
   return { where: where.length ? where.join(' AND ') : 'true', order, params };

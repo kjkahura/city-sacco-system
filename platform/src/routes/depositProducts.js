@@ -339,6 +339,8 @@ async function resolveExtras(c, cols, body, { user, before = null } = {}) {
   }
   if (!before || (body && body.customFields !== undefined)) {
     cols.custom_fields = JSON.stringify(await CF.prepare(c, 'SAVINGS_PRODUCT', {
+      // Deposit product fields are set per product type.
+      item: cols.product_type || (before && before.product_type) || null,
       patch: (body && body.customFields) || {}, previous: before ? before.custom_fields : {}, user, recordId: before ? before.id : null, creating: !before,
     }));
   }

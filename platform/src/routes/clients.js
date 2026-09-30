@@ -4,6 +4,7 @@ const express = require('express');
 const { orgToday } = require('../lib/orgDate');
 const { pageParams } = require('../lib/page');
 const SEARCH = require('../lib/searchCriteria');
+const CF = require('../domain/customFields');
 const CL = require('../domain/clients');
 const SETUP = require('../domain/clientSetup');
 const CAR = require('./creditArrangements');
@@ -77,13 +78,13 @@ async function list(c, req, res, holderType, body = {}) {
       criteria.sortingCriteria = { field, order };
     }
   }
-  const s = SEARCH.build(criteria, fields, { params: [holderType], today: await orgToday(c) });
+  const s = SEARCH.build(criteria, fields, { params: [holderType], today: await orgToday(c), custom: await CF.searchFields(c, holderType === 'GROUP' ? 'GROUP' : 'MEMBER') });
   const { rows } = await c.query(
     `SELECT m.*, count(*) OVER () AS total_count FROM members m WHERE m.holder_type = $1 AND (${s.where})
      ORDER BY ${s.order ? `${s.order}, ` : ''}m.last_name, m.first_name, m.id LIMIT ${limit} OFFSET ${offset}`, s.params);
   const total = rows.length ? Number(rows[0].total_count) : 0;
   const shaped = holderType === 'GROUP' ? await CL.groupsOut(c, rows, { user: req.auth }) : await CL.clientsOut(c, rows, { user: req.auth });
-  return paged(res, req, shaped, total);
+  return paged(res, req, CF.detailed(req, shaped), total);
 }
 
 const one = async (c, req, ref, holderType) => {
@@ -105,10 +106,12 @@ async function patch(c, req, holderType) {
       await CL.changeState(c, current.encodedKey, CL.actionFor(current.state, next.state), { reason: next.stateReason ?? null, user });
       keys.splice(keys.indexOf('state'), 1);
     }
-    changes = Object.fromEntries(keys.map((k) => [k, next[k]]));
-    // A custom field set replaced by a patch is sent whole.
+    changes = Object.fromEntries(keys.filter((k) => !k.startsWith('_')).map((k) => [k, next[k]]));
+    // Custom field sets that changed, with the fields the patch removed cleared.
+    Object.assign(changes, CF.patchFromApi(current, next));
   } else changes = req.body || {};
-  const b = holderType === 'GROUP' ? await CL.groupIn(c, changes) : await CL.clientIn(c, changes);
+  const fromPatch = Array.isArray(req.body);
+  const b = holderType === 'GROUP' ? await CL.groupIn(c, changes, { fromPatch }) : await CL.clientIn(c, changes, { fromPatch });
   delete b.status;
   if (Object.keys(b).length) await CL.update(c, current.encodedKey, b, { user, holderType });
   return one(c, req, current.encodedKey, holderType);
@@ -138,11 +141,11 @@ function holderRouter(holderType) {
     const o = await one(c, req, out.member.id, holderType);
     if (out.duplicateWarnings.length) o.duplicateWarnings = out.duplicateWarnings;
     if (out.groupWarnings.length) o.groupWarnings = out.groupWarnings;
-    return o;
+    return CF.detailed(req, o);
   }, { write: true, status: 201 }));
-  r.get('/:id', ...run((c, req) => one(c, req, req.params.id, holderType)));
-  r.put('/:id', ...run((c, req) => put(c, req, holderType), { write: true }));
-  r.patch('/:id', ...run((c, req) => patch(c, req, holderType), { write: true }));
+  r.get('/:id', ...run(async (c, req) => CF.detailed(req, await one(c, req, req.params.id, holderType))));
+  r.put('/:id', ...run(async (c, req) => CF.detailed(req, await put(c, req, holderType)), { write: true }));
+  r.patch('/:id', ...run(async (c, req) => CF.detailed(req, await patch(c, req, holderType)), { write: true }));
   r.delete('/:id', ...run(async (c, req, res) => {
     await CL.remove(c, req.params.id, { user: req.auth, holderType });
     res.status(204).end();

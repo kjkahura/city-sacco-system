@@ -8,6 +8,7 @@ const SEARCH = require('../lib/searchCriteria');
 const S = require('../domain/savings');
 const DR = require('../domain/depositRules');
 const CF = require('../domain/customFields');
+const CLD = require('../domain/clients');
 const CTL = require('../domain/controls');
 const LT = require('../domain/loanTransfers');
 const { err, round2 } = require('../domain/accounting');
@@ -123,7 +124,7 @@ async function shape(c, ref, { user = null, tenant = null } = {}) {
       interestCalculationBalance: a.od_calc_balance,
     },
     internalControls: { maxDepositBalance: b.maxBalance, maxWithdrawalAmount: b.maxWithdrawalAmount, recommendedDepositAmount: b.recommendedDepositAmount },
-    ...cf.values,
+    ...CF.toApi(cf),
   };
 }
 
@@ -145,9 +146,9 @@ function txOut(t, original = null) {
   };
 }
 
-// The reference platform's custom field values on a body: `_setId` objects at the top level.
-const customFieldsOf = (b) => (b.customFields && typeof b.customFields === 'object' ? b.customFields
-  : Object.fromEntries(Object.entries(b || {}).filter(([k]) => k.startsWith('_'))));
+// The reference platform's custom field values on a body: `_setId` objects at the top level,
+// with no empty values (CF.fromApi); or the platform's own customFields object.
+const customFieldsOf = (b) => (b.customFields && typeof b.customFields === 'object' ? b.customFields : CF.fromApi(b));
 const channelOf = (b) => b.transactionDetails?.transactionChannelId || b.transactionDetails?.transactionChannelKey || b.channelId || 'cash';
 
 async function holder(c, ref) {
@@ -170,14 +171,14 @@ async function list(c, req, res, body = {}) {
     if (q.accountHolderKey) criteria.filterCriteria.push({ field: 'accountHolderKey', operator: 'EQUALS', value: q.accountHolderKey });
     if (q.sortBy) { const [field, order] = String(q.sortBy).split(':'); criteria.sortingCriteria = { field, order }; }
   }
-  const s = SEARCH.build(criteria, FIELDS, { customColumn: 'a.custom_fields', today: await orgToday(c) });
+  const s = SEARCH.build(criteria, FIELDS, { customColumn: 'a.custom_fields', today: await orgToday(c), custom: await CF.searchFields(c, 'SAVINGS_ACCOUNT') });
   const { rows } = await c.query(
     `SELECT a.id, count(*) OVER () AS total FROM savings_accounts a JOIN members m ON m.id = a.member_id JOIN savings_products p ON p.id = a.product_id
       WHERE ${s.where} ORDER BY ${s.order ? `${s.order}, ` : ''}a.account_no LIMIT ${limit} OFFSET ${offset}`, s.params);
   pagingHeaders(req, res, { offset, limit, total: rows.length ? rows[0].total : 0 });
   const out = [];
   for (const r of rows) out.push(await shape(c, r.id, { user: req.auth, tenant: req.tenant }));
-  return out;
+  return CF.detailed(req, out);
 }
 
 // The account is read under its row lock (as GET /api/savings/:id/balance is), so reads run in a write transaction.
@@ -206,10 +207,10 @@ router.post('/', ...run(async (c, req) => {
   });
   if (b.notes) await S.updateAccount(c, a.id, { notes: b.notes }, { createdBy: req.auth.email, user: req.auth });
   if (b.withholdingTaxSourceKey) await S.changeWithholdingTax(c, a.id, { sourceId: b.withholdingTaxSourceKey, createdBy: req.auth.email });
-  return shape(c, a.id, { user: req.auth, tenant: req.tenant });
+  return CF.detailed(req, await shape(c, a.id, { user: req.auth, tenant: req.tenant }));
 }, { write: true, status: 201 }));
 
-router.get('/:id', ...run((c, req) => shape(c, req.params.id, { user: req.auth, tenant: req.tenant }), { write: true }));
+router.get('/:id', ...run(async (c, req) => CF.detailed(req, await shape(c, req.params.id, { user: req.auth, tenant: req.tenant })), { write: true }));
 
 const get = (o, path) => path.split('.').reduce((x, k) => (x === null || x === undefined ? undefined : x[k]), o);
 const same = (x, y) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
@@ -220,7 +221,7 @@ const same = (x, y) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
  * fields at any time; the rates before activation; the overdraft as
  * Adjusting Overdraft Terms. A field that cannot change is refused.
  */
-async function applyChanges(c, req, current, next) {
+async function applyChanges(c, req, current, next, { fromPatch = false } = {}) {
   const fixed = ['encodedKey', 'id', 'accountHolderKey', 'accountHolderType', 'productTypeKey', 'accountType', 'currencyCode', 'accountState'];
   const moved = fixed.filter((k) => next[k] !== undefined && !same(next[k], current[k]));
   if (moved.length) throw err(`FIELDS_NOT_EDITABLE: ${moved.join(', ')}${moved.includes('accountState') ? '; use :changeState' : ''}`, 400);
@@ -237,7 +238,12 @@ async function applyChanges(c, req, current, next) {
   pick('internalControls.recommendedDepositAmount', 'recommendedDepositAmount');
   pick('interestSettings.interestRateSettings.interestRate', 'interestRate');
   pick('interestSettings.interestRateSettings.interestSpread', 'interestSpread');
-  const cf = Object.fromEntries(Object.keys(next).filter((k) => k.startsWith('_') && !same(next[k], current[k])).map((k) => [k, next[k] || {}]));
+  // Custom fields: a replacement's sets may not hold empty values; a patch's removed fields are cleared.
+  if (!fromPatch) CF.fromApi(next);
+  const customOf = (o, keys) => Object.fromEntries(Object.entries(o).filter(([k]) => k.startsWith('_') && (!keys || keys.includes(k))));
+  // A replacement changes the sets it names; a patch every set it touched.
+  const named = fromPatch ? null : Object.keys(next).filter((k) => k.startsWith('_'));
+  const cf = CF.patchFromApi(customOf(current, named), customOf(next, named));
   if (Object.keys(cf).length) patch.customFields = cf;
   if (Object.keys(patch).length) await S.updateAccount(c, id, patch, opts);
   const od = {};
@@ -252,18 +258,20 @@ async function applyChanges(c, req, current, next) {
 
 router.put('/:id', ...run(async (c, req) => {
   const current = await shape(c, req.params.id, { user: req.auth, tenant: req.tenant });
-  return applyChanges(c, req, current, req.body || {});
+  return CF.detailed(req, await applyChanges(c, req, current, req.body || {}));
 }, { write: true }));
 
 /** The reference platform's PATCH: JSON Patch operations (add, replace, remove) on paths into the account object. */
 function jsonPatch(obj, ops) {
   if (!Array.isArray(ops)) throw err('A_JSON_PATCH_IS_A_LIST_OF_OPERATIONS', 400);
-  const out = JSON.parse(JSON.stringify(obj));
+  let out = JSON.parse(JSON.stringify(obj));
   for (const o of ops) {
     const op = String(o?.op || '').toUpperCase();
     if (!['ADD', 'REPLACE', 'REMOVE'].includes(op)) throw err(`UNSUPPORTED_PATCH_OPERATION: ${o?.op}; ADD, REPLACE or REMOVE`, 400);
     const parts = String(o.path || '').replace(/^\//, '').split('/').filter(Boolean);
     if (!parts.length) throw err(`INVALID_PATCH_PATH: ${o.path}`, 400);
+    // Custom field paths (/_set/..., grouped entries included) as /clients takes them.
+    if (parts[0].startsWith('_')) { out = CLD.applyJsonPatch(out, [o]); continue; }
     let at = out;
     for (const p of parts.slice(0, -1)) { at[p] = at[p] && typeof at[p] === 'object' ? at[p] : {}; at = at[p]; }
     at[parts[parts.length - 1]] = op === 'REMOVE' ? null : o.value;
@@ -273,7 +281,7 @@ function jsonPatch(obj, ops) {
 
 router.patch('/:id', ...run(async (c, req) => {
   const current = await shape(c, req.params.id, { user: req.auth, tenant: req.tenant });
-  return applyChanges(c, req, current, jsonPatch(current, req.body));
+  return CF.detailed(req, await applyChanges(c, req, current, jsonPatch(current, req.body), { fromPatch: true }));
 }, { write: true }));
 
 router.delete('/:id', ...run(async (c, req, res) => {
@@ -287,7 +295,7 @@ router.delete('/:id', ...run(async (c, req, res) => {
 
 const action = (name, fn) => router.post(`/:id\\:${name}`, ...run(async (c, req) => {
   await fn(c, req);
-  return shape(c, req.params.id, { user: req.auth, tenant: req.tenant });
+  return CF.detailed(req, await shape(c, req.params.id, { user: req.auth, tenant: req.tenant }));
 }, { write: true }));
 
 action('changeState', (c, req) => S.changeState(c, req.params.id, req.body?.action, { notes: req.body?.notes || null, user: req.auth, createdBy: req.auth.email }));
@@ -349,7 +357,8 @@ router.get('/:id/transactions', ...run(async (c, req, res) => {
 const posting = (kind, fn) => router.post(`/:id/${kind}`, ...run(async (c, req) => {
   const t = await fn(c, req, req.body || {});
   const cf = customFieldsOf(req.body || {});
-  if (t && t.id && Object.keys(cf).length) await CF.applyToTransaction(c, t, cf, { user: req.auth });
+  // Always, so a channel's required fields are asked for even when none are sent.
+  if (t && t.id) await CF.applyToTransaction(c, t, cf, { user: req.auth });
   return txShaped(c, t);
 }, { write: true, status: 201 }));
 

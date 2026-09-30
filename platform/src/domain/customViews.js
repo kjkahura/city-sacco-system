@@ -343,7 +343,7 @@ function assertEntityAllowed(e, user) {
 // --------------------------------------------------------------------------
 
 const IDENT = /^[A-Za-z0-9_]+$/;
-const CF_TYPES = { FREE_TEXT: 'TEXT', SELECTION: 'SELECTION', NUMBER: 'NUMBER', CHECKBOX: 'BOOLEAN', DATE: 'DATE', DATE_TIME: 'TIMESTAMP', MEMBER_LINK: 'TEXT', USER_LINK: 'TEXT' };
+const CF_TYPES = { FREE_TEXT: 'TEXT', SELECTION: 'SELECTION', NUMBER: 'NUMBER', CHECKBOX: 'BOOLEAN', DATE: 'DATE', DATE_TIME: 'TIMESTAMP', CLIENT_LINK: 'TEXT', GROUP_LINK: 'TEXT', MEMBER_LINK: 'TEXT', USER_LINK: 'TEXT' };
 
 /** A custom field's text as its type. */
 function typed(type, raw) {

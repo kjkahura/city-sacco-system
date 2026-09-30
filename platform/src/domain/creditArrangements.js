@@ -150,7 +150,7 @@ async function out(c, ca, { user = null } = {}) {
     creationDate: iso(ca.created_at), lastModifiedDate: iso(ca.updated_at), notes: ca.notes,
     // Both bases, so a console can show them side by side (the reference platform shows available and consumed on each).
     exposure: { approvedAmount: e.approved, outstandingAmount: e.outstanding },
-    ...cf.values,
+    ...CF.toApi(cf),
   };
 }
 
@@ -209,7 +209,7 @@ const SEARCH_FIELDS = {
  * sortingCriteria on the fields above, and custom fields as _set.field.
  */
 async function search(c, body = {}, { offset = 0, limit = 50, user = null } = {}) {
-  const q = SEARCH.build(body, SEARCH_FIELDS, { customColumn: 'ca.custom_fields', today: await orgToday(c) });
+  const q = SEARCH.build(body, SEARCH_FIELDS, { customColumn: 'ca.custom_fields', today: await orgToday(c), custom: await CF.searchFields(c, 'CREDIT_ARRANGEMENT') });
   const { rows } = await c.query(
     `SELECT ca.*, m.member_no AS holder_no, m.holder_type, m.first_name, m.last_name, count(*) OVER () AS total_count
        FROM credit_arrangements ca JOIN members m ON m.id = ca.holder_id
@@ -318,7 +318,8 @@ async function create(c, b = {}, { user = null, actor } = {}) {
 // Custom fields arrive as the reference platform's `_set` keys on the object, or as customFields.
 function customFieldsOf(b) {
   if (b.customFields && typeof b.customFields === 'object') return b.customFields;
-  return Object.fromEntries(Object.entries(b).filter(([k]) => k.startsWith('_')));
+  // Reference-shaped values: strings, no empty values, grouped entries by _index.
+  return CF.fromApi(b);
 }
 
 const EDITABLE = ['amount', 'startDate', 'expireDate', 'exposureLimitType', 'notes', 'customFields'];

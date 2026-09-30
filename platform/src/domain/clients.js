@@ -801,7 +801,7 @@ async function clientsOut(c, rows, { user = null } = {}) {
       // The platform's own member fields.
       nationalId: m.national_id, kraPin: m.kra_pin, employer: m.employer, joinedOn: m.joined_on,
       stateReason: m.state_reason, exitReason: m.exit_reason, anonymized: Boolean(m.anonymized_at),
-      ...cf.values,
+      ...CF.toApi(cf),
     });
   }
   return out;
@@ -823,7 +823,7 @@ async function groupsOut(c, rows, { user = null } = {}) {
       emailAddress: g.email, mobilePhone: g.phone, homePhone: g.phone2, preferredLanguage: g.preferred_language, notes: g.notes,
       addresses: addressOf(g), loanCycle: cycles.own.get(g.id) ?? 0,
       creationDate: iso(g.created_at), lastModifiedDate: iso(g.updated_at),
-      ...cf.values,
+      ...CF.toApi(cf),
     });
   }
   return out;
@@ -842,10 +842,11 @@ async function officerEmail(c, v) {
   return u.email;
 }
 
-function customOf(b) {
-  const out = {};
-  for (const [k, v] of Object.entries(b || {})) if (k.startsWith('_')) out[k] = v;
-  return Object.keys(out).length ? out : undefined;
+function customOf(b, { fromPatch = false } = {}) {
+  const has = Object.keys(b || {}).some((k) => k.startsWith('_'));
+  if (!has) return undefined;
+  // A body's values may not be empty; a JSON Patch's cleared fields come through patchFromApi as null.
+  return CF.fromApi(b, { allowNull: fromPatch });
 }
 
 function addressIn(b, out) {
@@ -856,7 +857,7 @@ function addressIn(b, out) {
 }
 
 /** A reference platform Client body as the platform's fields (only the keys given). */
-async function clientIn(c, b = {}) {
+async function clientIn(c, b = {}, { fromPatch = false } = {}) {
   const map = { id: 'memberNo', firstName: 'firstName', middleName: 'middleName', lastName: 'lastName', birthDate: 'dateOfBirth',
     gender: 'gender', preferredLanguage: 'preferredLanguage', emailAddress: 'email', mobilePhone: 'phone', mobilePhone2: 'phone2',
     notes: 'notes', clientRoleKey: 'clientTypeId', assignedBranchKey: 'branchId', assignedCentreKey: 'centreId',
@@ -870,12 +871,12 @@ async function clientIn(c, b = {}) {
     out.identificationDocuments = b.idDocuments.map((d) => ({ templateId: d.identificationDocumentTemplateKey || null, documentId: d.documentId,
       idType: d.documentType, issuingAuthority: d.issuingAuthority, validUntil: d.validUntil }));
   }
-  const cf = customOf(b);
+  const cf = customOf(b, { fromPatch });
   if (cf) out.customFields = cf;
   return out;
 }
 
-async function groupIn(c, b = {}) {
+async function groupIn(c, b = {}, { fromPatch = false } = {}) {
   const map = { id: 'memberNo', groupName: 'groupName', groupRoleKey: 'clientTypeId', preferredLanguage: 'preferredLanguage',
     emailAddress: 'email', mobilePhone: 'phone', homePhone: 'phone2', notes: 'notes', assignedBranchKey: 'branchId', assignedCentreKey: 'centreId' };
   const out = {};
@@ -885,29 +886,68 @@ async function groupIn(c, b = {}) {
   if (Array.isArray(b.groupMembers)) {
     out.groupMembers = b.groupMembers.map((x) => ({ memberId: x.clientKey ?? x.memberId, roles: (x.roles || []).map((r) => r.groupRoleNameKey ?? r) }));
   }
-  const cf = customOf(b);
+  const cf = customOf(b, { fromPatch });
   if (cf) out.customFields = cf;
   return out;
 }
 
 /**
- * Apply a JSON Patch (the reference platform's: ADD, REPLACE, REMOVE on top-level paths, or
- * /_set/field on custom fields) to a reference platform object. Returns the patched copy.
+ * Apply a JSON Patch (RFC 6902 as the reference platform takes it: ADD, REPLACE, REMOVE)
+ * to a reference platform object. Returns the patched copy. Paths are a top-level
+ * field, or a custom field set: /_set, /_set/field, and on a grouped set
+ * /_set/0 (an entry), /_set/0/field and /_set/- (a new entry, with ADD). A
+ * custom field value may not be null or an empty string; REMOVE clears it.
  */
 function applyJsonPatch(obj, ops) {
   if (!Array.isArray(ops)) throw err('A_JSON_PATCH_IS_A_LIST_OF_OPERATIONS', 400);
   const out = JSON.parse(JSON.stringify(obj));
+  const noEmpty = (v, path) => {
+    const bad = (x) => x === null || x === '';
+    const deep = (x) => bad(x) || (Array.isArray(x) ? x.some(deep) : x && typeof x === 'object' ? Object.values(x).some(deep) : false);
+    if (deep(v)) throw err(`CUSTOM_FIELD_VALUE_CANNOT_BE_EMPTY: ${path}; remove it with REMOVE`, 400);
+  };
   for (const o of ops) {
     const op = String(o?.op || '').toUpperCase();
     if (!['ADD', 'REPLACE', 'REMOVE'].includes(op)) throw err(`UNSUPPORTED_PATCH_OPERATION: ${o?.op}; ADD, REPLACE or REMOVE`, 400);
-    const parts = String(o.path || '').replace(/^\//, '').split('/').filter(Boolean);
-    if (!parts.length || parts.length > 2) throw err(`INVALID_PATCH_PATH: ${o.path}`, 400);
+    const parts = String(o.path || '').replace(/^\//, '').split('/').filter(Boolean).map((x) => x.replace(/~1/g, '/').replace(/~0/g, '~'));
+    const bad = () => err(`INVALID_PATCH_PATH: ${o.path}`, 400);
+    if (!parts.length || parts.length > 3) throw bad();
+    if (parts.length === 1) {
+      if (parts[0].startsWith('_') && op !== 'REMOVE') noEmpty(o.value, o.path);
+      if (op === 'REMOVE') out[parts[0]] = null; else out[parts[0]] = o.value;
+      continue;
+    }
+    const [sid, second, third] = parts;
+    if (!sid.startsWith('_')) throw bad();
+    if (op !== 'REMOVE') noEmpty(o.value, o.path);
+    const set = out[sid];
+    const isIndex = /^(\d+|-)$/.test(second);
+    if (!isIndex || (Array.isArray(set) === false && set && typeof set === 'object' && parts.length === 2)) {
+      // A standard set's field.
+      if (parts.length !== 2) throw bad();
+      out[sid] = set && typeof set === 'object' && !Array.isArray(set) ? set : {};
+      if (op === 'REMOVE') delete out[sid][second]; else out[sid][second] = o.value;
+      continue;
+    }
+    // A grouped set's entry or an entry's field.
+    const list = Array.isArray(set) ? set : [];
+    out[sid] = list;
+    if (second === '-') {
+      if (op !== 'ADD' || parts.length !== 2) throw bad();
+      if (!o.value || typeof o.value !== 'object' || Array.isArray(o.value)) throw err(`GROUPED_SET_ENTRY_IS_AN_OBJECT: ${o.path}`, 400);
+      list.push(o.value);
+      continue;
+    }
+    const k = Number(second);
     if (parts.length === 2) {
-      if (!parts[0].startsWith('_')) throw err(`INVALID_PATCH_PATH: ${o.path}`, 400);
-      out[parts[0]] = out[parts[0]] && typeof out[parts[0]] === 'object' ? out[parts[0]] : {};
-      if (op === 'REMOVE') delete out[parts[0]][parts[1]]; else out[parts[0]][parts[1]] = o.value;
-    } else if (op === 'REMOVE') out[parts[0]] = null;
-    else out[parts[0]] = o.value;
+      if (op === 'ADD') { if (k > list.length) throw bad(); list.splice(k, 0, o.value); }
+      else if (k >= list.length) throw bad();
+      else if (op === 'REMOVE') list.splice(k, 1);
+      else list[k] = o.value;
+      continue;
+    }
+    if (k >= list.length) throw bad();
+    if (op === 'REMOVE') delete list[k][third]; else list[k][third] = o.value;
   }
   return out;
 }

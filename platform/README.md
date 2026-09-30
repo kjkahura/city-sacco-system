@@ -151,6 +151,9 @@ src/
                        linked accounts, the exposure checks the engine calls
     solidarityLoans.js solidarity group loans: one loan per member, opened
                        together for a group
+    customFields.js    custom field sets, definitions, values, rights, search
+    customFieldConfig.js  the reference platform's metadata shapes and
+                       configuration as code for custom fields
     dataImport/        the Excel data import: definitions.js, parse.js,
                        execute.js, workbooks.js, lifecycle.js; index.js
                        keeps the one public API
@@ -172,6 +175,7 @@ src/
     ledgerScope.js     accounting reports for a branch-limited user
     limits.js          rate limiting and per-tenant concurrency gates
     ratestore.js       Redis-backed counters, memory fallback
+    yaml.js            the YAML subset configuration as code reads and writes
     handlers.js        the route wrapper: tenant transaction, JSON reply,
                        status, paging headers
     errors.js          err(message, status), the error every layer throws
@@ -2071,21 +2075,26 @@ Organization page covers all of it.
   and loans left out (the reference platform's Accounts Updated event, kept for when
   notifications exist).
 - **Custom fields.** `/api/custom-fields`: sets (standard or grouped) and
-  definitions for members, loan accounts, deposit accounts, deposit
-  products, guarantors, collateral, branches, centres, users and
-  transactions by channel, and groups. Nine the reference platform types less group links:
-  free text with a mask and a unique flag, selection with scores
-  and dependent options, number, checkbox, date, date and time, member and
-  user links. Usage is Available, Default or Required, per loan product,
-  deposit product, channel, or client or group type where the reference platform allows it. View and edit rights
-  are per role. Values sit with the record in `custom_fields` in the reference platform's
-  API v2 shape; `GET` and `PUT /api/custom-fields/values/:entity/:id` read
-  and change them in any state, and the create paths (members, loan
-  applications, deposit accounts, branches, centres, guarantors, collateral,
-  deposit products, channel postings) take `customFields`. A reschedule or
-  top-up carries the old loan's values across. Deactivated fields keep
-  their values; only unused fields are deleted. At most 200 values per
-  record.
+  definitions for clients, groups, loan accounts, deposit accounts, deposit
+  products (per product type), credit arrangements, guarantors, assets,
+  branches, centres, users, transactions by channel and transactions by type
+  (transfers). The reference platform's nine types: free text with a mask
+  and a unique flag, selection with scores and dependent options, number,
+  checkbox, date, date and time, client, group and user links. Usage is
+  Available, Default or Required, per item where the reference platform
+  allows it; a dependent field follows its parent. View and edit rights are
+  per role. Values sit with the record in `custom_fields`;
+  `GET` and `PUT /api/custom-fields/values/:entity/:id` read and change them
+  with the entity's own permission, the user's branches and the member
+  rules, and the create paths take `customFields`. `/clients`, `/groups`,
+  `/deposits` and `/creditarrangements` show values as the reference
+  platform does (strings, `_index` on grouped entries, only with
+  `detailsLevel=FULL`), take JSON Patch paths into grouped sets, and search
+  them by type. At most 200 values per record, 25 on a transaction.
+  `GET /api/customfields/:id`, `/api/customfieldsets` and
+  `GET`/`PUT /api/configuration/customfields.yaml` are the reference
+  platform's metadata and configuration as code. The console's
+  Organization page has the Fields administration.
 - **Product documents.** `/api/documents/templates/:kind/:productId`: HTML
   templates per product, for an account or a transaction, with
   placeholders (organization, member, account, transaction and custom

@@ -9,6 +9,7 @@ import { ask, card, table, view } from './ui.js';
 import { branchDetail } from './accounts.js';
 import { clientsSetup } from './groups.js';
 import { opt } from './products.js';
+import { fieldsCard, groupedEditor, wireFields } from './fields.js';
 
 // --------------------------------------------------------------------------
 // Organization (the reference platform's Administration: organization details, branding,
@@ -64,7 +65,8 @@ export function customFieldsCard(cf) {
     const vals = sid ? cf.values[sid] : cf.values;
     const title = defs[0].setName || 'Fields';
     if (Array.isArray(vals) || defs[0].setType === 'GROUPED') {
-      return `<h3>${esc(title)}</h3>${table(defs.map((d) => ({ label: d.name, value: (g) => show(d, g[d.id]) })), vals || [], { empty: 'None' })}`;
+      const canEdit = defs.some((d) => d.isActive && d.usage.available && d.editable);
+      return `<h3>${esc(title)}${canEdit ? ` <button class="link" data-cf-rows="${esc(sid)}">edit rows</button>` : ''}</h3>${table(defs.map((d) => ({ label: d.name, value: (g) => show(d, g[d.id]) })), vals || [], { empty: 'None' })}`;
     }
     return `<h3>${esc(title)}${cf.scores && cf.scores[sid] !== undefined ? ` <span class="badge">score ${cf.scores[sid]}</span>` : ''}</h3>
       <dl class="kv">${defs.map((d) => `<dt>${esc(d.name)}${d.usage.required ? ' *' : ''}</dt><dd>${esc(show(d, (vals || {})[d.id]))}</dd>`).join('')}</dl>`;
@@ -74,23 +76,21 @@ export function customFieldsCard(cf) {
 
 export function wireCustomFields(cf, entity, id, reload) {
   const b = $('#cf-edit');
-  if (!b) return;
-  b.addEventListener('click', async () => {
+  if (b) b.addEventListener('click', async () => {
     const defs = cf.definitions.filter((d) => d.isActive && d.usage.available && d.editable);
     const sets = [...new Set(defs.map((d) => d.setId || ''))];
     const fields = [];
     for (const sid of sets) {
       const sd = defs.filter((d) => (d.setId || '') === sid);
       const vals = sid ? cf.values[sid] : cf.values;
-      if (sd[0].setType === 'GROUPED') {
-        fields.push({ label: `${sd[0].setName} (a JSON list of groups with ${sd.map((d) => d.id).join(', ')})`, name: `grouped:${sid}`,
-          type: 'textarea', rows: 4, value: JSON.stringify(vals || []), required: false });
-        continue;
-      }
+      // Grouped sets are edited as rows, from their own button on the card.
+      if (sd[0].setType === 'GROUPED') continue;
       for (const d of sd) {
         const v = (vals || {})[d.id];
         const f = { label: `${d.setName ? `${d.setName}: ` : ''}${d.name}${d.usage.required ? ' (required)' : ''}`, name: `${sid}|${d.id}`, required: false };
-        if (d.type === 'SELECTION') { f.options = ['', ...(d.options || []).map((o) => o.id)]; f.value = v ?? ''; f.hint = (d.options || []).map((o) => `${o.id} = ${o.label}`).join(', '); }
+        // More than 20 options: a searchable list, as the reference platform's form has.
+        if (d.type === 'SELECTION' && (d.options || []).length > 20) { f.datalist = d.options.map((o) => [o.id, o.label]); f.value = v ?? ''; f.hint = 'Type to search the options'; }
+        else if (d.type === 'SELECTION') { f.options = ['', ...(d.options || []).map((o) => o.id)]; f.value = v ?? ''; f.hint = (d.options || []).map((o) => `${o.id} = ${o.label}`).join(', '); }
         else if (d.type === 'CHECKBOX') { f.options = ['', 'true', 'false']; f.value = v === undefined ? '' : String(v); }
         else if (d.type === 'NUMBER') { f.type = 'number'; f.step = 'any'; f.value = v ?? ''; }
         else if (d.type === 'DATE') { f.type = 'date'; f.value = v ?? ''; }
@@ -103,10 +103,6 @@ export function wireCustomFields(cf, entity, id, reload) {
     if (!d) return;
     const patch = {};
     for (const [k, v] of Object.entries(d)) {
-      if (k.startsWith('grouped:')) {
-        try { patch[k.slice(8)] = JSON.parse(v || '[]'); } catch { return toast('A grouped set must be a JSON list', true); }
-        continue;
-      }
       const [sid, fid] = k.split('|');
       if (!sid) { patch[fid] = v === '' ? null : v; continue; }
       patch[sid] = patch[sid] || {};
@@ -116,16 +112,26 @@ export function wireCustomFields(cf, entity, id, reload) {
     toast(res.ok ? 'Custom fields saved' : res.error, !res.ok);
     if (res.ok) reload();
   });
+  document.querySelectorAll('#custom-fields [data-cf-rows]').forEach((btn) => btn.addEventListener('click', async () => {
+    const sid = btn.dataset.cfRows;
+    const defs = cf.definitions.filter((x) => x.setId === sid && x.isActive && x.usage.available && x.editable);
+    const rows = await groupedEditor(defs[0]?.setName || sid, defs, cf.values[sid] || []);
+    if (!rows) return;
+    const res = await api('PUT', `/api/custom-fields/values/${entity}/${id}`, { [sid]: rows });
+    toast(res.ok ? 'Custom fields saved' : res.error, !res.ok);
+    if (res.ok) reload();
+  }));
 }
 
 export async function orgView() {
   const admin = S.user.role === 'TENANT_ADMIN';
   const manage = ['TENANT_ADMIN', 'MANAGER'].includes(S.user.role);
-  const [org, eodS, branches, centres, cal, chans, idt, rates, curs, sets, defs] = await Promise.all([
+  const [org, eodS, branches, centres, cal, chans, idt, rates, curs] = await Promise.all([
     api('GET', '/api/organization'), api('GET', '/api/organization/eod'), api('GET', '/api/branches'), api('GET', '/api/centres'),
     api('GET', '/api/holidays'), api('GET', '/api/transaction-channels'), api('GET', '/api/id-templates'), api('GET', '/api/index-rates'),
-    api('GET', '/api/currencies'), api('GET', '/api/custom-fields/sets'), api('GET', '/api/custom-fields/definitions'),
+    api('GET', '/api/currencies'),
   ]);
+  const fieldsHtml = await fieldsCard(manage);
   if (!org.ok) throw new Error(org.error);
   const o = org.body;
   const e = eodS.body || {};
@@ -213,16 +219,7 @@ export async function orgView() {
   ], curs.body || [], { empty: 'No currencies' })}</div>
       ${admin ? '<button class="secondary" id="currency-add">Add currency</button>' : ''}`)}
     </div>
-    ${card('Custom fields', `<div id="org-cf">${table([
-    { label: 'Entity', key: 'entity' }, { label: 'Set', value: (d) => d.set_name || '—' }, { label: 'ID', key: 'id' }, { label: 'Name', key: 'name' },
-    { label: 'Type', key: 'field_type' },
-    { label: 'Usage', value: (d) => (d.usage.items ? `per item: ${Object.keys(d.usage.items).join(', ')}` : d.usage.required ? 'required' : d.usage.default ? 'default' : 'available') },
-    { label: 'Edit roles', value: (d) => (d.edit_roles ? d.edit_roles.join(', ') : 'all') },
-    { label: 'Active', value: (d) => (d.is_active ? 'yes' : 'no') },
-    { label: '', html: true, value: (d) => (manage ? `<button class="link" data-cf="${esc(d.id)}">${d.is_active ? 'deactivate' : 'activate'}</button>` : '') },
-  ], defs.body || [], { empty: 'No custom fields' })}</div>
-    <p class="hint">Sets: ${esc((sets.body || []).map((x) => `${x.id} (${x.entity.toLowerCase()}, ${x.set_type.toLowerCase()})`).join('; ') || 'none')}</p>
-    ${manage ? '<button class="secondary" id="cf-set-add">New set</button> <button class="secondary" id="cf-add">New field</button>' : ''}`)}
+    ${fieldsHtml}
     ${card('Product documents', `<p class="hint">Templates per product, for an account or a transaction. Placeholders such as {{member.fullName}}, {{account.totalBalance}},
       {{transaction.amount}}, blocks {{#statement}}…{{/statement}} and {{#schedule}}…{{/schedule}}; a page break is &lt;div class="page-break"&gt;&lt;/div&gt;.</p>
       ${manage ? '<button class="secondary" id="doc-list">Templates of a product</button> <button class="secondary" id="doc-add">New template</button>' : ''}
@@ -376,43 +373,7 @@ export async function orgView() {
     const d = await ask([{ label: `Buy rate (${code} in base)`, name: 'buyRate', type: 'number', step: 'any' }, { label: 'Sell rate', name: 'sellRate', type: 'number', step: 'any' }], `Exchange rate for ${code}`);
     if (d) done(await api('POST', `/api/currencies/${code}/exchange-rates`, { buyRate: Number(d.buyRate), sellRate: Number(d.sellRate) }), 'Exchange rate set');
   });
-  const ENTITIES = ['MEMBER', 'GROUP', 'LOAN_ACCOUNT', 'SAVINGS_ACCOUNT', 'SAVINGS_PRODUCT', 'GUARANTOR', 'COLLATERAL', 'BRANCH', 'CENTRE', 'USER', 'TRANSACTION_CHANNEL'];
-  on('#cf-set-add', async () => {
-    const d = await ask([{ label: 'Entity', name: 'entity', options: ENTITIES }, { label: 'Name', name: 'name' }, opt({ label: 'ID (blank: from the name)', name: 'id' }),
-      { label: 'Type', name: 'type', options: ['STANDARD', 'GROUPED'] }], 'New custom field set');
-    if (d) done(await api('POST', '/api/custom-fields/sets', { ...d, id: d.id || undefined }), 'Set created');
-  });
-  on('#cf-add', async () => {
-    const d = await ask([
-      { label: 'Entity', name: 'entity', options: ENTITIES }, opt({ label: 'Set ID (none for guarantors and collateral)', name: 'setId' }),
-      { label: 'Name', name: 'name' }, opt({ label: 'ID (blank: from the name)', name: 'id' }),
-      { label: 'Type', name: 'type', options: ['FREE_TEXT', 'SELECTION', 'NUMBER', 'CHECKBOX', 'DATE', 'DATE_TIME', 'MEMBER_LINK', 'USER_LINK'] },
-      { label: 'Selection options, one per line: id|label|score|parent', name: 'options', type: 'textarea', rows: 4, required: false },
-      opt({ label: 'Depends on (a selection field in the set)', name: 'dependentOn' }), opt({ label: 'Format (free text)', name: 'format' }),
-      { label: 'Unique value', name: 'uniqueValue', options: ['false', 'true'] },
-      { label: 'Usage', name: 'usage', options: ['AVAILABLE', 'DEFAULT', 'REQUIRED'] },
-      opt({ label: 'Only for these products, channels or client types (comma separated; blank: all)', name: 'items' }),
-      opt({ label: 'Roles that may edit (comma separated; blank: all)', name: 'editRoles' }),
-      opt({ label: 'Roles that may view (comma separated; blank: all)', name: 'viewRoles' }),
-    ], 'New custom field');
-    if (!d) return;
-    const flags = { default: d.usage !== 'AVAILABLE', required: d.usage === 'REQUIRED' };
-    const items = listOf(d.items);
-    const options = String(d.options || '').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
-      const [id, label, score, parent] = l.split('|').map((x) => (x || '').trim());
-      return { id, label: label || id, ...(score ? { score: Number(score) } : {}), ...(parent ? { parent } : {}) };
-    });
-    done(await api('POST', '/api/custom-fields/definitions', {
-      entity: d.entity, setId: d.setId || undefined, name: d.name, id: d.id || undefined, type: d.type, options: options.length ? options : undefined,
-      dependentOn: d.dependentOn || undefined, format: d.format || undefined, uniqueValue: d.uniqueValue === 'true',
-      availableForAll: !items.length, usage: items.length ? { items: Object.fromEntries(items.map((i) => [i, flags])) } : flags,
-      editRoles: rolesOf(d.editRoles), viewRoles: rolesOf(d.viewRoles),
-    }), 'Custom field created');
-  });
-  each('cf', async (id) => {
-    const dd = (defs.body || []).find((x) => x.id === id);
-    done(await api('PATCH', `/api/custom-fields/definitions/${id}`, { isActive: !dd.is_active }), dd.is_active ? 'Deactivated' : 'Activated');
-  });
+  wireFields(orgView);
   const docProduct = () => ask([{ label: 'Product kind', name: 'kind', options: ['loan', 'savings'] }, { label: 'Product ID', name: 'productId' }], 'Product');
   const showDocs = async (kind, productId) => {
     const r = await api('GET', `/api/documents/templates/${kind}/${productId}`);
