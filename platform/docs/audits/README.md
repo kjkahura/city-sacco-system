@@ -20,5 +20,6 @@ The same files are kept in the claude.ai project "CoreBanking Service" under `cl
 | 12 | Deposits > overdraft terms and the reference platform's deposits API | 0541bf4 | [audit](audit-deposits-api-and-overdrafts.md), [build log](build-log-deposits-api-and-overdrafts.md) |
 | 13 | Accounting (setup docs and APIs) | audit 4c9962d, build 6bd401d | [audit](audit-accounting.md), [build log](build-log-accounting.md) |
 | 14 | Auditing (the audit trail and tracking activities) | audit d8a0050, build 5da21e7 | [audit](audit-auditing.md), [build log](build-log-auditing.md) |
+| 15 | Code refactoring (no change in behaviour) | the four "Refactor:" commits | [build log](build-log-refactoring.md) |
 
 Before section 5, the audit findings were recorded inside the build logs, with no separate audit file.

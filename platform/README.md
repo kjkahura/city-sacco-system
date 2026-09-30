@@ -177,7 +177,9 @@ src/
     errors.js          err(message, status), the error every layer throws
     dates.js           local and UTC calendar days as yyyy-MM-dd
     auditLog.js        recordAudit, the one writer of audit_log rows
-public/                the back office console: index.html, app.js, styles.css
+public/                the back office console: index.html, styles.css, and js/
+                       (ES modules: main.js the entry, base.js, ui.js,
+                       nav.js, one module per page)
 portal/                the member portal: index.html, app.js, api.js, styles.css
 bin/cli.js             migrate, provision, drift, eod, backup, close, returns
 test/isolation.test.js     36 assertions

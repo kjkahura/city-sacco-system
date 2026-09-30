@@ -10,14 +10,15 @@ const { revolving } = require('./revolving');
  * Product types as strategies.
  *
  * Everything that depends on a loan's product type lives in one file per
- * type; the lifecycle code (loans.js, interest.js, installments.js, fees.js,
+ * type; the lifecycle code (loans/, interest.js, installments.js, fees.js,
  * restructure, the EOD job) asks the loan's strategy rather than testing
  * the type. Adding a product type is a new file here and a line in BY_TYPE.
  *
  * The files depend only on accounting, schedule, ledger and tranches, so
  * anything above the ledger may use them. Hooks that need the lifecycle
  * (drawing a schedule, accruing, redrawing, fees) receive those operations
- * as `ops`, built by loans.js, instead of requiring the modules above them.
+ * as `ops`, built by loans/core.js, instead of requiring the modules above
+ * them.
  *
  * The contract every strategy fills:
  *
