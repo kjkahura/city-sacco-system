@@ -11,6 +11,7 @@ const DD = require('../domain/dataDictionary');
 const { zip, unzip } = require('../lib/zip');
 const CSV = require('../lib/csv');
 const { err } = require('../lib/errors');
+const { recordAudit } = require('../lib/auditLog');
 
 /**
  * The tenant's own database backup (the reference platform's Database Backup API): a tenant
@@ -197,10 +198,7 @@ async function request(tenant, { tables = null, fromDate = null, callback = null
       const { rows: [r] } = await c.query(
         `INSERT INTO database_backups (tables, from_date, callback_url, created_by)
          VALUES ($1, $2, $3, $4) RETURNING ${PUBLIC}`, [wanted, from, callbackUrl, createdBy]);
-      await c.query(
-        `INSERT INTO audit_log (actor, action, entity, entity_id, after)
-         VALUES ($1, 'DATABASE_BACKUP_REQUESTED', 'database_backup', $2, $3)`,
-        [createdBy, r.id, JSON.stringify({ tables: wanted, fromDate: from, callback: callbackUrl })]);
+      await recordAudit(c, { actor: createdBy, action: 'DATABASE_BACKUP_REQUESTED', entity: 'database_backup', entityId: r.id, after: JSON.stringify({ tables: wanted, fromDate: from, callback: callbackUrl }) });
       return r;
     } catch (e) {
       if (e.code === '23505') throw err('BACKUP_IN_PROGRESS: one backup may run at a time', 409);

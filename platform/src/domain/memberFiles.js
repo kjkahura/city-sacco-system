@@ -1,6 +1,7 @@
 'use strict';
 
 const acct = require('./accounting');
+const { recordAudit } = require('../lib/auditLog');
 const { err } = acct;
 
 /**
@@ -43,8 +44,7 @@ function checkFile(buf, allowed) {
 const safeName = (v, fallback) => String(v || fallback).replace(/[^A-Za-z0-9._ -]/g, '_').slice(0, 200) || fallback;
 
 async function audit(c, actor, action, memberId, after) {
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,$2,'member',$3,$4)`,
-    [actor || 'SYSTEM', action, String(memberId), after ? JSON.stringify(after) : null]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: action, entity: 'member', entityId: String(memberId), after: after ? JSON.stringify(after) : null });
 }
 
 async function memberOf(c, ref) {

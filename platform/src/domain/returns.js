@@ -2,6 +2,7 @@
 
 const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 /**
@@ -249,11 +250,7 @@ async function loadTemplate(c, def, { createdBy = 'SYSTEM' } = {}) {
     );
   }
 
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after)
-     VALUES ($1,'RETURN_TEMPLATE_LOADED','return_template',$2,$3)`,
-    [createdBy, def.code, JSON.stringify({ lines: def.lines.length, official: def.official === true })]
-  );
+  await recordAudit(c, { actor: createdBy, action: 'RETURN_TEMPLATE_LOADED', entity: 'return_template', entityId: def.code, after: JSON.stringify({ lines: def.lines.length, official: def.official === true }) });
 
   return template(c, def.code);
 }

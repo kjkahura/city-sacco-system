@@ -12,6 +12,7 @@ const PA = require('./productAccounting');
 const accruals = require('./accruals');
 const channels = require('./channels');
 const customFields = require('./customFields');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 /**
@@ -359,9 +360,7 @@ async function touch(c, a, day) {
        accrued_through = CASE WHEN status = 'APPROVED' THEN $2::date - 1 ELSE accrued_through END
      WHERE id = $1 RETURNING status`, [a.id, day]);
   if (['DORMANT', 'APPROVED'].includes(a.status) && r.status === 'ACTIVE') {
-    await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ('SYSTEM',$4,'savings_account',$1,$2,$3)`,
-      [a.id, JSON.stringify({ status: a.status }), JSON.stringify({ status: 'ACTIVE', on: day }),
-        a.status === 'DORMANT' ? 'SAVINGS_ACCOUNT_REACTIVATED' : 'SAVINGS_ACCOUNT_ACTIVATED']);
+    await recordAudit(c, { actor: 'SYSTEM', action: a.status === 'DORMANT' ? 'SAVINGS_ACCOUNT_REACTIVATED' : 'SAVINGS_ACCOUNT_ACTIVATED', entity: 'savings_account', entityId: a.id, before: JSON.stringify({ status: a.status }), after: JSON.stringify({ status: 'ACTIVE', on: day }) });
   }
   await followArrears(c, a.id, day);
 }
@@ -385,9 +384,7 @@ async function followArrears(c, id, day, { limitChanged = false, createdBy = 'SY
   else if (a.status === 'ACTIVE' && beyond && (expired || limitChanged)) next = 'IN_ARREARS';
   if (!next) return null;
   await c.query("UPDATE savings_accounts SET status = $2, in_arrears_since = CASE WHEN $2 = 'IN_ARREARS' THEN $3::date END WHERE id = $1", [id, next, day]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,'savings_account',$3,$4,$5)`,
-    [createdBy, next === 'IN_ARREARS' ? 'SAVINGS_ACCOUNT_IN_ARREARS' : 'SAVINGS_ACCOUNT_OUT_OF_ARREARS', id,
-      JSON.stringify({ status: a.status, balance: bal }), JSON.stringify({ status: next, on: day, reason: next === 'ACTIVE' ? 'COVERED' : expired ? 'OVERDRAFT_EXPIRED' : 'LIMIT_BELOW_BALANCE' })]);
+  await recordAudit(c, { actor: createdBy, action: next === 'IN_ARREARS' ? 'SAVINGS_ACCOUNT_IN_ARREARS' : 'SAVINGS_ACCOUNT_OUT_OF_ARREARS', entity: 'savings_account', entityId: id, before: JSON.stringify({ status: a.status, balance: bal }), after: JSON.stringify({ status: next, on: day, reason: next === 'ACTIVE' ? 'COVERED' : expired ? 'OVERDRAFT_EXPIRED' : 'LIMIT_BELOW_BALANCE' }) });
   return next;
 }
 
@@ -1041,8 +1038,7 @@ async function endOfDay(c, { date, createdBy = 'EOD' } = {}) {
     }
     if (r.maturity_date && S.ymd(r.maturity_date) <= date && ['ACTIVE', 'DORMANT'].includes(r.status)) {
       await c.query("UPDATE savings_accounts SET status = 'MATURED' WHERE id = $1", [r.id]);
-      await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'SAVINGS_ACCOUNT_MATURED','savings_account',$2,$3,$4)`,
-        [createdBy, r.id, JSON.stringify({ status: r.status }), JSON.stringify({ status: 'MATURED', on: date })]);
+      await recordAudit(c, { actor: createdBy, action: 'SAVINGS_ACCOUNT_MATURED', entity: 'savings_account', entityId: r.id, before: JSON.stringify({ status: r.status }), after: JSON.stringify({ status: 'MATURED', on: date }) });
       matured += 1;
     }
   }
@@ -1055,8 +1051,7 @@ async function endOfDay(c, { date, createdBy = 'EOD' } = {}) {
         AND COALESCE(a.last_activity_on, a.opened_on) <= ($1::date - p.dormancy_days)
       RETURNING a.id, a.account_no`, [date]);
   for (const d of dormant) {
-    await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'SAVINGS_ACCOUNT_DORMANT','savings_account',$2,$3,$4)`,
-      [createdBy, d.id, JSON.stringify({ status: 'ACTIVE' }), JSON.stringify({ status: 'DORMANT', on: date })]);
+    await recordAudit(c, { actor: createdBy, action: 'SAVINGS_ACCOUNT_DORMANT', entity: 'savings_account', entityId: d.id, before: JSON.stringify({ status: 'ACTIVE' }), after: JSON.stringify({ status: 'DORMANT', on: date }) });
   }
   // In Arrears: overdrawn past the overdraft expiry date, or covered again.
   const { rows: watch } = await c.query(
@@ -1094,8 +1089,7 @@ async function startMaturity(c, accountId, { termLength = null, createdBy } = {}
   const due = DR.maturityDate(today, n, a.term_unit);
   const { rows: [r] } = await c.query(
     'UPDATE savings_accounts SET maturity_started_on = $2, maturity_date = $3, term_length = $4 WHERE id = $1 RETURNING *', [a.id, today, due, n]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'SAVINGS_MATURITY_STARTED','savings_account',$2,$3)`,
-    [createdBy || 'SYSTEM', a.id, JSON.stringify({ startedOn: today, maturityDate: due, term: `${n} ${a.term_unit}` })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'SAVINGS_MATURITY_STARTED', entity: 'savings_account', entityId: a.id, after: JSON.stringify({ startedOn: today, maturityDate: due, term: `${n} ${a.term_unit}` }) });
   return r;
 }
 
@@ -1105,8 +1099,7 @@ async function undoMaturity(c, accountId, { createdBy } = {}) {
   if (!a.maturity_started_on) throw err('MATURITY_NOT_STARTED', 409);
   if (a.status === 'MATURED' || S.ymd(a.maturity_date) <= await orgToday(c)) throw err(`ALREADY_MATURED: ${S.ymd(a.maturity_date)}`, 409);
   const { rows: [r] } = await c.query('UPDATE savings_accounts SET maturity_started_on = NULL, maturity_date = NULL WHERE id = $1 RETURNING *', [a.id]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'SAVINGS_MATURITY_UNDONE','savings_account',$2,$3)`,
-    [createdBy || 'SYSTEM', a.id, JSON.stringify({ startedOn: S.ymd(a.maturity_started_on), maturityDate: S.ymd(a.maturity_date) })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'SAVINGS_MATURITY_UNDONE', entity: 'savings_account', entityId: a.id, before: JSON.stringify({ startedOn: S.ymd(a.maturity_started_on), maturityDate: S.ymd(a.maturity_date) }) });
   return r;
 }
 
@@ -1173,8 +1166,7 @@ async function changeInterestRate(c, accountId, { interestRate, valueDate = null
   }
   await c.query(`INSERT INTO savings_interest_rate_changes (product_id, account_id, kind, scope, value_date, old_rate, new_rate, notes, created_by)
     VALUES ($1,$2,'CREDIT','ACCOUNT',$3,$4,$5,$6,$7)`, [a.product_id, a.id, from, old, rate, notes, createdBy || 'SYSTEM']);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'SAVINGS_INTEREST_RATE_CHANGED','savings_account',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', a.id, JSON.stringify({ interestRate: old }), JSON.stringify({ interestRate: rate, valueDate: from, repriced: round2(delta) })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'SAVINGS_INTEREST_RATE_CHANGED', entity: 'savings_account', entityId: a.id, before: JSON.stringify({ interestRate: old }), after: JSON.stringify({ interestRate: rate, valueDate: from, repriced: round2(delta) }) });
   return { accountId: a.id, interestRate: rate, previousRate: old, valueDate: from, accruedChange: round2(delta) };
 }
 
@@ -1243,8 +1235,7 @@ async function updateAccount(c, accountId, patch = {}, { createdBy, user = null 
   if (keys.length) {
     r = (await c.query(`UPDATE savings_accounts SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`,
       [a.id, ...keys.map((k) => sets[k])])).rows[0];
-    await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'SAVINGS_ACCOUNT_EDITED','savings_account',$2,$3,$4)`,
-      [createdBy || 'SYSTEM', a.id, JSON.stringify(Object.fromEntries(keys.map((k) => [k, a[k] ?? null]))), JSON.stringify(sets)]);
+    await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'SAVINGS_ACCOUNT_EDITED', entity: 'savings_account', entityId: a.id, before: JSON.stringify(Object.fromEntries(keys.map((k) => [k, a[k] ?? null]))), after: JSON.stringify(sets) });
   }
   if (hasFields) {
     await customFields.setValues(c, 'SAVINGS_ACCOUNT', a.id, patch.customFields, { user, createdBy });
@@ -1308,10 +1299,7 @@ async function setOverdraftLimit(c, accountId, { limit, expiryDate, interestRate
       break;
     }
   }
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'OVERDRAFT_LIMIT_SET','savings_account',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', a.id, JSON.stringify({ overdraftLimit: Number(a.overdraft_limit), overdraftExpiryDate: a.overdraft_expires_on ? S.ymd(a.overdraft_expires_on) : null }),
-      JSON.stringify({ overdraftLimit: lim, overdraftExpiryDate: expires, overdraftRate: odRate, overdraftSpread: odSpread })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'OVERDRAFT_LIMIT_SET', entity: 'savings_account', entityId: a.id, before: JSON.stringify({ overdraftLimit: Number(a.overdraft_limit), overdraftExpiryDate: a.overdraft_expires_on ? S.ymd(a.overdraft_expires_on) : null }), after: JSON.stringify({ overdraftLimit: lim, overdraftExpiryDate: expires, overdraftRate: odRate, overdraftSpread: odSpread }) });
   if (await followArrears(c, a.id, await orgToday(c), { limitChanged: lim < Number(a.overdraft_limit), createdBy: createdBy || 'SYSTEM' })) {
     return (await c.query('SELECT * FROM savings_accounts WHERE id = $1', [a.id])).rows[0];
   }
@@ -1518,8 +1506,7 @@ async function blockFunds(c, accountId, { externalReferenceId = null, amount, no
   const { rows: [b] } = await c.query(
     'INSERT INTO savings_blocks (account_id, reference, amount, notes, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING *',
     [a.id, refId, amt, notes, createdBy || 'SYSTEM']);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'SAVINGS_FUNDS_BLOCKED','savings_account',$2,$3)`,
-    [createdBy || 'SYSTEM', a.id, JSON.stringify({ reference: refId, amount: amt, notes })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'SAVINGS_FUNDS_BLOCKED', entity: 'savings_account', entityId: a.id, after: JSON.stringify({ reference: refId, amount: amt, notes }) });
   return blockOut(b);
 }
 
@@ -1537,8 +1524,7 @@ async function unblockFunds(c, accountId, reference, { createdBy } = {}) {
   if (!b) throw err(`BLOCK_NOT_FOUND: ${reference}`, 404);
   if (b.state !== 'PENDING') throw err(`BLOCK_IS_${b.state}`, 409);
   const { rows: [u] } = await c.query("UPDATE savings_blocks SET state = 'UNBLOCKED', closed_at = now() WHERE id = $1 RETURNING *", [b.id]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'SAVINGS_FUNDS_UNBLOCKED','savings_account',$2,$3)`,
-    [createdBy || 'SYSTEM', a.id, JSON.stringify({ reference: b.reference, amount: Number(b.amount), seized: Number(b.seized) })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'SAVINGS_FUNDS_UNBLOCKED', entity: 'savings_account', entityId: a.id, before: JSON.stringify({ reference: b.reference, amount: Number(b.amount), seized: Number(b.seized) }) });
   return blockOut(u);
 }
 
@@ -1630,8 +1616,7 @@ async function reverseHold(c, accountId, reference, { createdBy } = {}) {
   if (!h) throw err(`HOLD_NOT_FOUND: ${reference}`, 404);
   if (h.state !== 'PENDING') throw err(`HOLD_IS_${h.state}`, 409);
   const { rows: [u] } = await c.query("UPDATE savings_holds SET state = 'REVERSED', closed_at = now() WHERE id = $1 RETURNING *", [h.id]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'SAVINGS_HOLD_REVERSED','savings_account',$2,$3)`,
-    [createdBy || 'SYSTEM', a.id, JSON.stringify(holdOut(h))]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'SAVINGS_HOLD_REVERSED', entity: 'savings_account', entityId: a.id, before: JSON.stringify(holdOut(h)) });
   return holdOut(u);
 }
 
@@ -1797,8 +1782,7 @@ async function closeAccount(c, accountId, { createdBy, notes = null } = {}) {
   const { rows: [out] } = await c.query(
     `UPDATE savings_accounts SET status = 'CLOSED', closed_on = current_date, notes = COALESCE($2, notes), updated_at = now()
      WHERE id = $1 RETURNING *`, [a.id, notes]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'SAVINGS_ACCOUNT_CLOSED','savings_account',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', a.id, JSON.stringify({ status: a.status }), JSON.stringify({ status: 'CLOSED', closedOn: out.closed_on })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'SAVINGS_ACCOUNT_CLOSED', entity: 'savings_account', entityId: a.id, before: JSON.stringify({ status: a.status }), after: JSON.stringify({ status: 'CLOSED', closedOn: out.closed_on }) });
   return out;
 }
 
@@ -1831,9 +1815,7 @@ async function liveTransactions(c, id) {
 }
 
 async function stateAudit(c, createdBy, action, a, after, notes) {
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,'savings_account',$3,$4,$5)`,
-    [createdBy || 'SYSTEM', `SAVINGS_ACCOUNT_${action}`, a.id, JSON.stringify({ status: a.status, closedAs: a.closed_as || null }),
-      JSON.stringify({ ...after, notes: notes || null })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: `SAVINGS_ACCOUNT_${action}`, entity: 'savings_account', entityId: a.id, before: JSON.stringify({ status: a.status, closedAs: a.closed_as || null }), after: JSON.stringify({ ...after, notes: notes || null }) });
 }
 
 async function holderMayReopen(c, a) {
@@ -1978,8 +1960,7 @@ async function deleteAccount(c, accountId, { createdBy } = {}) {
   await c.query('DELETE FROM savings_daily_balances WHERE account_id = $1', [a.id]);
   await c.query('DELETE FROM savings_accounts WHERE id = $1', [a.id]);
   await c.query('SELECT refresh_member_state($1)', [a.member_id]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'SAVINGS_ACCOUNT_DELETED','savings_account',$2,$3)`,
-    [createdBy || 'SYSTEM', a.id, JSON.stringify({ accountNo: a.account_no, memberId: a.member_id, productId: a.product_id, status: a.status })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'SAVINGS_ACCOUNT_DELETED', entity: 'savings_account', entityId: a.id, before: JSON.stringify({ accountNo: a.account_no, memberId: a.member_id, productId: a.product_id, status: a.status }) });
   return { deleted: a.account_no, accountId: a.id };
 }
 

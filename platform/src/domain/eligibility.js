@@ -6,6 +6,7 @@ const customFields = require('./customFields');
 const lending = require('./controls');
 const { err, round2 } = acct;
 const { lock } = require('./ledger');
+const { recordAudit } = require('../lib/auditLog');
 
 /**
  * Security and eligibility: guarantors pledging their deposits, the value
@@ -76,9 +77,7 @@ async function addGuarantor(c, loanId, { memberId, amount, createdBy = null, cus
       `INSERT INTO loan_guarantors (loan_id, member_id, pledged_amount, custom_fields) VALUES ($1,$2,$3,$4) RETURNING *`,
       [l.id, memberId, amt, JSON.stringify(values)]);
   if (!OPEN_APPLICATION.includes(l.status)) {
-    await c.query(
-      `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'GUARANTOR_ADDED','loan_guarantor',$2,$3)`,
-      [createdBy || 'SYSTEM', rows[0].id, JSON.stringify({ loan: l.account_no, memberId, amount: amt, status: l.status })]);
+    await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'GUARANTOR_ADDED', entity: 'loan_guarantor', entityId: rows[0].id, after: JSON.stringify({ loan: l.account_no, memberId, amount: amt, status: l.status }) });
   }
   return rows[0];
 }
@@ -104,9 +103,7 @@ async function removeGuarantor(c, loanId, guarantorId, { note = null, createdBy 
     }
   }
   const { rows: [out] } = await c.query("UPDATE loan_guarantors SET status = 'RELEASED' WHERE id = $1 RETURNING *", [g.id]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'GUARANTOR_REMOVED','loan_guarantor',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', g.id, JSON.stringify(g), JSON.stringify({ note, loan: l.account_no })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'GUARANTOR_REMOVED', entity: 'loan_guarantor', entityId: g.id, before: JSON.stringify(g), after: JSON.stringify({ note, loan: l.account_no }) });
   return out;
 }
 

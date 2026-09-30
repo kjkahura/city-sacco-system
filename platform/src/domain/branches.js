@@ -5,6 +5,7 @@ const acct = require('./accounting');
 const ledger = require('./ledger');
 const savings = require('./savings');
 const CF = require('./customFields');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2, isoDay } = acct;
 
 /**
@@ -62,8 +63,7 @@ async function create(c, { code, createdBy, user = null, customFields = {}, ...b
     `INSERT INTO branches (${keys.join(', ')}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(', ')}) ON CONFLICT (code) DO NOTHING RETURNING *`,
     keys.map((k) => cols[k]));
   if (!rows.length) throw err('BRANCH_CODE_EXISTS', 409);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'BRANCH_CREATED','branch',$2,$3)`,
-    [createdBy || 'SYSTEM', rows[0].id, JSON.stringify(rows[0])]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'BRANCH_CREATED', entity: 'branch', entityId: rows[0].id, after: JSON.stringify(rows[0]) });
   return rows[0];
 }
 
@@ -93,8 +93,7 @@ async function update(c, id, { status, createdBy, user = null, customFields, ...
   const { rows: [after] } = await c.query(
     `UPDATE branches SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`,
     [before.id, ...keys.map((k) => cols[k])]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'BRANCH_CHANGED','branch',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', before.id, JSON.stringify(before), JSON.stringify(after)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'BRANCH_CHANGED', entity: 'branch', entityId: before.id, before: JSON.stringify(before), after: JSON.stringify(after) });
   return after;
 }
 
@@ -175,8 +174,7 @@ async function createCentre(c, { code, branchId, meetingDay: md, customFields = 
     `INSERT INTO centres (${keys.join(', ')}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(', ')}) ON CONFLICT (code) DO NOTHING RETURNING *`,
     keys.map((k) => cols[k]));
   if (!ce) throw err('CENTRE_CODE_EXISTS', 409);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'CENTRE_CREATED','centre',$2,$3)`,
-    [createdBy || 'SYSTEM', ce.id, JSON.stringify(ce)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'CENTRE_CREATED', entity: 'centre', entityId: ce.id, after: JSON.stringify(ce) });
   return ce;
 }
 
@@ -211,8 +209,7 @@ async function updateCentre(c, id, { meetingDay: md, status, customFields, branc
   const { rows: [after] } = await c.query(
     `UPDATE centres SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`,
     [before.id, ...keys.map((k) => cols[k])]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'CENTRE_CHANGED','centre',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', before.id, JSON.stringify(before), JSON.stringify(after)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'CENTRE_CHANGED', entity: 'centre', entityId: before.id, before: JSON.stringify(before), after: JSON.stringify(after) });
   return after;
 }
 
@@ -276,8 +273,7 @@ async function setRules(c, list, { createdBy } = {}) {
   for (const r of clean) {
     await c.query('INSERT INTO inter_branch_rules (id, branch_a, branch_b, gl_code) VALUES ($1,$2,$3,$4)', [r.id, r.a, r.b, r.gl]);
   }
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'INTER_BRANCH_RULES_CHANGED','inter_branch_rules','all',$2,$3)`,
-    [createdBy || 'SYSTEM', JSON.stringify(before), JSON.stringify(clean)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'INTER_BRANCH_RULES_CHANGED', entity: 'inter_branch_rules', entityId: 'all', before: JSON.stringify(before), after: JSON.stringify(clean) });
   return rules(c);
 }
 
@@ -311,8 +307,7 @@ async function close(c, { closedThrough, branchId = null, notes = null, automati
   const { rows: [k] } = await c.query(
     `INSERT INTO accounting_closures (branch_id, closed_through, notes, automatic, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
     [branch ? branch.id : null, date, notes, automatic, createdBy || 'SYSTEM']);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'ACCOUNTING_CLOSED','accounting_closure',$2,$3)`,
-    [createdBy || 'SYSTEM', k.id, JSON.stringify(k)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'ACCOUNTING_CLOSED', entity: 'accounting_closure', entityId: k.id, after: JSON.stringify(k) });
   return k;
 }
 
@@ -321,8 +316,7 @@ async function reopen(c, closureId, { createdBy, reason = null } = {}) {
   const { rows: [k] } = await c.query(
     'UPDATE accounting_closures SET deleted_at = now(), deleted_by = $2 WHERE id = $1 AND deleted_at IS NULL RETURNING *', [closureId, createdBy || 'SYSTEM']);
   if (!k) throw err('CLOSURE_NOT_FOUND', 404);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'ACCOUNTING_CLOSURE_DELETED','accounting_closure',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', k.id, JSON.stringify(k), JSON.stringify({ reason })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'ACCOUNTING_CLOSURE_DELETED', entity: 'accounting_closure', entityId: k.id, before: JSON.stringify(k), after: JSON.stringify({ reason }) });
   return k;
 }
 
@@ -336,8 +330,7 @@ async function updateClosure(c, closureId, { notes, closedThrough, branchId, cre
   const { rows: [k] } = await c.query(
     'UPDATE accounting_closures SET notes = $2, updated_by = $3, updated_at = now() WHERE id = $1 RETURNING *',
     [closureId, notes === null ? null : String(notes), createdBy || 'SYSTEM']);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'ACCOUNTING_CLOSURE_EDITED','accounting_closure',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', k.id, JSON.stringify({ notes: before.notes }), JSON.stringify({ notes: k.notes })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'ACCOUNTING_CLOSURE_EDITED', entity: 'accounting_closure', entityId: k.id, before: JSON.stringify({ notes: before.notes }), after: JSON.stringify({ notes: k.notes }) });
   return k;
 }
 
@@ -371,8 +364,7 @@ async function updateSettings(c, { autoClosureEnabled, autoClosureIntervalDays, 
        gl_suspense = COALESCE($3, gl_suspense), currency_decimals = COALESCE($4, currency_decimals),
        updated_at = now() WHERE only_row RETURNING *`,
     [Boolean(enabling), interval || null, glSuspense || null, currencyDecimals === undefined ? null : Number(currencyDecimals)]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'ACCOUNTING_SETTINGS_CHANGED','accounting_settings','1',$2,$3)`,
-    [createdBy || 'SYSTEM', JSON.stringify(before), JSON.stringify(after)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'ACCOUNTING_SETTINGS_CHANGED', entity: 'accounting_settings', entityId: '1', before: JSON.stringify(before), after: JSON.stringify(after) });
   return after;
 }
 

@@ -2,6 +2,7 @@
 
 const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 /**
@@ -43,11 +44,7 @@ async function setSettings(c, { statutoryReservePercent, glRetainedEarnings, glS
     [statutoryReservePercent ?? null, glRetainedEarnings ?? null,
      glStatutoryReserve ?? null, sourceNote ?? null]
   );
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,'CLOSE_SETTINGS_CHANGED','close_settings','only',$2,$3)`,
-    [createdBy || 'SYSTEM', JSON.stringify(before), JSON.stringify(rows[0])]
-  );
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'CLOSE_SETTINGS_CHANGED', entity: 'close_settings', entityId: 'only', before: JSON.stringify(before), after: JSON.stringify(rows[0]) });
   return rows[0];
 }
 
@@ -65,11 +62,7 @@ async function openYear(c, { year, startsOn, endsOn, createdBy } = {}) {
     [y, start, end]
   );
   if (!rows.length) throw err(`FINANCIAL_YEAR_ALREADY_EXISTS: ${y}`, 409);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after)
-     VALUES ($1,'FINANCIAL_YEAR_OPENED','financial_year',$2,$3)`,
-    [createdBy || 'SYSTEM', String(y), JSON.stringify(rows[0])]
-  );
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'FINANCIAL_YEAR_OPENED', entity: 'financial_year', entityId: String(y), after: JSON.stringify(rows[0]) });
   return rows[0];
 }
 
@@ -210,11 +203,7 @@ async function close(c, year, { createdBy = 'SYSTEM' } = {}) {
     "UPDATE financial_years SET status='CLOSED', closed_at=now(), closed_by=$2 WHERE year=$1",
     [y.year, createdBy]
   );
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after)
-     VALUES ($1,'FINANCIAL_YEAR_CLOSED','financial_year',$2,$3)`,
-    [createdBy, String(y.year), JSON.stringify(row)]
-  );
+  await recordAudit(c, { actor: createdBy, action: 'FINANCIAL_YEAR_CLOSED', entity: 'financial_year', entityId: String(y.year), after: JSON.stringify(row) });
 
   return {
     ...p,
@@ -257,11 +246,7 @@ async function reopen(c, year, { reason = '', createdBy = 'SYSTEM' } = {}) {
     await c.query("UPDATE year_end_closes SET status='REVERSED' WHERE id=$1", [cl.id]);
   }
 
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,'FINANCIAL_YEAR_REOPENED','financial_year',$2,$3,$4)`,
-    [createdBy, String(y.year), JSON.stringify(y), JSON.stringify({ reason })]
-  );
+  await recordAudit(c, { actor: createdBy, action: 'FINANCIAL_YEAR_REOPENED', entity: 'financial_year', entityId: String(y.year), before: JSON.stringify(y), after: JSON.stringify({ reason }) });
   return { year: y.year, status: 'OPEN', reversedClose: cl?.id || null, reason };
 }
 

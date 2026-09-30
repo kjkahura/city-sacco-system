@@ -16,6 +16,7 @@ const loans = require('./loans');
 const postdated = require('./postdated');
 const settlement = require('./settlement');
 const { pageQuery } = require('../lib/page');
+const { recordAudit } = require('../lib/auditLog');
 const { err } = acct;
 const { isoDate, ymd } = S;
 
@@ -101,10 +102,7 @@ async function include(c, loanId, { asOf = null, note = null, createdBy } = {}) 
     'SELECT job, error FROM loan_eod_exclusions WHERE loan_id = $1 AND included_at IS NULL', [l.id]);
   if (again) throw err(`LOAN_STILL_FAILS_IN_${again.job}: ${again.error}`, 409);
   await c.query('UPDATE loan_eod_exclusions SET catch_up = $2 WHERE id = $1', [x.id, JSON.stringify({ asOf: date, ...done })]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_INCLUDED_IN_EOD','loan_account',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', l.id, JSON.stringify({ job: x.job, businessDate: ymd(x.business_date), error: x.error }),
-      JSON.stringify({ note, catchUp: done })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_INCLUDED_IN_EOD', entity: 'loan_account', entityId: l.id, before: JSON.stringify({ job: x.job, businessDate: ymd(x.business_date), error: x.error }), after: JSON.stringify({ note, catchUp: done }) });
   return { loanId: l.id, accountNo: l.account_no, excludedSince: ymd(x.business_date), job: x.job, caughtUpTo: date, catchUp: done };
 }
 

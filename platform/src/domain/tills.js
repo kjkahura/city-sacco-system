@@ -3,6 +3,7 @@
 const acct = require('./accounting');
 const { orgToday } = require('../lib/orgDate');
 const { err } = require('../lib/errors');
+const { recordAudit } = require('../lib/auditLog');
 
 /**
  * Teller tills (the reference platform's Tellers and Tellering widgets). A till is one
@@ -319,8 +320,7 @@ async function reopen(c, id, { createdBy } = {}) {
 }
 
 async function audit(c, actor, action, after) {
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,$2,'till',$3,$4)`,
-    [actor || 'SYSTEM', action, after.id || after.tillId || null, JSON.stringify(after)]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: action, entity: 'till', entityId: after.id || after.tillId || null, after: JSON.stringify(after) });
 }
 
 /** The tellering widget's summary: today's tills with what they hold. */

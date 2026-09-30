@@ -7,6 +7,7 @@ const accruals = require('./accruals');
 const tax = require('./tax');
 const ledger = require('./ledger');
 const savings = require('./savings');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 /**
@@ -80,12 +81,7 @@ async function record(c, row) {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
     [row.kind, row.productId, row.from, row.to, row.fromAcc, row.toAcc, row.date, row.reason, row.accounts,
       row.entryIds, JSON.stringify(row.detail), row.createdBy || 'SYSTEM']);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
-    [row.createdBy || 'SYSTEM', `${row.kind}_PRODUCT_ACCOUNTING_CHANGED`, row.kind === 'LOAN' ? 'loan_product' : 'savings_product',
-      row.productId, JSON.stringify({ method: row.from, accruedAccounting: row.fromAcc }),
-      JSON.stringify({ method: row.to, accruedAccounting: row.toAcc, reason: row.reason, changeId: r.id })]);
+  await recordAudit(c, { actor: row.createdBy || 'SYSTEM', action: `${row.kind}_PRODUCT_ACCOUNTING_CHANGED`, entity: row.kind === 'LOAN' ? 'loan_product' : 'savings_product', entityId: row.productId, before: JSON.stringify({ method: row.from, accruedAccounting: row.fromAcc }), after: JSON.stringify({ method: row.to, accruedAccounting: row.toAcc, reason: row.reason, changeId: r.id }) });
   return r;
 }
 

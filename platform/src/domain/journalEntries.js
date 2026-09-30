@@ -27,6 +27,7 @@ const COA = require('./chartOfAccounts');
 const ATT = require('./attachments');
 const SEARCH = require('../lib/searchCriteria');
 const { orgToday } = require('../lib/orgDate');
+const { recordAudit } = require('../lib/auditLog');
 
 const { err, round2 } = acct;
 const MAX_FILES = 5;
@@ -267,8 +268,7 @@ async function logManual(c, body, { user = null, createdBy } = {}) {
     debits: dr, credits: cr, bookingDate: day, narration: notes, sourceType: 'MANUAL',
     createdBy: createdBy || 'SYSTEM', branchId: entryBranch, transactionId, currencyCode: t?.currency_code || 'KES',
   });
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'MANUAL_JOURNAL_ENTRY_LOGGED','journal_entry',$2,$3)`,
-    [createdBy || 'SYSTEM', posted.entryId, JSON.stringify({ transactionId, bookingDate: day, amount: dt, notes })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'MANUAL_JOURNAL_ENTRY_LOGGED', entity: 'journal_entry', entityId: posted.entryId, after: JSON.stringify({ transactionId, bookingDate: day, amount: dt, notes }) });
   return linesOf(c, posted.entryId);
 }
 
@@ -294,8 +294,7 @@ async function reverseManual(c, ref, { notes, date, user = null, createdBy } = {
     if (used || tid.length > 64) tid = await nextTransactionId(c);
   } else tid = await nextTransactionId(c);
   const posted = await acct.reverse(c, e.id, why, createdBy || 'SYSTEM', { bookingDate: day, transactionId: tid });
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'MANUAL_JOURNAL_ENTRY_REVERSED','journal_entry',$2,$3)`,
-    [createdBy || 'SYSTEM', e.id, JSON.stringify({ reversal: posted.entryId, transactionId: tid, notes: why })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'MANUAL_JOURNAL_ENTRY_REVERSED', entity: 'journal_entry', entityId: e.id, after: JSON.stringify({ reversal: posted.entryId, transactionId: tid, notes: why }) });
   return linesOf(c, posted.entryId);
 }
 
@@ -321,8 +320,7 @@ async function attach(c, ref, { title = null, description = null, fileName, data
     `INSERT INTO journal_entry_attachments (entry_id, title, description, file_name, content_type, size, sha256, data, created_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
     [e.id, String(title || name.split('.')[0]).slice(0, 200), description, name, type, buf.length, sha, buf, createdBy || 'SYSTEM']);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'JOURNAL_ENTRY_FILE_ATTACHED','journal_entry_attachment',$2,$3)`,
-    [createdBy || 'SYSTEM', r.id, JSON.stringify({ journalEntry: e.id, transactionId: e.transaction_id, fileName: name, size: buf.length, sha256: sha })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'JOURNAL_ENTRY_FILE_ATTACHED', entity: 'journal_entry_attachment', entityId: r.id, after: JSON.stringify({ journalEntry: e.id, transactionId: e.transaction_id, fileName: name, size: buf.length, sha256: sha }) });
   return fileView(r);
 }
 

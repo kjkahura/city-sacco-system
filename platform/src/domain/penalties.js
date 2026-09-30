@@ -10,6 +10,7 @@ const { pageQuery } = require('../lib/page');
 const S = require('./schedule');
 const G = require('./eodGuard');
 const { utcDay: ymd } = require('../lib/dates');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 /**
@@ -340,9 +341,7 @@ async function changeRate(c, loanId, { rate, note = null, asOf = null, createdBy
   const { rows: [r] } = await c.query(
     `INSERT INTO loan_penalty_rate_changes (loan_id, from_rate, to_rate, changed_on, note, created_by)
      VALUES ($1,$2,$3,$4::date,$5,$6) RETURNING *`, [l.id, before, v, date, note, createdBy || 'SYSTEM']);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_PENALTY_RATE_CHANGED','loan_account',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', l.id, JSON.stringify({ penaltyRate: before }), JSON.stringify({ penaltyRate: v, note })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_PENALTY_RATE_CHANGED', entity: 'loan_account', entityId: l.id, before: JSON.stringify({ penaltyRate: before }), after: JSON.stringify({ penaltyRate: v, note }) });
   return r;
 }
 
@@ -375,11 +374,7 @@ async function waive(c, chargeId, { reason = '', createdBy } = {}) {
     'UPDATE loan_accounts SET penalty_accrued = penalty_accrued - $1, updated_at = now() WHERE id = $2',
     [ch.amount, ch.loan_id]
   );
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,'PENALTY_WAIVED','penalty_charge',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', chargeId, JSON.stringify(ch), JSON.stringify({ reason })]
-  );
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'PENALTY_WAIVED', entity: 'penalty_charge', entityId: chargeId, before: JSON.stringify(ch), after: JSON.stringify({ reason }) });
   return { waived: true, amount: Number(ch.amount), reason };
 }
 
@@ -409,9 +404,7 @@ async function adjust(c, chargeId, { reason = '', createdBy } = {}) {
     `UPDATE loan_accounts SET penalty_accrued = penalty_accrued - $1, tax_charged = tax_charged - $3,
        charges_since_arrears = GREATEST(0, charges_since_arrears - $1), updated_at = now() WHERE id = $2`,
     [ch.amount, l.id, Number(ch.tax || 0)]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'PENALTY_ADJUSTED','penalty_charge',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', ch.id, JSON.stringify(ch), JSON.stringify({ reason })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'PENALTY_ADJUSTED', entity: 'penalty_charge', entityId: ch.id, before: JSON.stringify(ch), after: JSON.stringify({ reason }) });
   return savings.record(c, {
     reference: savings.ref('LPA'), kind: 'LOAN_PENALTY_ADJUSTED', memberId: l.member_id, loanAccountId: l.id,
     amount: -Number(ch.amount), entryId: entry.entryId, allocation: { chargeId: ch.id, chargedOn: ymd(ch.charged_on), reason }, narration: reason, createdBy,

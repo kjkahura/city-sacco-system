@@ -11,6 +11,7 @@ const AC = require('../domain/accountingChanges');
 const CA = require('../domain/creditArrangements');
 const DR = require('../domain/depositRules');
 const { json } = require('../lib/handlers');
+const { recordAudit } = require('../lib/auditLog');
 
 /**
  * Deposit products: interest, withholding tax, overdrafts, fees, and the
@@ -280,8 +281,7 @@ router.delete('/:id', requireAuth(), async (req, res, next) => {
         if (e.code === '23503') return { referenced: e.table };
         throw e;
       }
-      await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'DEPOSIT_PRODUCT_DELETED','savings_product',$2,$3)`,
-        [req.auth.email, p.id, JSON.stringify(p)]);
+      await recordAudit(c, { actor: req.auth.email, action: 'DEPOSIT_PRODUCT_DELETED', entity: 'savings_product', entityId: p.id, before: JSON.stringify(p) });
       return { ok: true };
     });
     if (out.missing) return notFound(res, 'deposit product');
@@ -359,8 +359,7 @@ router.post('/', requireAuth(), async (req, res, next) => {
         `INSERT INTO savings_products (id, ${keys.join(', ')}) VALUES ($1, ${keys.map((_, i) => `$${i + 2}`).join(', ')})
          ON CONFLICT (id) DO NOTHING RETURNING *`, [id, ...keys.map((k) => cols[k])]);
       if (!rows.length) return { duplicate: true };
-      await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'DEPOSIT_PRODUCT_CREATED','savings_product',$2,$3)`,
-        [req.auth.email, id, JSON.stringify(rows[0])]);
+      await recordAudit(c, { actor: req.auth.email, action: 'DEPOSIT_PRODUCT_CREATED', entity: 'savings_product', entityId: id, after: JSON.stringify(rows[0]) });
       await PA.recordMappings(c, 'DEPOSIT', id, null, rows[0], req.auth.email);
       return { row: await withFees(c, rows[0]) };
     });
@@ -387,8 +386,7 @@ router.patch('/:id', requireAuth(), async (req, res, next) => {
       const { rows: [after] } = await c.query(
         `UPDATE savings_products SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`,
         [before.id, ...keys.map((k) => cols[k])]);
-      await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'DEPOSIT_PRODUCT_CHANGED','savings_product',$2,$3,$4)`,
-        [req.auth.email, before.id, JSON.stringify(before), JSON.stringify(after)]);
+      await recordAudit(c, { actor: req.auth.email, action: 'DEPOSIT_PRODUCT_CHANGED', entity: 'savings_product', entityId: before.id, before: JSON.stringify(before), after: JSON.stringify(after) });
       await PA.recordMappings(c, 'DEPOSIT', before.id, before, after, req.auth.email);
       return { row: await withFees(c, after) };
     });
@@ -454,8 +452,7 @@ router.post('/:id/fees', requireAuth(), async (req, res, next) => {
         `INSERT INTO savings_product_fees (product_id, ${keys.join(', ')}) VALUES ($1, ${keys.map((_, i) => `$${i + 2}`).join(', ')})
          ON CONFLICT (product_id, code) DO NOTHING RETURNING *`, [p.id, ...keys.map((k) => cols[k])]);
       if (!rows.length) return { duplicate: true };
-      await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'DEPOSIT_PRODUCT_FEE_CREATED','savings_product_fee',$2,$3)`,
-        [req.auth.email, rows[0].id, JSON.stringify(rows[0])]);
+      await recordAudit(c, { actor: req.auth.email, action: 'DEPOSIT_PRODUCT_FEE_CREATED', entity: 'savings_product_fee', entityId: rows[0].id, after: JSON.stringify(rows[0]) });
       await PA.recordMappings(c, 'DEPOSIT_FEE', `${p.id}:${rows[0].code}`, null, rows[0], req.auth.email);
       return { row: rows[0] };
     });
@@ -502,8 +499,7 @@ router.delete('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
           WHERE a.product_id = $1 AND t.kind = 'SAVINGS_FEE' AND t.allocation->>'fee' = $2`, [req.params.id, f.code]);
       if (n.n) return { applied: n.n };
       await c.query('DELETE FROM savings_product_fees WHERE id = $1', [f.id]);
-      await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'DEPOSIT_PRODUCT_FEE_DELETED','savings_product_fee',$2,$3)`,
-        [req.auth.email, f.id, JSON.stringify(f)]);
+      await recordAudit(c, { actor: req.auth.email, action: 'DEPOSIT_PRODUCT_FEE_DELETED', entity: 'savings_product_fee', entityId: f.id, before: JSON.stringify(f) });
       return { ok: true };
     });
     if (out.missing) return notFound(res, 'fee');

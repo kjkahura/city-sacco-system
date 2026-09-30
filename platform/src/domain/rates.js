@@ -9,6 +9,7 @@ const types = require('./productTypes');
 const { reschedule } = require('./installments');
 const { accrueInterest } = require('./interest');
 const G = require('./eodGuard');
+const { recordAudit } = require('../lib/auditLog');
 const { err } = acct;
 const { ymd, isoDate, addInterval, addDays } = S;
 
@@ -339,9 +340,7 @@ async function changeRate(c, loanId, { rate = null, spread = null, effectiveFrom
       appliedNow: Boolean(applied), ...(applied ? { rateInForce: applied.newRate, takesEffect: applied.effectiveFrom } : {}) },
     narration: note, createdBy,
   });
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_RATE_CHANGED','loan_account',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', l.id, JSON.stringify({ source: active.source, value: before }), JSON.stringify({ value, effectiveFrom: date, note })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_RATE_CHANGED', entity: 'loan_account', entityId: l.id, before: JSON.stringify({ source: active.source, value: before }), after: JSON.stringify({ value, effectiveFrom: date, note }) });
   return { loanId: l.id, source: active.source, from: before, to: value, effectiveFrom: date, applied, transaction: tx };
 }
 
@@ -393,8 +392,7 @@ async function updateSource(c, id, { name, notes } = {}, { createdBy } = {}) {
   const s = await findSource(c, id);
   const { rows: [after] } = await c.query('UPDATE index_rate_sources SET name = COALESCE($2, name), notes = COALESCE($3, notes) WHERE id = $1 RETURNING *',
     [s.id, name || null, notes ?? null]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'INDEX_SOURCE_CHANGED','index_rate',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', s.id, JSON.stringify(s), JSON.stringify(after)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'INDEX_SOURCE_CHANGED', entity: 'index_rate', entityId: s.id, before: JSON.stringify(s), after: JSON.stringify(after) });
   return after;
 }
 
@@ -404,8 +402,7 @@ async function deleteSource(c, id, { createdBy } = {}) {
   const n = await sourceUse(c, s.id);
   if (n > 0) throw err(`RATE_SOURCE_IN_USE: ${s.id} is used by ${n} product(s) or running loan(s)`, 409);
   await c.query('DELETE FROM index_rate_sources WHERE id = $1', [s.id]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'INDEX_SOURCE_DELETED','index_rate',$2,$3)`,
-    [createdBy || 'SYSTEM', s.id, JSON.stringify(s)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'INDEX_SOURCE_DELETED', entity: 'index_rate', entityId: s.id, before: JSON.stringify(s) });
   return { deleted: s.id };
 }
 
@@ -425,8 +422,7 @@ async function editIndexRate(c, sourceId, validFrom, { rate, notes } = {}, { cre
   const { rows: [after] } = await c.query(
     'UPDATE index_rates SET rate = COALESCE($3, rate), notes = COALESCE($4, notes) WHERE source_id = $1 AND valid_from = $2::date RETURNING *',
     [s.id, ymd(validFrom), rate === undefined ? null : Number(rate), notes ?? null]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'INDEX_RATE_CHANGED','index_rate',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', s.id, JSON.stringify(before), JSON.stringify(after)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'INDEX_RATE_CHANGED', entity: 'index_rate', entityId: s.id, before: JSON.stringify(before), after: JSON.stringify(after) });
   if (s.kind !== 'INTEREST') await updateTaxRates(c, { date: (await orgToday(c)) });
   return after;
 }
@@ -437,8 +433,7 @@ async function deleteIndexRate(c, sourceId, validFrom, { createdBy } = {}) {
   if (!before) throw err(`NO_VALUE_FROM: ${ymd(validFrom)}`, 404);
   await assertValueChangeable(c, s, before.valid_from);
   await c.query('DELETE FROM index_rates WHERE source_id = $1 AND valid_from = $2::date', [s.id, ymd(validFrom)]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'INDEX_RATE_DELETED','index_rate',$2,$3)`,
-    [createdBy || 'SYSTEM', s.id, JSON.stringify(before)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'INDEX_RATE_DELETED', entity: 'index_rate', entityId: s.id, before: JSON.stringify(before) });
   if (s.kind !== 'INTEREST') await updateTaxRates(c, { date: (await orgToday(c)) });
   return { deleted: { sourceId: s.id, validFrom: ymd(validFrom) } };
 }
@@ -472,9 +467,7 @@ async function setIndexRate(c, sourceId, { validFrom, rate, notes = null, create
     `INSERT INTO index_rates (source_id, valid_from, rate, notes, created_by) VALUES ($1,$2::date,$3,$4,$5)
      ON CONFLICT (source_id, valid_from) DO UPDATE SET rate = EXCLUDED.rate, notes = EXCLUDED.notes, created_by = EXCLUDED.created_by
      RETURNING *`, [sourceId, validFrom, Number(rate), notes, createdBy || 'SYSTEM']);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'INDEX_RATE_SET','index_rate',$2,$3)`,
-    [createdBy || 'SYSTEM', sourceId, JSON.stringify(r)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'INDEX_RATE_SET', entity: 'index_rate', entityId: sourceId, after: JSON.stringify(r) });
   // A tax rate already in force reaches its products at once.
   const { rows: [src] } = await c.query('SELECT kind FROM index_rate_sources WHERE id = $1', [sourceId]);
   if (src.kind !== 'INTEREST' && ymd(r.valid_from) <= (await orgToday(c))) await updateTaxRates(c, { date: (await orgToday(c)) });

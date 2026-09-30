@@ -25,14 +25,14 @@ const { err, round2 } = acct;
 
 const TYPES = ['CASH', 'MOBILE', 'TRANSFER', 'CHEQUE', 'INTERNAL', 'PAYROLL'];
 const ROLE = require('./roles');
+const { recordAudit } = require('../lib/auditLog');
 const TRANSACTION_TYPES = {
   LOAN: ['DISBURSEMENT', 'REPAYMENT', 'RECOVERY'],
   SAVINGS: ['DEPOSIT', 'WITHDRAWAL'],
 };
 
 async function audit(c, actor, action, id, before, after) {
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,'transaction_channel',$3,$4,$5)`,
-    [actor || 'SYSTEM', action, id, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: action, entity: 'transaction_channel', entityId: id, before: before ? JSON.stringify(before) : null, after: after ? JSON.stringify(after) : null });
 }
 
 function normConstraints(side, v) {

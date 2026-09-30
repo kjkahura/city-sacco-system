@@ -1,6 +1,7 @@
 'use strict';
 
 const acct = require('./accounting');
+const { recordAudit } = require('../lib/auditLog');
 const { err } = acct;
 
 /**
@@ -54,9 +55,7 @@ async function get(c) {
 }
 
 async function audit(c, actor, action, before, after) {
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,'organization',NULL,$3,$4)`,
-    [actor || 'SYSTEM', action, JSON.stringify(before), JSON.stringify(after)]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: action, entity: 'organization', entityId: null, before: JSON.stringify(before), after: JSON.stringify(after) });
 }
 
 /**

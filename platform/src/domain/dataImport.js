@@ -12,6 +12,7 @@ const CL = require('./clients');
 const CF = require('./customFields');
 const IDT = require('./idTemplates');
 const { err } = require('../lib/errors');
+const { recordAudit } = require('../lib/auditLog');
 
 /**
  * The Excel data import (the reference platform's Data Importing and its Excel Migration
@@ -795,9 +796,7 @@ async function execute(c, { asOf, data, layout = {} }, { importId, createdBy, us
       if (r.status === 'EXITED') await c.query('UPDATE members SET exited_on = COALESCE(exited_on, $2::date) WHERE id = $1', [x.id, asOf]);
       await c.query("INSERT INTO member_state_changes (member_id, to_state, action, actor) VALUES ($1, COALESCE($2, 'INACTIVE'), 'IMPORTED', $3)",
         [x.id, r.status, createdBy]);
-      await c.query(
-        `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'MEMBER_IMPORTED','member',$2,$3)`,
-        [createdBy, x.id, JSON.stringify({ memberNo: r.memberNo, importId })]);
+      await recordAudit(c, { actor: createdBy, action: 'MEMBER_IMPORTED', entity: 'member', entityId: x.id, after: JSON.stringify({ memberNo: r.memberNo, importId }) });
       push('members', { memberNo: r.memberNo, name: [r.firstName, r.middleName, r.lastName].filter(Boolean).join(' '), branch: r.branch,
         centre: r.centre, joinedOn: r.joinedOn || asOf, creditOfficer: credit, priorLoanCycles: r.priorLoanCycles || 0,
         idDocuments: shaped.map((d) => `${d.id_type} ${d.document_id}`) });
@@ -1152,9 +1151,7 @@ async function submit(c, { buffer, fileName }, { createdBy }) {
   const { rows: [imp] } = await c.query(
     `INSERT INTO data_imports (file_name, file_size, sha256, status, file, created_by)
      VALUES ($1,$2,$3,'QUEUED',$4,$5) RETURNING ${PUBLIC}`, [name, buffer.length, sha256, buffer, createdBy]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'DATA_IMPORT_UPLOADED','data_import',$2,$3)`,
-    [createdBy, imp.id, JSON.stringify({ fileName: name, size: buffer.length })]);
+  await recordAudit(c, { actor: createdBy, action: 'DATA_IMPORT_UPLOADED', entity: 'data_import', entityId: imp.id, after: JSON.stringify({ fileName: name, size: buffer.length }) });
   return imp;
 }
 
@@ -1214,9 +1211,7 @@ async function validate(c, id, { user, today, progress = null }) {
     [id, status, parsed.asOf, JSON.stringify(summary), JSON.stringify(errors.slice(0, 5000)), JSON.stringify(warnings), errorFile,
       status === 'PENDING_APPROVAL' ? JSON.stringify({ asOf: parsed.asOf, data: parsed.data, layout: parsed.layout }) : null,
       status === 'PENDING_APPROVAL' ? JSON.stringify(preview) : null]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'DATA_IMPORT_VALIDATED','data_import',$2,$3)`,
-    [imp.created_by, id, JSON.stringify({ status, errors: errors.length })]);
+  await recordAudit(c, { actor: imp.created_by, action: 'DATA_IMPORT_VALIDATED', entity: 'data_import', entityId: id, after: JSON.stringify({ status, errors: errors.length }) });
   return out;
 }
 
@@ -1252,9 +1247,7 @@ async function approve(c, id, { createdBy, user, note = null }) {
       `UPDATE data_imports SET status = 'FAILED', errors = $2, error_file = $3, decided_by = $4, decided_at = now(), decision_note = $5
        WHERE id = $1`,
       [imp.id, JSON.stringify(run.errors), (() => { try { return errorWorkbook(imp.file, run.errors); } catch { return null; } })(), createdBy, note]);
-    await c.query(
-      `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'DATA_IMPORT_FAILED','data_import',$2,$3)`,
-      [createdBy, imp.id, JSON.stringify({ errors: run.errors.length })]);
+    await recordAudit(c, { actor: createdBy, action: 'DATA_IMPORT_FAILED', entity: 'data_import', entityId: imp.id, after: JSON.stringify({ errors: run.errors.length }) });
     // Returned, not thrown: the FAILED record must be committed, the data not.
     return { failed: true, errors: run.errors, import: await get(c, imp.id) };
   }
@@ -1263,9 +1256,7 @@ async function approve(c, id, { createdBy, user, note = null }) {
        entry_id = $4, pending = NULL, decided_by = $5, decided_at = now(), decision_note = $6
      WHERE id = $1 RETURNING ${PUBLIC}`,
     [imp.id, JSON.stringify(run.created), JSON.stringify(run.warnings), run.entryId, createdBy, note]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'DATA_IMPORT_APPROVED','data_import',$2,$3)`,
-    [createdBy, imp.id, JSON.stringify(run.created)]);
+  await recordAudit(c, { actor: createdBy, action: 'DATA_IMPORT_APPROVED', entity: 'data_import', entityId: imp.id, after: JSON.stringify(run.created) });
   return out;
 }
 
@@ -1275,9 +1266,7 @@ async function reject(c, id, { createdBy, note = null }) {
   const { rows: [out] } = await c.query(
     `UPDATE data_imports SET status = 'REJECTED', pending = NULL, preview = NULL, decided_by = $2, decided_at = now(), decision_note = $3
      WHERE id = $1 RETURNING ${PUBLIC}`, [imp.id, createdBy, note]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'DATA_IMPORT_REJECTED','data_import',$2,$3)`,
-    [createdBy, imp.id, JSON.stringify({ note })]);
+  await recordAudit(c, { actor: createdBy, action: 'DATA_IMPORT_REJECTED', entity: 'data_import', entityId: imp.id, after: JSON.stringify({ note }) });
   return out;
 }
 

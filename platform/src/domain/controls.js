@@ -3,6 +3,7 @@
 const PERMS = require('../lib/permissions');
 
 const acct = require('./accounting');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 /**
@@ -63,10 +64,7 @@ async function updateControls(c, patch, { actor } = {}) {
   if (!sets.length) throw err('NO_UPDATABLE_FIELDS', 400);
   const { rows: [after] } = await c.query(
     `UPDATE lending_controls SET ${sets.join(', ')}, updated_at = now() WHERE id = 1 RETURNING *`, vals);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,'LENDING_CONTROLS_CHANGED','lending_controls','1',$2,$3)`,
-    [actor || 'SYSTEM', JSON.stringify(before), JSON.stringify(after)]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: 'LENDING_CONTROLS_CHANGED', entity: 'lending_controls', entityId: '1', before: JSON.stringify(before), after: JSON.stringify(after) });
   return after;
 }
 
@@ -256,9 +254,7 @@ async function setUserLimits(c, tenantId, userId, body = {}, { actor } = {}) {
   vals.push(u.id);
   const { rows: [after] } = await c.query(
     `UPDATE platform.users SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING id, email, ${Object.values(LIMIT_COLS).join(', ')}`, vals);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'USER_LIMITS_CHANGED','user',$2,$3,$4)`,
-    [actor || 'SYSTEM', String(u.id), JSON.stringify(limitsOf(u)), JSON.stringify(limitsOf(after))]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: 'USER_LIMITS_CHANGED', entity: 'user', entityId: String(u.id), before: JSON.stringify(limitsOf(u)), after: JSON.stringify(limitsOf(after)) });
   return (await staffLimits(c, tenantId)).find((x) => x.id === u.id);
 }
 

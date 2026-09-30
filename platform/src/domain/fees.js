@@ -9,6 +9,7 @@ const workflow = require('./workflow');
 const types = require('./productTypes');
 const FA = require('./feeAmortization');
 const { localDay: ymd } = require('../lib/dates');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 /**
@@ -455,9 +456,7 @@ async function adjust(c, feeId, { reason = '', createdBy } = {}) {
     amount: -amt, entryId: entry.entryId, allocation: { feeId: f.id, fee: f.name, reason, reversalOf: orig?.reference || null }, narration: reason, createdBy,
   });
   if (orig) await c.query('UPDATE transactions SET reversed_by = $1 WHERE id = $2', [tx.id, orig.id]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_FEE_ADJUSTED','loan_fee',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', f.id, JSON.stringify(f), JSON.stringify({ reason })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_FEE_ADJUSTED', entity: 'loan_fee', entityId: f.id, before: JSON.stringify(f), after: JSON.stringify({ reason }) });
   return tx;
 }
 
@@ -511,10 +510,7 @@ async function waive(c, feeId, { reason = '', createdBy } = {}) {
   if (f.installment_id) {
     await c.query('UPDATE loan_installments SET fee_due = GREATEST(0, fee_due - $1) WHERE id = $2', [remaining, f.installment_id]);
   }
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,'LOAN_FEE_WAIVED','loan_fee',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', feeId, JSON.stringify(f), JSON.stringify({ reason, remaining })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_FEE_WAIVED', entity: 'loan_fee', entityId: feeId, before: JSON.stringify(f), after: JSON.stringify({ reason, remaining }) });
   return savings.record(c, {
     reference: savings.ref('LFW'), kind: 'LOAN_FEE_WAIVED', memberId: l.member_id, loanAccountId: l.id,
     amount: -remaining, entryId, allocation: { feeId, fee: f.name, reason }, createdBy,

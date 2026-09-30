@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { hashPin, verifyPassword } = require('./passwords');
 const { signToken } = require('../tenancy/resolve');
 const { err } = require('../lib/errors');
+const { recordAudit } = require('../lib/auditLog');
 
 /**
  * Member sign-in for the portal.
@@ -96,11 +97,7 @@ async function activate(c, { memberNo, nationalId, phone, pin }) {
     'INSERT INTO member_credentials (member_id, phone, pin_hash) VALUES ($1,$2,$3)',
     [m.id, ph, await hashPin(pin)]
   );
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after)
-     VALUES ($1,'MEMBER_PORTAL_ACTIVATED','member',$2,$3)`,
-    [m.member_no, m.id, JSON.stringify({ phone: ph })]
-  );
+  await recordAudit(c, { actor: m.member_no, action: 'MEMBER_PORTAL_ACTIVATED', entity: 'member', entityId: m.id, after: JSON.stringify({ phone: ph }) });
   return { memberNo: m.member_no, phone: ph, activated: true };
 }
 

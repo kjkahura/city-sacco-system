@@ -2,6 +2,7 @@
 
 const PERMS = require('../lib/permissions');
 const { err } = require('../lib/errors');
+const { recordAudit } = require('../lib/auditLog');
 
 /**
  * Roles (the reference platform's Administration > Access > Roles). A role is a named set of
@@ -129,8 +130,7 @@ async function create(c, body = {}, { createdBy, actor = null } = {}) {
      VALUES ($1,$2,$3,$4,$5,$9,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING *`,
     [code, name, baseRole, userType, access.api, permissions, body.notes || null, createdBy || null, access.console]);
   if (!r) throw err(`ROLE_EXISTS: a role with code ${code} or name ${name} exists`, 409);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'ROLE_CREATED','role',$2,$3)`,
-    [createdBy || 'SYSTEM', code, JSON.stringify(r)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'ROLE_CREATED', entity: 'role', entityId: code, after: JSON.stringify(r) });
   return shape(r);
 }
 
@@ -160,8 +160,7 @@ async function update(c, code, body = {}, { createdBy, actor = null } = {}) {
          permissions = EXCLUDED.permissions, notes = EXCLUDED.notes RETURNING *`,
       [before.code, name, before.user_type, access.api,
         permissions, body.notes !== undefined ? body.notes || null : before.notes, createdBy || null, access.console]);
-    await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'ROLE_UPDATED','role',$2,$3,$4)`,
-      [createdBy || 'SYSTEM', before.code, JSON.stringify(before), JSON.stringify(r)]);
+    await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'ROLE_UPDATED', entity: 'role', entityId: before.code, before: JSON.stringify(before), after: JSON.stringify(r) });
     return { role: shape(builtinRow(before.code, r)), baseMoved: false };
   }
   const name = body.name !== undefined ? String(body.name || '').trim() : before.name;
@@ -195,8 +194,7 @@ async function update(c, code, body = {}, { createdBy, actor = null } = {}) {
       'UPDATE platform.users SET role = $3, updated_at = now() WHERE tenant_id = $1 AND role_code = $2 RETURNING id',
       [tid, before.code, baseRole]));
   }
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'ROLE_UPDATED','role',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', before.code, JSON.stringify(before), JSON.stringify(r)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'ROLE_UPDATED', entity: 'role', entityId: before.code, before: JSON.stringify(before), after: JSON.stringify(r) });
   return { role: shape(r), baseMoved: moved.map((u) => u.id) };
 }
 
@@ -207,8 +205,7 @@ async function remove(c, code, { createdBy, actor = null } = {}) {
   const used = (await usage(c)).get(r.code) || 0;
   if (used) throw err(`ROLE_IN_USE: ${used} user(s) hold it; give them another role first`, 409);
   await c.query('DELETE FROM roles WHERE code = $1', [r.code]);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'ROLE_DELETED','role',$2,$3)`,
-    [createdBy || 'SYSTEM', r.code, JSON.stringify(r)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'ROLE_DELETED', entity: 'role', entityId: r.code, before: JSON.stringify(r) });
   return { deleted: r.code };
 }
 

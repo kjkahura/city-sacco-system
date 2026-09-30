@@ -2,6 +2,7 @@
 
 const acct = require('./accounting');
 const loans = require('./loans');
+const { recordAudit } = require('../lib/auditLog');
 
 const { err, round2 } = acct;
 
@@ -66,8 +67,7 @@ async function open(c, groupRef, body = {}, { user = null, actor } = {}) {
     }, { solidarityGroupId: g.id });
     made.push(l);
   }
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'SOLIDARITY_LOANS_OPENED','member',$2,$3)`,
-    [actor || 'SYSTEM', g.id, JSON.stringify({ group: g.member_no, product: p.id, loans: made.map((l) => ({ loan: l.account_no, principal: Number(l.principal) })) })]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: 'SOLIDARITY_LOANS_OPENED', entity: 'member', entityId: g.id, after: JSON.stringify({ group: g.member_no, product: p.id, loans: made.map((l) => ({ loan: l.account_no, principal: Number(l.principal) })) }) });
   return forGroup(c, g.id);
 }
 

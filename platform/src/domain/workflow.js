@@ -35,6 +35,7 @@ const FA = require('./feeAmortization');
 const customFields = require('./customFields');
 const CA = require('./creditArrangements');
 const { localDay: ymd } = require('../lib/dates');
+const { recordAudit } = require('../lib/auditLog');
 const {
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMaySetDisbursementConditions,
 } = require('./controls');
@@ -308,11 +309,7 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
   if (name === 'APPROVE') await freezeSettings(c, l.id);
   if (name === 'UNDO_APPROVE') await thawSettings(c, l.id);
   await history(c, l.id, { from: l.status, to, action: name, actor: createdBy, note });
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,$2,'loan_account',$3,$4,$5)`,
-    [createdBy || 'SYSTEM', `LOAN_${name}`, l.id,
-      JSON.stringify({ status: l.status }), JSON.stringify({ status: to, note })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: `LOAN_${name}`, entity: 'loan_account', entityId: l.id, before: JSON.stringify({ status: l.status }), after: JSON.stringify({ status: to, note }) });
   return rows[0];
 }
 
@@ -429,9 +426,7 @@ async function deleteLoan(c, loanId, { note = null, createdBy } = {}) {
   const snapshot = { ...l };
   // Everything that hangs off a loan is keyed to it ON DELETE CASCADE.
   await c.query('DELETE FROM loan_accounts WHERE id = $1', [l.id]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_DELETED','loan_account',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', l.id, JSON.stringify(snapshot), JSON.stringify({ note })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_DELETED', entity: 'loan_account', entityId: l.id, before: JSON.stringify(snapshot), after: JSON.stringify({ note }) });
   return { deleted: l.id, accountNo: l.account_no };
 }
 
@@ -575,12 +570,7 @@ async function amend(c, loanId, patch, { actor, user = null } = {}) {
     await c.query('UPDATE loan_accounts SET custom_schedule = NULL WHERE id = $1', [l.id]);
     rows[0].custom_schedule = null;
   }
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,'LOAN_AMENDED','loan_account',$2,$3,$4)`,
-    [actor || 'SYSTEM', l.id,
-      JSON.stringify(Object.fromEntries(keys.map((k) => [k, l[COLUMN[k]]]))),
-      JSON.stringify(Object.fromEntries(keys.map((k) => [k, patch[k]])))]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: 'LOAN_AMENDED', entity: 'loan_account', entityId: l.id, before: JSON.stringify(Object.fromEntries(keys.map((k) => [k, l[COLUMN[k]]]))), after: JSON.stringify(Object.fromEntries(keys.map((k) => [k, patch[k]]))) });
   return rows[0];
 }
 

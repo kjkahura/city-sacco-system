@@ -52,6 +52,7 @@ const ENTITIES = {
 };
 const TYPES = ['FREE_TEXT', 'SELECTION', 'NUMBER', 'CHECKBOX', 'DATE', 'DATE_TIME', 'MEMBER_LINK', 'USER_LINK'];
 const ROLE = require('./roles');
+const { recordAudit } = require('../lib/auditLog');
 const MAX_LENGTH = 2048;
 const QUOTA = 200;
 
@@ -62,8 +63,7 @@ function entityOf(name) {
 }
 
 async function audit(c, actor, action, entity, id, before, after) {
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,$3,$4,$5,$6)`,
-    [actor || 'SYSTEM', action, entity, id == null ? null : String(id), before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: action, entity: entity, entityId: id == null ? null : String(id), before: before ? JSON.stringify(before) : null, after: after ? JSON.stringify(after) : null });
 }
 
 // The reference platform's Rights on a custom field: roles, built-in or the tenant's own.

@@ -16,6 +16,7 @@ const { accrueInterest, prepaidToPrincipal } = require('./interest');
 const FA = require('./feeAmortization');
 const { pageQuery } = require('../lib/page');
 const { utcDay: ymd } = require('../lib/dates');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 const { lock, balances, isAccrual, interestAccrues, writeOffCredit, post, booksEntries } = ledger;
 
@@ -338,9 +339,7 @@ async function pending(c, loanId) {
 }
 
 async function audit(c, actor, action, id, after) {
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,$2,'loan_write_off_request',$3,$4)`,
-    [actor || 'SYSTEM', action, id, JSON.stringify(after)]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: action, entity: 'loan_write_off_request', entityId: id, after: JSON.stringify(after) });
 }
 
 /**
@@ -616,10 +615,7 @@ async function releaseCall(c, loanId, guarantorId, { note = null, createdBy } = 
   const { l } = await writtenOff(c, loanId);
   const { g, callLeft } = await calledGuarantor(c, l.id, guarantorId);
   const { rows: [out] } = await c.query("UPDATE loan_guarantors SET status = 'RELEASED' WHERE id = $1 RETURNING *", [g.id]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,'GUARANTOR_CALL_RELEASED','loan_guarantor',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', g.id, JSON.stringify({ status: 'CALLED', callLeft }), JSON.stringify({ status: 'RELEASED', note, loan: l.account_no })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'GUARANTOR_CALL_RELEASED', entity: 'loan_guarantor', entityId: g.id, before: JSON.stringify({ status: 'CALLED', callLeft }), after: JSON.stringify({ status: 'RELEASED', note, loan: l.account_no }) });
   return out;
 }
 

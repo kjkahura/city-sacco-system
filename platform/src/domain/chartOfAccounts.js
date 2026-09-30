@@ -23,6 +23,7 @@
  */
 
 const acct = require('./accounting');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 const TYPES = ['ASSET', 'LIABILITY', 'EQUITY', 'INCOME', 'EXPENSE'];
@@ -179,9 +180,8 @@ const bool = (v, name) => {
   throw err(`${name}_IS_TRUE_OR_FALSE`, 400);
 };
 
-const audit = (c, actor, action, entityId, before, after) => c.query(
-  'INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,\'gl_account\',$3,$4,$5)',
-  [actor || 'SYSTEM', action, entityId, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null]);
+const audit = (c, actor, action, entityId, before, after) => recordAudit(c, {
+  actor: actor || 'SYSTEM', action, entity: 'gl_account', entityId, before: before ? JSON.stringify(before) : null, after: after ? JSON.stringify(after) : null });
 
 /** A parent must exist, have the same type, and be a header. */
 async function checkParent(c, parentCode, type, selfCode = null) {

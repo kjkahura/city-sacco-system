@@ -71,6 +71,7 @@ const ops = { lock, buildSchedule, reschedule, accrueInterest, fees };
 
 // The pattern filler is shared with deposit accounts (./accountNumbers).
 const { fillPattern } = require('./accountNumbers');
+const { recordAudit } = require('../lib/auditLog');
 
 async function nextAccountNo(c, p) {
   const pattern = p.id_pattern || 'LN######';
@@ -176,11 +177,7 @@ async function apply(c, params, { refinance = null, settles = refinance?.of || n
     names.map((k) => cols[k])
   );
   await workflow.history(c, rows[0].id, { from: null, to: status, action: 'APPLY', actor: createdBy });
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after)
-     VALUES ($1,'LOAN_APPLIED','loan_account',$2,$3)`,
-    [createdBy || 'SYSTEM', rows[0].id, JSON.stringify(rows[0])]
-  );
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_APPLIED', entity: 'loan_account', entityId: rows[0].id, after: JSON.stringify(rows[0]) });
   // The pieces an application may arrive with. Each may also be added later.
   if (types.forLoan(p).plansTranches) {
     if (Array.isArray(plannedTranches) && plannedTranches.length) await tranches.setTranches(c, rows[0].id, plannedTranches, { createdBy });

@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const acct = require('./accounting');
+const { recordAudit } = require('../lib/auditLog');
 const { err } = acct;
 
 /**
@@ -89,8 +90,7 @@ async function upload(c, loanId, { title = null, description = null, fileName, d
     `INSERT INTO loan_attachments (loan_id, title, description, file_name, content_type, size, sha256, data, created_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
     [l.id, String(title || name.split('.')[0]).slice(0, 200), description, name, type, buf.length, sha, buf, createdBy || 'SYSTEM']);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'LOAN_ATTACHMENT_UPLOADED','loan_attachment',$2,$3)`,
-    [createdBy || 'SYSTEM', r.id, JSON.stringify({ loan: l.account_no, fileName: name, size: buf.length, sha256: sha })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_ATTACHMENT_UPLOADED', entity: 'loan_attachment', entityId: r.id, after: JSON.stringify({ loan: l.account_no, fileName: name, size: buf.length, sha256: sha }) });
   return view(r);
 }
 
@@ -120,8 +120,7 @@ async function update(c, loanId, attachmentId, { title, description, createdBy }
     `UPDATE loan_attachments SET title = COALESCE($2, title), description = CASE WHEN $4 THEN $3 ELSE description END,
        updated_by = $5, updated_at = now() WHERE id = $1 RETURNING *`,
     [r.id, title === undefined ? null : String(title).slice(0, 200), description ?? null, description !== undefined, createdBy || 'SYSTEM']);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_ATTACHMENT_EDITED','loan_attachment',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', r.id, JSON.stringify({ title: r.title, description: r.description }), JSON.stringify({ title: out.title, description: out.description })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_ATTACHMENT_EDITED', entity: 'loan_attachment', entityId: r.id, before: JSON.stringify({ title: r.title, description: r.description }), after: JSON.stringify({ title: out.title, description: out.description }) });
   return view(out);
 }
 
@@ -130,8 +129,7 @@ async function remove(c, loanId, attachmentId, { createdBy } = {}) {
   const { rows: [r] } = await c.query(
     'DELETE FROM loan_attachments WHERE id = $1 AND loan_id = $2 RETURNING id, file_name, size, sha256', [attachmentId, l.id]);
   if (!r) throw err('ATTACHMENT_NOT_FOUND', 404);
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'LOAN_ATTACHMENT_DELETED','loan_attachment',$2,$3)`,
-    [createdBy || 'SYSTEM', r.id, JSON.stringify({ loan: l.account_no, fileName: r.file_name, size: r.size, sha256: r.sha256 })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_ATTACHMENT_DELETED', entity: 'loan_attachment', entityId: r.id, before: JSON.stringify({ loan: l.account_no, fileName: r.file_name, size: r.size, sha256: r.sha256 }) });
   return { deleted: r.id, fileName: r.file_name };
 }
 

@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const acct = require('./accounting');
+const { recordAudit } = require('../lib/auditLog');
 const { err } = acct;
 
 /**
@@ -37,8 +38,7 @@ const ASSIGNMENTS = ['BRANCH', 'CENTRE', 'CREDIT_OFFICER'];
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/;
 
 async function audit(c, actor, action, entity, id, before, after) {
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,$3,$4,$5,$6)`,
-    [actor || 'SYSTEM', action, entity, id == null ? null : String(id), before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: action, entity: entity, entityId: id == null ? null : String(id), before: before ? JSON.stringify(before) : null, after: after ? JSON.stringify(after) : null });
 }
 
 // --------------------------------------------------------------------------

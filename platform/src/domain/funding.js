@@ -3,6 +3,7 @@
 const acct = require('./accounting');
 const savings = require('./savings');
 const ledger = require('./ledger');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 /**
@@ -67,9 +68,7 @@ async function addFundingSource(c, loanId, { savingsAccountId, amount, funderRat
   const { rows } = await c.query(
     `INSERT INTO loan_funding_sources (loan_id, savings_account_id, member_id, amount, funder_rate)
      VALUES ($1,$2,$3,$4,$5) RETURNING *`, [l.id, a.id, a.member_id, amt, rate]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'FUNDING_SOURCE_ADDED','loan_funding_source',$2,$3)`,
-    [createdBy || 'SYSTEM', rows[0].id, JSON.stringify(rows[0])]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'FUNDING_SOURCE_ADDED', entity: 'loan_funding_source', entityId: rows[0].id, after: JSON.stringify(rows[0]) });
   return rows[0];
 }
 
@@ -79,9 +78,7 @@ async function removeFundingSource(c, fundingId, { createdBy } = {}) {
   const l = await ledger.lock(c, f.loan_id);
   if (!['PARTIAL_APPLICATION', 'PENDING_APPROVAL'].includes(l.status)) throw err(`CANNOT_REMOVE_FUNDING_IN_STATE: ${l.status}`, 409);
   await c.query("UPDATE loan_funding_sources SET status = 'RELEASED' WHERE id = $1", [fundingId]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before) VALUES ($1,'FUNDING_SOURCE_REMOVED','loan_funding_source',$2,$3)`,
-    [createdBy || 'SYSTEM', fundingId, JSON.stringify(f)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'FUNDING_SOURCE_REMOVED', entity: 'loan_funding_source', entityId: fundingId, before: JSON.stringify(f) });
   return { removed: true };
 }
 

@@ -15,6 +15,7 @@ const { err, round2 } = acct;
 
 const ledger = require('./ledger');
 const { localDay: ymd } = require('../lib/dates');
+const { recordAudit } = require('../lib/auditLog');
 
 async function forLoan(c, loanId) {
   const { rows } = await c.query(
@@ -56,9 +57,7 @@ async function setTranches(c, loanId, tranches, { createdBy } = {}) {
        RETURNING *`, [l.id, n, t.amount, t.expectedOn]);
     out.push(rows[0]);
   }
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'TRANCHES_SET','loan_account',$2,$3)`,
-    [createdBy || 'SYSTEM', l.id, JSON.stringify(planned)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'TRANCHES_SET', entity: 'loan_account', entityId: l.id, after: JSON.stringify(planned) });
   return out;
 }
 

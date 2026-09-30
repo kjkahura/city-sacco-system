@@ -1,6 +1,7 @@
 'use strict';
 
 const acct = require('./accounting');
+const { recordAudit } = require('../lib/auditLog');
 const { err } = acct;
 
 /**
@@ -60,9 +61,7 @@ async function exclude(c, loanId, { job, date, error }) {
      ON CONFLICT (loan_id) WHERE included_at IS NULL DO NOTHING RETURNING *`,
     [loanId, job, date, message, code]);
   if (x) {
-    await c.query(
-      `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ('EOD','LOAN_EXCLUDED_FROM_EOD','loan_account',$1,$2)`,
-      [loanId, JSON.stringify({ job, businessDate: date, error: message })]);
+    await recordAudit(c, { actor: 'EOD', action: 'LOAN_EXCLUDED_FROM_EOD', entity: 'loan_account', entityId: loanId, after: JSON.stringify({ job, businessDate: date, error: message }) });
   }
   return x || null;
 }

@@ -7,6 +7,7 @@ const ledger = require('./ledger');
 const types = require('./productTypes');
 const fees = require('./fees');
 const G = require('./eodGuard');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 const { ymd, isoDate } = S;
 
@@ -110,9 +111,7 @@ async function edit(c, id, { installment, amount, applyOn, note, asOf = null, cr
   vals.push(id);
   const { rows: [r] } = await c.query(
     `UPDATE loan_planned_fees SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length} RETURNING *`, vals);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'PLANNED_FEE_CHANGED','loan_planned_fee',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', String(id), JSON.stringify(p), JSON.stringify(r)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'PLANNED_FEE_CHANGED', entity: 'loan_planned_fee', entityId: String(id), before: JSON.stringify(p), after: JSON.stringify(r) });
   return r;
 }
 

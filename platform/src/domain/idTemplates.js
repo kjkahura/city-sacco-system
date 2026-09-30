@@ -3,6 +3,7 @@
 const acct = require('./accounting');
 const { err } = acct;
 const DUP = require('./duplicates');
+const { recordAudit } = require('../lib/auditLog');
 
 /**
  * ID templates, after the reference platform's page of that name: the kinds of
@@ -42,8 +43,7 @@ function maskMatches(mask, v) {
 }
 
 async function audit(c, actor, action, entity, id, before, after) {
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,$3,$4,$5,$6)`,
-    [actor || 'SYSTEM', action, entity, id, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: action, entity: entity, entityId: id, before: before ? JSON.stringify(before) : null, after: after ? JSON.stringify(after) : null });
 }
 
 async function list(c) {

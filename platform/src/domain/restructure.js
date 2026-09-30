@@ -16,6 +16,7 @@ const types = require('./productTypes');
 const writeOffs = require('./writeOffs');
 const accruals = require('./accruals');
 const { localDay: ymd } = require('../lib/dates');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 /**
@@ -354,10 +355,7 @@ async function requestRefinance(c, loanId, params = {}) {
   await c.query(
     'UPDATE loan_accounts SET refinance_capitalize = $2, refinance_carry_fees = $3, keep_account_no = $4 WHERE id = $1',
     [application.id, capitalize && typeof capitalize === 'object' ? JSON.stringify(s.cap) : null, carry, keepAccountNo === true || keepAccountNo === 'true']);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after)
-     VALUES ($1,'LOAN_TOP_UP_REQUESTED','loan_account',$2,$3)`,
-    [createdBy || 'SYSTEM', old.id, JSON.stringify({ application: application.account_no, principal: gross, settlement: s.amount, arrears, capitalize: s.cap })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_TOP_UP_REQUESTED', entity: 'loan_account', entityId: old.id, after: JSON.stringify({ application: application.account_no, principal: gross, settlement: s.amount, arrears, capitalize: s.cap }) });
   return { application: await L.read(c, application.id), quote: await quote(c, application.id) };
 }
 

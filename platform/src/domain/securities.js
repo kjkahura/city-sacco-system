@@ -15,6 +15,7 @@ const { err, round2 } = acct;
 const ledger = require('./ledger');
 const customFields = require('./customFields');
 const eligibility = require('./eligibility');
+const { recordAudit } = require('../lib/auditLog');
 
 async function addCollateral(c, loanId, { assetType = 'OTHER', description, value, originalCurrency = null, originalValue = null, reference = null, note = null, createdBy, customFields: cf = undefined, user = null }) {
   const l = await ledger.lock(c, loanId);
@@ -28,9 +29,7 @@ async function addCollateral(c, loanId, { assetType = 'OTHER', description, valu
     `INSERT INTO loan_collateral (loan_id, asset_type, description, value, original_currency, original_value, reference, note, added_by, custom_fields)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
     [l.id, assetType, description, round2(value), originalCurrency, originalValue, reference, note, createdBy || 'SYSTEM', JSON.stringify(values)]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after) VALUES ($1,'COLLATERAL_ADDED','loan_collateral',$2,$3)`,
-    [createdBy || 'SYSTEM', rows[0].id, JSON.stringify(rows[0])]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'COLLATERAL_ADDED', entity: 'loan_collateral', entityId: rows[0].id, after: JSON.stringify(rows[0]) });
   return rows[0];
 }
 
@@ -50,9 +49,7 @@ async function releaseCollateral(c, collateralId, { status = 'RELEASED', note = 
   const { rows } = await c.query(
     `UPDATE loan_collateral SET status = $2, released_at = now(), note = COALESCE(note || ' | ', '') || $3 WHERE id = $1 RETURNING *`,
     [collateralId, status, `${status.toLowerCase()}: ${note || ''}`]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,'loan_collateral',$3,$4,$5)`,
-    [createdBy || 'SYSTEM', `COLLATERAL_${status}`, collateralId, JSON.stringify(col), JSON.stringify(rows[0])]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: `COLLATERAL_${status}`, entity: 'loan_collateral', entityId: collateralId, before: JSON.stringify(col), after: JSON.stringify(rows[0]) });
   return rows[0];
 }
 

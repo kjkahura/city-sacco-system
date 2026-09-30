@@ -6,6 +6,7 @@ const acct = require('./accounting');
 const NUMBERS = require('./accountNumbers');
 const CF = require('./customFields');
 const SEARCH = require('../lib/searchCriteria');
+const { recordAudit } = require('../lib/auditLog');
 
 const { err, round2 } = acct;
 
@@ -75,8 +76,7 @@ function assertAllowed(user, code) {
 }
 
 async function audit(c, actor, action, id, before, after) {
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,'credit_arrangement',$3,$4,$5)`,
-    [actor || 'SYSTEM', action, String(id), before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: action, entity: 'credit_arrangement', entityId: String(id), before: before ? JSON.stringify(before) : null, after: after ? JSON.stringify(after) : null });
 }
 
 // --------------------------------------------------------------------------

@@ -7,6 +7,7 @@ const acct = require('./accounting');
 const savings = require('./savings');
 const channels = require('./channels');
 const { pageQuery } = require('../lib/page');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 const round4 = (n) => Math.round((Number(n) + Number.EPSILON) * 1e4) / 1e4;
@@ -130,11 +131,7 @@ async function declare(c, { financialYear, ratePercent, recordDate, basis = 'UNI
     [financialYear, rate, recordDate || null, basis, glPayable]
   );
   if (!rows.length) throw err(`DIVIDEND_ALREADY_DECLARED_FOR_${financialYear}`, 409);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after)
-     VALUES ($1,'DIVIDEND_DECLARED','dividend',$2,$3)`,
-    [createdBy || 'SYSTEM', rows[0].id, JSON.stringify(rows[0])]
-  );
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'DIVIDEND_DECLARED', entity: 'dividend', entityId: rows[0].id, after: JSON.stringify(rows[0]) });
   return rows[0];
 }
 

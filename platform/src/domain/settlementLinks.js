@@ -4,6 +4,7 @@ const acct = require('./accounting');
 const ledger = require('./ledger');
 const savings = require('./savings');
 const branches = require('./branches');
+const { recordAudit } = require('../lib/auditLog');
 const { err } = acct;
 
 /**
@@ -67,9 +68,7 @@ async function link(c, loanId, { savingsAccountId, createdBy, note = null } = {}
   if (l.settlement_account_id === a.id) throw err('ALREADY_LINKED_TO_THAT_ACCOUNT', 409);
   const before = l.settlement_account_id;
   await c.query('UPDATE loan_accounts SET settlement_account_id = $1, settlement_linked_at = now(), updated_at = now() WHERE id = $2', [a.id, l.id]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_SETTLEMENT_LINKED','loan_account',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', l.id, JSON.stringify({ settlementAccountId: before }), JSON.stringify({ settlementAccountId: a.id, accountNo: a.account_no, note })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_SETTLEMENT_LINKED', entity: 'loan_account', entityId: l.id, before: JSON.stringify({ settlementAccountId: before }), after: JSON.stringify({ settlementAccountId: a.id, accountNo: a.account_no, note }) });
   return { loanId: l.id, accountNo: l.account_no, settlementAccountId: a.id, settlementAccountNo: a.account_no, option: l.settlement_option };
 }
 
@@ -87,9 +86,7 @@ async function unlink(c, loanId, { createdBy, note = null } = {}) {
   if (m?.branch_id && m.branch_id !== a.branch_id && !(await otherLoans(c, a.id, l.id)).length) {
     moved = await branches.moveAccount(c, { kind: 'SAVINGS', accountId: a.id, branchId: m.branch_id, createdBy });
   }
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,'LOAN_SETTLEMENT_UNLINKED','loan_account',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', l.id, JSON.stringify({ settlementAccountId: a.id }), JSON.stringify({ note, movedTo: moved?.to || null })]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'LOAN_SETTLEMENT_UNLINKED', entity: 'loan_account', entityId: l.id, before: JSON.stringify({ settlementAccountId: a.id }), after: JSON.stringify({ note, movedTo: moved?.to || null }) });
   return { loanId: l.id, unlinked: a.account_no, movedToMemberBranch: Boolean(moved) };
 }
 

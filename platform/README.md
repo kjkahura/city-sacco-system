@@ -167,6 +167,7 @@ src/
                        status, paging headers
     errors.js          err(message, status), the error every layer throws
     dates.js           local and UTC calendar days as yyyy-MM-dd
+    auditLog.js        recordAudit, the one writer of audit_log rows
 public/                the back office console: index.html, app.js, styles.css
 portal/                the member portal: index.html, app.js, api.js, styles.css
 bin/cli.js             migrate, provision, drift, eod, backup, close, returns

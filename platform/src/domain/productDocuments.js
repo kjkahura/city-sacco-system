@@ -5,6 +5,7 @@ const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
 const customFields = require('./customFields');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 const { ymd } = S;
 
@@ -37,8 +38,7 @@ const { ymd } = S;
  */
 
 async function audit(c, actor, action, id, before, after) {
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,'product_document',$3,$4,$5)`,
-    [actor || 'SYSTEM', action, id, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: action, entity: 'product_document', entityId: id, before: before ? JSON.stringify(before) : null, after: after ? JSON.stringify(after) : null });
 }
 
 async function productExists(c, kind, productId) {

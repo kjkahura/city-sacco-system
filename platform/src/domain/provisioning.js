@@ -2,6 +2,7 @@
 
 const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
+const { recordAudit } = require('../lib/auditLog');
 const { err, round2 } = acct;
 
 /**
@@ -64,11 +65,7 @@ async function setBand(c, code, { ratePercent, minDays, maxDays, label, sourceNo
      maxDays !== undefined, maxDays ?? null, label ?? null, sourceNote ?? null]
   );
 
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,'PROVISION_BAND_CHANGED','provision_band',$2,$3,$4)`,
-    [createdBy || 'SYSTEM', code, JSON.stringify(before), JSON.stringify(rows[0])]
-  );
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'PROVISION_BAND_CHANGED', entity: 'provision_band', entityId: code, before: JSON.stringify(before), after: JSON.stringify(rows[0]) });
   return rows[0];
 }
 
@@ -219,11 +216,7 @@ async function run(c, { asAt = null, createdBy = 'SYSTEM' } = {}) {
     await c.query('UPDATE provision_runs SET entry_id = $1 WHERE id = $2', [entryId, runRow.id]);
   }
 
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, after)
-     VALUES ($1,'PROVISION_RUN','provision_run',$2,$3)`,
-    [createdBy, runRow.id, JSON.stringify({ asAt: date, movement: calc.movement, entryId })]
-  );
+  await recordAudit(c, { actor: createdBy, action: 'PROVISION_RUN', entity: 'provision_run', entityId: runRow.id, after: JSON.stringify({ asAt: date, movement: calc.movement, entryId }) });
 
   return { ...calc, runId: runRow.id, entryId, posted: true };
 }
@@ -239,11 +232,7 @@ async function reverseRun(c, runId, { reason = '', createdBy = 'SYSTEM' } = {}) 
     await acct.reverse(c, r.entry_id, `Provision run reversed: ${reason}`, createdBy);
   }
   await c.query("UPDATE provision_runs SET status = 'REVERSED' WHERE id = $1", [runId]);
-  await c.query(
-    `INSERT INTO audit_log (actor, action, entity, entity_id, before, after)
-     VALUES ($1,'PROVISION_RUN_REVERSED','provision_run',$2,$3,$4)`,
-    [createdBy, runId, JSON.stringify(r), JSON.stringify({ reason })]
-  );
+  await recordAudit(c, { actor: createdBy, action: 'PROVISION_RUN_REVERSED', entity: 'provision_run', entityId: runId, before: JSON.stringify(r), after: JSON.stringify({ reason }) });
   return { runId, reversed: true, reason };
 }
 

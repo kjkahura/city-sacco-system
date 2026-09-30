@@ -4,6 +4,7 @@ const { orgToday } = require('../lib/orgDate');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
+const { recordAudit } = require('../lib/auditLog');
 const { err } = acct;
 const { ymd, isoDate } = S;
 
@@ -36,8 +37,7 @@ async function markChanged(c, from) {
 }
 
 async function audit(c, actor, action, id, before, after) {
-  await c.query(`INSERT INTO audit_log (actor, action, entity, entity_id, before, after) VALUES ($1,$2,'holiday',$3,$4,$5)`,
-    [actor || 'SYSTEM', action, id, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null]);
+  await recordAudit(c, { actor: actor || 'SYSTEM', action: action, entity: 'holiday', entityId: id, before: before ? JSON.stringify(before) : null, after: after ? JSON.stringify(after) : null });
 }
 
 const shape = (h) => ({
@@ -180,8 +180,7 @@ async function sync(c, { createdBy = 'EOD', force = false } = {}) {
   }
   await c.query('UPDATE organization_settings SET calendar_changed_from = NULL WHERE id = 1');
   const out = { synced: true, changedFrom: s.calendar_changed_from ? ymd(s.calendar_changed_from) : null, loans: touched, installments: moved };
-  await c.query(`INSERT INTO audit_log (actor, action, entity, after) VALUES ($1,'HOLIDAY_SYNC_COMPLETED','calendar',$2)`,
-    [createdBy || 'SYSTEM', JSON.stringify(out)]);
+  await recordAudit(c, { actor: createdBy || 'SYSTEM', action: 'HOLIDAY_SYNC_COMPLETED', entity: 'calendar', after: JSON.stringify(out) });
   return out;
 }
 
