@@ -103,8 +103,10 @@ src/
     productTypes/      one strategy per product type (FIXED_TERM with
                        INTEREST_FREE, DYNAMIC_TERM, TRANCHED, REVOLVING)
                        and the dispatcher, index.js
-    loans.js           application, disbursement, repayment, reversal,
-                       account numbering
+    loans/             application, disbursement, repayment, reversal,
+                       account numbering: core.js, disbursement.js,
+                       repayment.js, reversals.js; index.js keeps the one
+                       public API
     writeOffs.js       write-off against the allowance, recoveries from the
                        member, guarantors and collateral, and their reversal
     productAccounting.js  which GL mappings a product's settings require
@@ -112,9 +114,12 @@ src/
                        daily or monthly
     accountingChanges.js  changing a product's accounting method in use
     branches.js        branches, inter-branch rules, closures, moving accounts
-    savings.js         deposits: legs across zero, fees, interest, overdrafts,
+    savings/           deposits: legs across zero, fees, interest, overdrafts,
                        limits, maturity, dormancy, rate changes, the account
-                       life cycle (approval, lock, arrears, write-off, reopen)
+                       life cycle (approval, lock, arrears, write-off, reopen):
+                       core.js, funds.js, interest.js, transactions.js,
+                       reversals.js, terms.js, lifecycle.js, daily.js (the
+                       end of day); index.js keeps the one public API
     depositRules.js    what a deposit product gives its accounts: types, rates
                        on a day, days in a year, posting dates, the checks
     fees.js            product fees of every type, applying, waiving, settling
@@ -127,7 +132,7 @@ src/
     securities.js      collateral assets alongside guarantors
     tax.js             value-added tax on interest, fees and penalties
     funding.js         funding sources (peer-to-peer lending)
-    penalties.js       late payment charges on the reference platform's four bases, waiver
+    penalties.js       late payment charges on the four bases, waiver
     provisioning.js    loan loss provisioning by PAR band
     reports.js         balance sheet, income statement, prudential, PAR
     returns.js         regulatory return engine, templates held as data
@@ -140,26 +145,30 @@ src/
     duplicates.js      the duplicate client checks
     memberFiles.js     member pictures and signatures, identification document
                        files, expiry flags
-    accountNumbers.js  deposit, share and credit arrangement numbers from a counter
+    accountNumbers.js  deposit, share and credit arrangement numbers from a
+                       counter
     creditArrangements.js  credit arrangements (lines of credit): states,
                        linked accounts, the exposure checks the engine calls
     solidarityLoans.js solidarity group loans: one loan per member, opened
                        together for a group
+    dataImport/        the Excel data import: definitions.js, parse.js,
+                       execute.js, workbooks.js, lifecycle.js; index.js
+                       keeps the one public API
   ops/
     eod.js             end-of-day jobs, idempotent per business date
     backup.js          pg_dump per tenant, retention, restore verification
     crypt.js           AES-256-GCM streaming encryption, key ring, rekey
     offsite.js         dir and command drivers for shipping backups
     scheduler.js       in-process timer behind a Postgres advisory lock
-  routes/              auth, members, clients (the reference platform's /clients and /groups),
-                       creditArrangements (the reference platform's /creditarrangements), loans, loanProducts,
-                       depositProducts, branches, savings, shares,
-                       accounting, reports, finance (provisioning, periods,
-                       returns), portal (the member-facing API)
+  routes/              auth, members, clients (/clients and /groups),
+                       creditArrangements (/creditarrangements), loans,
+                       loanProducts, depositProducts, branches, savings,
+                       shares, accounting, reports, finance (provisioning,
+                       periods, returns), portal (the member-facing API)
   lib/
     http.js            error envelope, filter operators, legacy slicing
     page.js            SQL-side paging: offset, limit, count(*) OVER ()
-    searchCriteria.js     the reference platform's :search bodies as SQL over a map of fields
+    searchCriteria.js  :search bodies as SQL over a map of fields
     ledgerScope.js     accounting reports for a branch-limited user
     limits.js          rate limiting and per-tenant concurrency gates
     ratestore.js       Redis-backed counters, memory fallback

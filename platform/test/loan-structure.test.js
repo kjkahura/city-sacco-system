@@ -113,8 +113,10 @@ const eff = (id) => T(async (c) => ledger.effective(await ledger.lock(c, id)));
     check('ledger stands only on accounting, schedule and tax', [...g.ledger].every((m) => below.includes(m)), [...g.ledger].join(','));
     const aboveLoans = ['restructure', 'postdated', 'settlement', 'eodExclusions', 'loanClosures', 'loanTransfers', 'collections', 'dataImport', 'loanMigration',
       'solidarityLoans'];
-    check('nothing below loans requires loans', Object.entries(g).every(([n, deps]) => aboveLoans.includes(n) || !deps.has('loans')),
-      Object.entries(g).filter(([n, d]) => !aboveLoans.includes(n) && d.has('loans')).map(([n]) => n).join(','));
+    // A folder module's parts (dataImport/execute) stand where the folder does.
+    const top = (n) => n.split('/')[0];
+    check('nothing below loans requires loans', Object.entries(g).every(([n, deps]) => aboveLoans.includes(top(n)) || !deps.has('loans')),
+      Object.entries(g).filter(([n, d]) => !aboveLoans.includes(top(n)) && d.has('loans')).map(([n]) => n).join(','));
     const exported = ['lock', 'balances', 'principalOutstanding', 'effective', 'terms', 'isDynamic', 'isRevolving', 'isTranched',
       'isInterestFree', 'isAccrual', 'booksEntries', 'post', 'creditsFor', 'scheduleInputs', 'buildSchedule', 'previewSchedule',
       'shiftOffClosedDays', 'reschedule', 'maturityDate', 'apply', 'changeState', 'disburse', 'repay', 'accrueInterest',
@@ -146,8 +148,13 @@ const eff = (id) => T(async (c) => ledger.effective(await ledger.lock(c, id)));
     check('every strategy fills every hook of the contract', gaps.length === 0, gaps.join(','));
     check('each strategy is named for its type', Object.entries(types.BY_TYPE).every(([t, s]) => s.type === t));
     check('an unknown type is refused, not treated as fixed term', (() => { try { types.forLoan({ product_type: 'NOPE' }); return false; } catch (e) { return /UNKNOWN_PRODUCT_TYPE/.test(e.message); } })());
-    const src = (f) => fs.readFileSync(path.join(__dirname, '..', 'src', f), 'utf8');
-    const lifecycle = ['domain/loans.js', 'domain/interest.js', 'domain/installments.js', 'domain/fees.js', 'domain/restructure.js', 'ops/eod.js'];
+    // A file, or every file of a folder module.
+    const src = (f) => {
+      const p = path.join(__dirname, '..', 'src', f);
+      if (!fs.statSync(p).isDirectory()) return fs.readFileSync(p, 'utf8');
+      return fs.readdirSync(p).filter((x) => x.endsWith('.js')).map((x) => fs.readFileSync(path.join(p, x), 'utf8')).join('\n');
+    };
+    const lifecycle = ['domain/loans', 'domain/interest.js', 'domain/installments.js', 'domain/fees.js', 'domain/restructure.js', 'ops/eod.js'];
     const TYPE_TEST = /\b(isDynamic|isRevolving|isTranched|isInterestFree)\s*\(|product_type\s*[!=]==|['"](DYNAMIC_TERM|TRANCHED|REVOLVING|INTEREST_FREE)['"]/;
     const testing = lifecycle.filter((f) => src(f).split('\n').some((line) => !/^\s*(\/\/|\*)/.test(line) && TYPE_TEST.test(line)));
     check('disbursement, repayment, accrual, fees, restructure and EOD ask the strategy instead of testing the type',
