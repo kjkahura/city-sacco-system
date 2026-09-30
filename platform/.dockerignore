@@ -1,0 +1,9 @@
+node_modules
+test
+docs
+deploy
+backups
+.env
+.env.*
+dump.rdb
+*.log

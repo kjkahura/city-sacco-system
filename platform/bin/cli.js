@@ -107,7 +107,8 @@ const COMMANDS = {
       countryCode: arg('country', 'KE'),
       currencyCode: arg('currency', 'KES'),
       adminEmail: arg('admin-email'),
-      adminPassword: arg('admin-password'),
+      // From the environment when run as a job, so the password is not in the command line.
+      adminPassword: arg('admin-password') || process.env.TENANT_ADMIN_PASSWORD,
       adminName: arg('admin-name'),
     });
     console.log(`provisioned ${t.slug} -> ${t.schema_name} (${t.status})`);

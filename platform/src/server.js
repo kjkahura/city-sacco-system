@@ -20,7 +20,11 @@ app.disable('x-powered-by');
 // Enable only when a trusted proxy actually sets it. Note that even if a
 // client forges the header, the JWT tenant claim still wins and a mismatch
 // is rejected, so the worst case is a 403 rather than a cross-tenant read.
-app.set('trust proxy', process.env.TRUST_PROXY === 'true');
+// A number trusts that many proxy hops (behind Firebase Hosting and Cloud
+// Run, so the client's own address is the one rate limits and the audit
+// trail see); 'true' trusts every hop.
+const TRUST = process.env.TRUST_PROXY;
+app.set('trust proxy', /^\d+$/.test(TRUST || '') ? Number(TRUST) : TRUST === 'true');
 
 // ---------------------------------------------------------------------------
 // Unauthenticated

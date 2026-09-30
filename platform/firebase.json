@@ -1,0 +1,13 @@
+{
+  "hosting": {
+    "public": "deploy/hosting",
+    "cleanUrls": false,
+    "trailingSlash": false,
+    "rewrites": [
+      { "source": "**", "run": { "serviceId": "sacco-platform", "region": "europe-west1" } }
+    ],
+    "headers": [
+      { "source": "**", "headers": [ { "key": "Strict-Transport-Security", "value": "max-age=31536000; includeSubDomains" } ] }
+    ]
+  }
+}

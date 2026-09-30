@@ -1,0 +1,146 @@
+# Test, then deploy the platform to Google Cloud Run behind Firebase Hosting.
+# Setup and the settings this reads: platform/docs/deploy.md.
+#
+# Repository variables (Settings > Secrets and variables > Actions > Variables):
+#   GCP_PROJECT_ID           the Firebase / Google Cloud project ID
+#   GCP_REGION               europe-west1
+#   CLOUD_SQL_INSTANCE       PROJECT:REGION:INSTANCE (the instance connection name)
+#   WIF_PROVIDER             projects/NUMBER/locations/global/workloadIdentityPools/github/providers/github
+#   DEPLOY_SERVICE_ACCOUNT   sacco-deployer@PROJECT.iam.gserviceaccount.com
+#   RUNTIME_SERVICE_ACCOUNT  sacco-runtime@PROJECT.iam.gserviceaccount.com
+# No keys or passwords are stored in GitHub: the workflow signs in to Google
+# through Workload Identity Federation, and the app's secrets are in Secret Manager.
+
+name: Test and deploy
+
+on:
+  push:
+    branches: [main]
+    paths: ['platform/**', '.github/workflows/deploy.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  SERVICE: sacco-platform
+  REPOSITORY: sacco
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: platform
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sacco
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: sacco
+      JWT_SECRET: ci-only-secret-not-used-anywhere-else
+      NODE_ENV: test
+      SCHEDULER: 'off'
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: platform/package-lock.json
+      - run: npm ci
+      # The backup tests call pg_dump, which must be at least the server's version (16).
+      - run: pg_dump --version
+      - run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-24.04
+    environment: production
+    env:
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      SQL_INSTANCE: ${{ vars.CLOUD_SQL_INSTANCE }}
+      RUNTIME_SA: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push the image
+        run: |
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$SERVICE:$GITHUB_SHA"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" platform
+          docker push "$IMAGE"
+
+      # The settings every service and job shares. Secrets come from Secret Manager.
+      - name: Settings
+        run: |
+          echo "ENV_VARS=NODE_ENV=production,PGHOST=/cloudsql/$SQL_INSTANCE,PGUSER=sacco,PGDATABASE=sacco,PGPOOL_MAX=10,SCHEDULER=off,TRUST_PROXY=2" >> "$GITHUB_ENV"
+          echo "SECRETS=PGPASSWORD=sacco-db-password:latest,JWT_SECRET=sacco-jwt-secret:latest" >> "$GITHUB_ENV"
+
+      - name: Migrate the database
+        run: |
+          gcloud run jobs deploy sacco-migrate --image "$IMAGE" --region "$REGION" \
+            --service-account "$RUNTIME_SA" --set-cloudsql-instances "$SQL_INSTANCE" \
+            --set-env-vars "$ENV_VARS" --set-secrets "$SECRETS" \
+            --command sh --args="-c,node bin/cli.js migrate:platform && node bin/cli.js migrate:all" \
+            --max-retries 0 --task-timeout 30m --quiet
+          gcloud run jobs execute sacco-migrate --region "$REGION" --wait
+
+      - name: Deploy the service
+        run: |
+          gcloud run deploy "$SERVICE" --image "$IMAGE" --region "$REGION" \
+            --service-account "$RUNTIME_SA" --add-cloudsql-instances "$SQL_INSTANCE" \
+            --set-env-vars "$ENV_VARS" --set-secrets "$SECRETS" \
+            --allow-unauthenticated --port 8080 --cpu 1 --memory 512Mi \
+            --min-instances 0 --max-instances 1 --concurrency 80 --timeout 60 --quiet
+
+      # Scheduled work runs as jobs; Cloud Scheduler starts them (docs/deploy.md).
+      - name: Update the scheduled jobs
+        run: |
+          for job in "sacco-eod:eod:run" "sacco-tokens:tokens:prune"; do
+            name="${job%%:*}"; cmd="${job#*:}"
+            gcloud run jobs deploy "$name" --image "$IMAGE" --region "$REGION" \
+              --service-account "$RUNTIME_SA" --set-cloudsql-instances "$SQL_INSTANCE" \
+              --set-env-vars "$ENV_VARS" --set-secrets "$SECRETS" \
+              --command node --args="bin/cli.js,$cmd" --max-retries 1 --task-timeout 60m --quiet
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Deploy Firebase Hosting
+        working-directory: platform
+        run: npx --yes firebase-tools@latest deploy --only hosting --project "$PROJECT_ID" --non-interactive
+
+      - name: Check the live site
+        run: |
+          sleep 10
+          curl -fsS "https://$PROJECT_ID.web.app/health"

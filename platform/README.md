@@ -18,6 +18,14 @@ npm start
 
 Each section is audited before it is built against the documentation of the reference platform: the published core banking system whose features and API conventions this platform follows. The audits and build logs are in [docs/audits](docs/audits/README.md), and each one is committed with the code it describes.
 
+## Deploying
+
+`docs/deploy.md` is the runbook for going live. GitHub Actions
+(`.github/workflows/deploy.yml`) tests and deploys every push to `main`: the
+container (`Dockerfile`) runs on Google Cloud Run in `europe-west1` with
+Cloud SQL for PostgreSQL 16, Firebase Hosting (`firebase.json`) serves it, and
+Cloudflare holds the custom domain's DNS.
+
 ## Why schema per tenant
 
 | | Shared schema + RLS | **Schema per tenant** | Database per tenant |
