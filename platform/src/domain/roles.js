@@ -1,6 +1,7 @@
 'use strict';
 
 const PERMS = require('../lib/permissions');
+const { err } = require('../lib/errors');
 
 /**
  * Roles (the reference platform's Administration > Access > Roles). A role is a named set of
@@ -14,7 +15,6 @@ const PERMS = require('../lib/permissions');
  * A role in use cannot be deleted, nor can a built-in role (the reference platform).
  */
 
-function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
 
 const BUILTIN_NAMES = { TENANT_ADMIN: 'Administrator', MANAGER: 'Manager', ACCOUNTANT: 'Accountant', TELLER: 'Teller', AUDITOR: 'Auditor' };
 const TYPE_BASE = { ADMINISTRATOR: 'TENANT_ADMIN', TELLER: 'TELLER' };

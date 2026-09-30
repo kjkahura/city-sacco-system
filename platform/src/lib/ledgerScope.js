@@ -26,7 +26,9 @@ const { withTenantRead } = require('../db/tenantContext');
  * A user with every branch sees no change.
  */
 
-const err = (m, status = 403) => Object.assign(new Error(m), { status });
+const E = require('./errors');
+// Branch access refusals are 403 unless said.
+const err = (m, status = 403) => E.err(m, status);
 
 const BRANCH_REPORTS = [
   ['GET', /^\/reports\/balance-sheet\/?$/, 'query'],

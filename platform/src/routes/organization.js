@@ -13,6 +13,7 @@ const CUR = require('../domain/currencies');
 const CF = require('../domain/customFields');
 const DOCS = require('../domain/productDocuments');
 const eod = require('../ops/eod');
+const { run } = require('../lib/handlers');
 
 /**
  * Managing the organization (the reference platform's Administration pages): details and
@@ -22,12 +23,6 @@ const eod = require('../ops/eod');
  */
 
 
-const run = (fn, { write = false, status = 200 } = {}) => [requireAuth(), async (req, res, next) => {
-  try {
-    const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res));
-    if (out !== undefined) res.status(status).json(out);
-  } catch (e) { next(e); }
-}];
 const W = (fn, status = 200) => run(fn, { write: true, status });
 const by = (req) => ({ createdBy: req.auth.email, user: req.auth });
 

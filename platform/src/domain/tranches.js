@@ -14,9 +14,7 @@ const { err, round2 } = acct;
  */
 
 const ledger = require('./ledger');
-const ymd = (d) => (d instanceof Date
-  ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  : String(d).slice(0, 10));
+const { localDay: ymd } = require('../lib/dates');
 
 async function forLoan(c, loanId) {
   const { rows } = await c.query(

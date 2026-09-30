@@ -4,6 +4,7 @@ const L = require('./loans');
 const SV = require('./savings');
 const workflow = require('./workflow');
 const { scheduledInterestThrough } = require('./productTypes/fixedTerm');
+const { err } = require('../lib/errors');
 
 /**
  * A loan brought across from another system, as the Excel import's Loan
@@ -36,7 +37,6 @@ const { scheduledInterestThrough } = require('./productTypes/fixedTerm');
  * with no journal entry.
  */
 
-const err = (m, status = 400) => Object.assign(new Error(m), { status });
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const sum = (list, f) => round2(list.reduce((t, x) => t + Number(f(x) || 0), 0));
 

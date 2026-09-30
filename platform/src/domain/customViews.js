@@ -4,6 +4,7 @@ const { pageParams } = require('../lib/page');
 const PERMS = require('../lib/permissions');
 const ROLES = require('./roles');
 const CF = require('./customFields');
+const { err } = require('../lib/errors');
 
 /**
  * Custom views (the reference platform's Custom Views, and custom views with API v1): a
@@ -24,7 +25,6 @@ const CF = require('./customFields');
  * auditors.
  */
 
-function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
 
 const ADMIN = 'TENANT_ADMIN';
 const EXPORT_MAX = 100000;

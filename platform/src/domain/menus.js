@@ -3,6 +3,7 @@
 const PERMS = require('../lib/permissions');
 const V = require('./customViews');
 const ROLES = require('./roles');
+const { err } = require('../lib/errors');
 
 /**
  * Menu items (the reference platform's Menu Items). The navigation holds items without views
@@ -18,7 +19,6 @@ const ROLES = require('./roles');
  * can be renamed, moved and hidden from roles, not deleted.
  */
 
-function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
 const ADMIN = 'TENANT_ADMIN';
 const VISIBLE = `(v.owner_email = lower($1) OR $3::boolean OR v.all_users OR $2 = ANY(v.roles))`;
 const who = (user) => [user.email, user.roleCode || user.role, user.role === ADMIN];

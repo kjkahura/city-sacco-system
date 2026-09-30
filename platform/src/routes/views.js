@@ -1,11 +1,15 @@
 'use strict';
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const X = require('../lib/export');
 const V = require('../domain/customViews');
 const PERMS = require('../lib/permissions');
+const { json } = require('../lib/handlers');
+const { pageHeaders } = require('../lib/page');
+const read = (fn) => json((c, req) => fn(c, req));
+const write = (fn, status = 200) => json((c, req) => fn(c, req), { write: true, status });
 
 /**
  * Custom views (the reference platform's Custom Views), mounted under /api/views, and the
@@ -16,12 +20,6 @@ const PERMS = require('../lib/permissions');
 
 const router = express.Router();
 
-const read = (fn) => [requireAuth(), async (req, res, next) => {
-  try { res.json(await withTenantRead(req.tenant.schema_name, (c) => fn(c, req))); } catch (e) { next(e); }
-}];
-const write = (fn, status = 200) => [requireAuth(), async (req, res, next) => {
-  try { res.status(status).json(await withTenant(req.tenant.schema_name, (c) => fn(c, req))); } catch (e) { next(e); }
-}];
 const page = (q) => ({ offset: q.offset, limit: q.limit });
 
 router.get('/entities', requireAuth(), (req, res) => res.json(V.entities(req.auth)));
@@ -88,9 +86,7 @@ function viewfilter(entity, { required = false } = {}) {
         resultType: req.query.resultType || 'BASIC', offset: req.query.offset, limit: req.query.limit,
       }));
       if (out.kind === 'SUMMARY') return res.json(out.body);
-      res.set('items-total', String(out.total));
-      res.set('items-offset', String(out.offset));
-      res.set('items-limit', String(out.limit));
+      pageHeaders(res, out);
       res.json(out.items);
     } catch (e) { next(e); }
   }];

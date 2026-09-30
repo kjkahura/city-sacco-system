@@ -1,11 +1,10 @@
 'use strict';
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
-const { requireAuth } = require('../tenancy/resolve');
 const { pageParams } = require('../lib/page');
 const { can } = require('../lib/permissions');
 const CA = require('../domain/creditArrangements');
+const { run, pagingHeaders } = require('../lib/handlers');
 
 /**
  * The reference platform's API v2 for credit arrangements (/creditarrangements): list,
@@ -17,13 +16,6 @@ const CA = require('../domain/creditArrangements');
  * the same shape), which lets in any of their permissions; the action
  * checks the one it needs here or in the domain.
  */
-
-const run = (fn, { write = false, status = 200 } = {}) => [requireAuth(), async (req, res, next) => {
-  try {
-    const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res));
-    if (out !== undefined) res.status(status).json(out);
-  } catch (e) { next(e); }
-}];
 
 function need(req, code) {
   if (!can(req.auth, code)) throw Object.assign(new Error(`PERMISSION_REQUIRED: ${code}`), { status: 403 });
@@ -46,9 +38,7 @@ function patchOf(body) {
 async function listOut(c, req, res, filter = {}) {
   const { offset, limit } = pageParams(req.query);
   const r = await CA.list(c, { holderId: filter.holderId ?? req.query.holderKey ?? null, state: req.query.state || null, offset, limit, user: req.auth });
-  if (String(req.query.paginationDetails || '').toUpperCase() === 'ON') {
-    res.set('items-offset', String(offset)); res.set('items-limit', String(limit)); res.set('items-total', String(r.total));
-  }
+  pagingHeaders(req, res, { offset, limit, total: r.total });
   return r.items;
 }
 
@@ -57,9 +47,7 @@ const search = run(async (c, req, res) => {
   const body = req.body || {};
   const { offset, limit } = pageParams({ ...req.query, ...body });
   const r = await CA.search(c, body, { offset, limit, user: req.auth });
-  if (String(req.query.paginationDetails || '').toUpperCase() === 'ON') {
-    res.set('items-offset', String(offset)); res.set('items-limit', String(limit)); res.set('items-total', String(r.total));
-  }
+  pagingHeaders(req, res, { offset, limit, total: r.total });
   return r.items;
 });
 

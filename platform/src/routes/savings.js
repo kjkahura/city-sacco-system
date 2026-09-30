@@ -6,30 +6,20 @@ const { can } = require('../lib/permissions');
 const reportRoutes = require('./reports');
 const { orgToday } = require('../lib/orgDate');
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenantRead } = require('../db/tenantContext');
 const { requireAuth, requirePermission } = require('../tenancy/resolve');
 const { notFound } = require('../lib/http');
-const { pageQuery, sendPage, pageParams } = require('../lib/page');
+const { pageQuery, sendPage } = require('../lib/page');
 const S = require('../domain/savings');
 const CF = require('../domain/customFields');
 const acct = require('../domain/accounting');
 const LOANS = require('../domain/loans');
 const LT = require('../domain/loanTransfers');
+const H = require('../lib/handlers');
+const { json } = H;
+const tx = (handler) => H.tx(handler, 'savings account');
 
 const router = express.Router();
-
-const tx = (handler) => [
-  requireAuth(),
-  async (req, res, next) => {
-    try {
-      const out = await withTenant(req.tenant.schema_name, (c) =>
-        handler(c, req, res, { actor: req.auth.email, user: req.auth }));
-      if (out === undefined) return;
-      if (out === null) return notFound(res, 'savings account');
-      res.json(out);
-    } catch (e) { next(e); }
-  },
-];
 
 router.get('/', requireAuth(), async (req, res, next) => {
   try {
@@ -296,13 +286,9 @@ accounting.get('/journal', requireAuth(), async (req, res, next) => {
 
 // The rollup checked against the lines. An auditor's endpoint: it answers
 // "can I trust the numbers on the other reports" with a recomputation.
-accounting.get('/verify', requireAuth(), async (req, res, next) => {
-  try {
-    res.json(await withTenantRead(req.tenant.schema_name, (c) => acct.verifyRollup(c, {
+accounting.get('/verify', ...json((c, req) => acct.verifyRollup(c, {
       from: req.query.from || null, to: req.query.to || null,
     })));
-  } catch (e) { next(e); }
-});
 
 accounting.get('/gl', requireAuth(), async (req, res, next) => {
   try {

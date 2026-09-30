@@ -8,6 +8,7 @@ const PF = require('./portfolio');
 const IND = require('./indicators');
 const acct = require('./accounting');
 const ROLES = require('./roles');
+const { err } = require('../lib/errors');
 
 /**
  * Report templates, in place of the reference platform's Jasper reports. The reference platform's JRXML
@@ -40,7 +41,6 @@ const ROLES = require('./roles');
  * {{today}}, {{user.email}}, {{organization.name}}.
  */
 
-function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
 const ADMIN = 'TENANT_ADMIN';
 const TYPES = ['MEMBER', 'LOAN', 'DEPOSIT', 'BRANCH', 'CENTRE', 'OTHER'];
 const PARAM_TYPES = ['DATE', 'TEXT', 'NUMBER', 'BOOLEAN', 'SELECTION', 'BRANCH', 'LOAN_PRODUCT', 'DEPOSIT_PRODUCT'];

@@ -6,6 +6,7 @@ const keys = require('../auth/apiKeys');
 const AP = require('../lib/accessPreferences');
 const PERMS = require('../lib/permissions');
 const ROLE = require('../domain/roles');
+const { err } = require('../lib/errors');
 
 /**
  * API consumers (the reference platform's API Consumers): an abstraction like an OAuth
@@ -19,7 +20,6 @@ const ROLE = require('../domain/roles');
  * activity stays in the audit trail).
  */
 
-const err = (m, status = 400) => Object.assign(new Error(m), { status });
 
 function shape(c, list = []) {
   return {

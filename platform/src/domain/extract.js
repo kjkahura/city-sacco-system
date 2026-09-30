@@ -1,6 +1,7 @@
 'use strict';
 
 const DD = require('./dataDictionary');
+const { err } = require('../lib/errors');
 
 /**
  * The incremental extract: rows changed since a cursor, table by table, for
@@ -48,7 +49,6 @@ const DEFAULT_LIMIT = 500;
 const MAX_LIMIT = 1000;
 const LAG_SECONDS = () => Math.max(0, Number(process.env.EXTRACT_LAG_SECONDS ?? 5));
 
-const err = (m, status = 400) => Object.assign(new Error(m), { status });
 
 function streamDef(name) {
   const s = STREAMS[name];

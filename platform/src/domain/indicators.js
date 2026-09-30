@@ -1,6 +1,7 @@
 'use strict';
 
 const PF = require('./portfolio');
+const { err } = require('../lib/errors');
 
 /**
  * Indicators (the reference platform's Reporting > Indicators and the dashboard's Indicators
@@ -15,7 +16,6 @@ const PF = require('./portfolio');
  * (deposit figures for a loan product) is null with the reason.
  */
 
-function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const pct = (a, b) => (Number(b) > 0 ? round2((Number(a) / Number(b)) * 100) : 0);
 

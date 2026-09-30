@@ -1,6 +1,7 @@
 'use strict';
 
 const acct = require('./accounting');
+const { err } = require('../lib/errors');
 
 /**
  * Accounting reports generated in the background (the reference platform's accounting
@@ -18,7 +19,6 @@ const GL_TYPES = ['ASSET', 'LIABILITY', 'EQUITY', 'INCOME', 'EXPENSE'];
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const validDate = (s) => ISO.test(String(s)) && new Date(`${s}T00:00:00Z`).toISOString().slice(0, 10) === s;
 
-function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
 
 /** Check and normalise a request; throws 400 or 404 with the reason. */
 async function check(c, body = {}) {

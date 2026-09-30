@@ -34,6 +34,7 @@ const savings = require('./savings');
 const FA = require('./feeAmortization');
 const customFields = require('./customFields');
 const CA = require('./creditArrangements');
+const { localDay: ymd } = require('../lib/dates');
 const {
   controls, updateControls, exposure, userLimits, assertMayApprove, assertMayDisburse, assertMaySetDisbursementConditions,
 } = require('./controls');
@@ -587,9 +588,6 @@ async function amend(c, loanId, patch, { actor, user = null } = {}) {
 // Arrears
 // --------------------------------------------------------------------------
 
-const ymd = (d) => (d instanceof Date
-  ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  : String(d).slice(0, 10));
 
 function daysInArrears(l, asOf = null) {
   if (!l.arrears_since) return 0;

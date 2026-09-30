@@ -1,5 +1,7 @@
 'use strict';
 
+const { utcDay: ymd } = require('../lib/dates');
+
 /**
  * The rules a deposit product gives its accounts, after the reference platform's Deposit
  * Products pages: the product types, the interest rate on a day (fixed,
@@ -27,7 +29,6 @@ const MONTHLY_FEE_METHODS = ['END_OF_MONTH', 'FIRST_DAY_OF_MONTH', 'MONTHLY_FROM
 
 const hasTerm = (type) => type === 'FIXED_DEPOSIT' || type === 'SAVINGS_PLAN';
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
-const ymd = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10));
 const utc = (iso) => new Date(`${ymd(iso)}T00:00:00Z`);
 const daysBetween = (a, b) => Math.round((utc(b) - utc(a)) / 86400000);
 const isLeap = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;

@@ -9,6 +9,7 @@ const W = require('./workflow');
 const { pageQuery } = require('../lib/page');
 const S = require('./schedule');
 const G = require('./eodGuard');
+const { utcDay: ymd } = require('../lib/dates');
 const { err, round2 } = acct;
 
 /**
@@ -76,7 +77,6 @@ function dailyRate(l, ratePercent) {
   return r / days;
 }
 
-const ymd = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10));
 
 /** The last day any penalty on the loan was worked out to (waived charges count). */
 async function chargedThrough(c, loanId) {

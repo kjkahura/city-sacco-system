@@ -1,26 +1,14 @@
 'use strict';
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
-const { notFound } = require('../lib/http');
 const { pageQuery, sendPage, pageParams } = require('../lib/page');
 const SH = require('../domain/shares');
+const H = require('../lib/handlers');
+const tx = (handler) => H.tx((c, req, res) => handler(c, req, res, { actor: req.auth.email }), 'share account');
 
 const router = express.Router();
-
-const tx = (handler) => [
-  requireAuth(),
-  async (req, res, next) => {
-    try {
-      const out = await withTenant(req.tenant.schema_name, (c) =>
-        handler(c, req, res, { actor: req.auth.email }));
-      if (out === undefined) return;
-      if (out === null) return notFound(res, 'share account');
-      res.json(out);
-    } catch (e) { next(e); }
-  },
-];
 
 router.get('/', requireAuth(), async (req, res, next) => {
   try {

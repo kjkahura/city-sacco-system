@@ -11,6 +11,7 @@ const backup = require('../ops/tenantBackup');
 const runner = require('../ops/importRunner');
 const { once } = require('../lib/idempotency');
 const { filePart } = require('../lib/multipart');
+const { run } = require('../lib/handlers');
 
 /**
  * Data management (the reference platform's Data and Reporting > Data Management): the data
@@ -20,12 +21,6 @@ const { filePart } = require('../lib/multipart');
 
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-const run = (fn, { write = false, status = 200 } = {}) => [requireAuth(), async (req, res, next) => {
-  try {
-    const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res));
-    if (out !== undefined) res.status(status).json(out);
-  } catch (e) { next(e); }
-}];
 const safeName = (s) => String(s || 'file').replace(/[^A-Za-z0-9._-]/g, '_');
 function sendFile(res, { data, fileName, type }) {
   res.set('content-type', type);

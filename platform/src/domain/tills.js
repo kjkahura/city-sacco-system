@@ -2,6 +2,7 @@
 
 const acct = require('./accounting');
 const { orgToday } = require('../lib/orgDate');
+const { err } = require('../lib/errors');
 
 /**
  * Teller tills (the reference platform's Tellers and Tellering widgets). A till is one
@@ -22,7 +23,6 @@ const { orgToday } = require('../lib/orgDate');
  * cash came from or goes to.
  */
 
-function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const CODE = /^[A-Z]{3}[0-9]{3}$/;
 const CONSTRAINTS = ['NONE', 'SOFT', 'HARD'];

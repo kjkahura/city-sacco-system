@@ -1,11 +1,14 @@
 'use strict';
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenantRead } = require('../db/tenantContext');
 const { requirePermission } = require('../tenancy/resolve');
 const PERMS = require('../lib/permissions');
 const RT = require('../domain/reportTemplates');
 const render = require('../lib/reportRender');
+const { json } = require('../lib/handlers');
+const read = (perm, fn) => json((c, req) => fn(c, req), { guard: requirePermission(perm) });
+const write = (perms, fn, status = 200) => json((c, req) => fn(c, req), { write: true, status, guard: requirePermission(...[].concat(perms)) });
 
 /**
  * Report templates (in place of the reference platform's Jasper reports), /api/report-templates.
@@ -19,12 +22,6 @@ const render = require('../lib/reportRender');
  */
 
 const router = express.Router();
-const read = (perm, fn) => [requirePermission(perm), async (req, res, next) => {
-  try { res.json(await withTenantRead(req.tenant.schema_name, (c) => fn(c, req))); } catch (e) { next(e); }
-}];
-const write = (perm, fn, status = 200) => [requirePermission(perm), async (req, res, next) => {
-  try { res.status(status).json(await withTenant(req.tenant.schema_name, (c) => fn(c, req))); } catch (e) { next(e); }
-}];
 const safe = (s) => String(s || 'report').replace(/[^A-Za-z0-9._-]+/g, '-').toLowerCase();
 
 router.get('/', ...read('VIEW_REPORTS', (c, req) => RT.list(c, req.auth, { type: req.query.type || null })));

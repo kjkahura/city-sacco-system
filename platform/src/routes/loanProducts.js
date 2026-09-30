@@ -7,6 +7,7 @@ const { apiError, badRequest, notFound } = require('../lib/http');
 const PA = require('../domain/productAccounting');
 const B = require('../domain/branches');
 const CA = require('../domain/creditArrangements');
+const { json } = require('../lib/handlers');
 
 /**
  * Loan products, the whole configuration surface, after the reference platform's loan
@@ -575,17 +576,9 @@ router.post('/:id/accounting-method', requireAuth(), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.get('/:id/accounting-changes', requireAuth(), async (req, res, next) => {
-  try {
-    res.json(await withTenantRead(req.tenant.schema_name, (c) => require('../domain/accountingChanges').history(c, 'LOAN', req.params.id)));
-  } catch (e) { next(e); }
-});
+router.get('/:id/accounting-changes', ...json((c, req) => require('../domain/accountingChanges').history(c, 'LOAN', req.params.id)));
 
-router.get('/:id/gl-mapping-history', requireAuth(), async (req, res, next) => {
-  try {
-    res.json(await withTenantRead(req.tenant.schema_name, (c) => PA.mappingHistory(c, 'LOAN', req.params.id)));
-  } catch (e) { next(e); }
-});
+router.get('/:id/gl-mapping-history', ...json((c, req) => PA.mappingHistory(c, 'LOAN', req.params.id)));
 
 // --- fees -----------------------------------------------------------------
 

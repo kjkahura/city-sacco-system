@@ -1,9 +1,13 @@
 'use strict';
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenantRead } = require('../db/tenantContext');
 const { requirePermission } = require('../tenancy/resolve');
 const T = require('../domain/tasks');
+const { json } = require('../lib/handlers');
+const { pageHeaders } = require('../lib/page');
+const read = (perm, fn) => json((c, req) => fn(c, req), { guard: requirePermission(perm) });
+const write = (perms, fn, status = 200) => json((c, req) => fn(c, req), { write: true, status, guard: requirePermission(...[].concat(perms)) });
 
 /**
  * Tasks (the reference platform's Tasks), /api/tasks, and task templates,
@@ -12,13 +16,6 @@ const T = require('../domain/tasks');
  */
 
 const router = express.Router();
-const read = (perm, fn) => [requirePermission(perm), async (req, res, next) => {
-  try { res.json(await withTenantRead(req.tenant.schema_name, (c) => fn(c, req))); } catch (e) { next(e); }
-}];
-const write = (perms, fn, status = 200) => [requirePermission(...[].concat(perms)), async (req, res, next) => {
-  try { res.status(status).json(await withTenant(req.tenant.schema_name, (c) => fn(c, req))); } catch (e) { next(e); }
-}];
-
 router.get('/templates', ...read('VIEW_TASK', (c) => T.templates(c)));
 router.get('/templates/placeholders', ...read('VIEW_TASK', () => T.PLACEHOLDERS));
 router.post('/templates', ...write('CREATE_COMMUNICATION_TEMPLATES', (c, req) => T.saveTemplate(c, null, req.body, req.auth), 201));
@@ -33,9 +30,7 @@ router.get('/', requirePermission('VIEW_TASK'), async (req, res, next) => {
       assignedTo: req.query.assignedTo || null, status: req.query.status || null, due: req.query.due || null,
       memberId: req.query.memberId || null, offset: req.query.offset, limit: req.query.limit,
     }));
-    res.set('items-total', String(p.total));
-    res.set('items-offset', String(p.offset));
-    res.set('items-limit', String(p.limit));
+    pageHeaders(res, p);
     res.json(p.items);
   } catch (e) { next(e); }
 });

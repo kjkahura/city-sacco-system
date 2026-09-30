@@ -1,5 +1,7 @@
 'use strict';
 
+const { localDay: ymd } = require('../lib/dates');
+
 /**
  * The schedule engine: dates, rates and installment lines, with no database
  * in it. Everything here is a pure function of the product's settings and
@@ -32,9 +34,6 @@ const pad2 = (n) => String(n).padStart(2, '0');
 // --------------------------------------------------------------------------
 
 /** YYYY-MM-DD from a string or a Date. pg hands DATE back as a local-midnight Date. */
-const ymd = (d) => (d instanceof Date
-  ? `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
-  : String(d).slice(0, 10));
 const toUTC = (d) => new Date(`${ymd(d)}T00:00:00Z`);
 const isoDate = (d) => d.toISOString().slice(0, 10);
 const isLeap = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;

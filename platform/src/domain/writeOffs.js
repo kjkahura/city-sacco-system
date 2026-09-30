@@ -15,6 +15,7 @@ const types = require('./productTypes');
 const { accrueInterest, prepaidToPrincipal } = require('./interest');
 const FA = require('./feeAmortization');
 const { pageQuery } = require('../lib/page');
+const { utcDay: ymd } = require('../lib/dates');
 const { err, round2 } = acct;
 const { lock, balances, isAccrual, interestAccrues, writeOffCredit, post, booksEntries } = ledger;
 
@@ -60,7 +61,6 @@ const WRITABLE = ['ACTIVE', 'IN_ARREARS', 'LOCKED'];
 const SOURCES = ['MEMBER', 'COLLATERAL', 'OTHER'];
 
 const today = (c) => orgToday(c);
-const ymd = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10));
 
 // --------------------------------------------------------------------------
 // The write-off

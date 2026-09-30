@@ -1,6 +1,7 @@
 'use strict';
 
 const { pool } = require('../db/pool');
+const { err } = require('../lib/errors');
 
 /**
  * The audit trail (the reference platform's Audit Trail): every request to a tenant's API
@@ -93,7 +94,6 @@ const FIELDS = {
   response_payload: { col: 'response_payload', ops: ['eq', 'ne', 'startsWith', 'in', 'contains'] },
 };
 const SQL_OP = { eq: '=', ne: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' };
-const err = (m, status = 400) => Object.assign(new Error(m), { status });
 
 /** The reference platform's audit trail query, over this tenant's events. */
 async function events(c, query = {}) {

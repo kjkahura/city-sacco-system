@@ -1,8 +1,6 @@
 'use strict';
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
-const { requireAuth } = require('../tenancy/resolve');
 const { orgToday } = require('../lib/orgDate');
 const { pageParams } = require('../lib/page');
 const SEARCH = require('../lib/searchCriteria');
@@ -10,6 +8,7 @@ const CL = require('../domain/clients');
 const SETUP = require('../domain/clientSetup');
 const CAR = require('./creditArrangements');
 const SOL = require('../domain/solidarityLoans');
+const { run, pagingHeaders } = require('../lib/handlers');
 
 /**
  * The reference platform's API v2 for clients and groups: /clients, /groups, their
@@ -23,13 +22,6 @@ const SOL = require('../domain/solidarityLoans');
  * clears the personal fields it leaves out. Lists take offset, limit and
  * paginationDetails=ON (the items-* headers).
  */
-
-const run = (fn, { write = false, status = 200 } = {}) => [requireAuth(), async (req, res, next) => {
-  try {
-    const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res));
-    if (out !== undefined) res.status(status).json(out);
-  } catch (e) { next(e); }
-}];
 
 const CLIENT_FIELDS = {
   encodedKey: { sql: 'm.id::text', type: 'text' }, id: { sql: 'm.member_no', type: 'text' },
@@ -64,9 +56,7 @@ const GROUP_FIELDS = {
 
 function paged(res, req, rows, total) {
   const { offset, limit } = pageParams(req.query);
-  if (String(req.query.paginationDetails || '').toUpperCase() === 'ON') {
-    res.set('items-offset', String(offset)); res.set('items-limit', String(limit)); res.set('items-total', String(total));
-  }
+  pagingHeaders(req, res, { offset, limit, total });
   return rows;
 }
 

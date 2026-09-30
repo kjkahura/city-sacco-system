@@ -22,12 +22,12 @@ const { pageParams } = require('../lib/page');
 const { can } = require('../lib/permissions');
 const { pool } = require('../db/pool');
 const ACT = require('../domain/activities');
+const { pagingHeaders } = require('../lib/handlers');
 
 const limitedTo = (req) => (Array.isArray(req.auth?.branches) ? req.auth.branches : null);
 
 function send(req, res, out, { offset, limit }) {
-  res.set('items-offset', String(offset)); res.set('items-limit', String(limit)); res.set('items-total', String(out.total));
-  res.json(out.items);
+  pagingHeaders(req, res, { offset, limit, total: out.total }, { always: true }).json(out.items);
 }
 
 const read = (fn) => [requireAuth(), async (req, res, next) => {

@@ -1,8 +1,6 @@
 'use strict';
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
-const { requireAuth } = require('../tenancy/resolve');
 const { pageParams } = require('../lib/page');
 const { can } = require('../lib/permissions');
 const { orgToday } = require('../lib/orgDate');
@@ -13,6 +11,9 @@ const CF = require('../domain/customFields');
 const CTL = require('../domain/controls');
 const LT = require('../domain/loanTransfers');
 const { err, round2 } = require('../domain/accounting');
+const H = require('../lib/handlers');
+const { pagingHeaders } = require('../lib/handlers');
+const run = (fn, opts = {}) => H.run(fn, { keepStatus: true, ...opts });
 
 /**
  * The reference platform's API v2 for deposit accounts at /api/deposits: the account object
@@ -30,12 +31,6 @@ const { err, round2 } = require('../domain/accounting');
 
 const router = express.Router();
 
-const run = (fn, { write = false, status = 200 } = {}) => [requireAuth(), async (req, res, next) => {
-  try {
-    const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res));
-    if (out !== undefined) res.status(res.statusCode !== 200 ? res.statusCode : status).json(out);
-  } catch (e) { next(e); }
-}];
 const need = (req, code) => { if (!can(req.auth, code)) throw err(`PERMISSION_REQUIRED: ${code}`, 403); };
 const d = (v) => (v ? (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10)) : null);
 const ts = (v) => (v instanceof Date ? v.toISOString() : v || null);
@@ -179,9 +174,7 @@ async function list(c, req, res, body = {}) {
   const { rows } = await c.query(
     `SELECT a.id, count(*) OVER () AS total FROM savings_accounts a JOIN members m ON m.id = a.member_id JOIN savings_products p ON p.id = a.product_id
       WHERE ${s.where} ORDER BY ${s.order ? `${s.order}, ` : ''}a.account_no LIMIT ${limit} OFFSET ${offset}`, s.params);
-  if (String(req.query.paginationDetails || '').toUpperCase() === 'ON') {
-    res.set('items-offset', String(offset)); res.set('items-limit', String(limit)); res.set('items-total', String(rows.length ? rows[0].total : 0));
-  }
+  pagingHeaders(req, res, { offset, limit, total: rows.length ? rows[0].total : 0 });
   const out = [];
   for (const r of rows) out.push(await shape(c, r.id, { user: req.auth, tenant: req.tenant }));
   return out;
@@ -347,9 +340,7 @@ router.get('/:id/transactions', ...run(async (c, req, res) => {
   const { rows } = await c.query(
     `SELECT t.*, count(*) OVER () AS total FROM transactions t WHERE t.savings_account_id = $1
       ORDER BY t.created_at DESC, t.id LIMIT $2 OFFSET $3`, [a.id, limit, offset]);
-  if (String(req.query.paginationDetails || '').toUpperCase() === 'ON') {
-    res.set('items-offset', String(offset)); res.set('items-limit', String(limit)); res.set('items-total', String(rows.length ? rows[0].total : 0));
-  }
+  pagingHeaders(req, res, { offset, limit, total: rows.length ? rows[0].total : 0 });
   const out = [];
   for (const t of rows) out.push(await txShaped(c, t));
   return out;

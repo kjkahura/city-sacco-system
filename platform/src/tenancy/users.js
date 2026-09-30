@@ -10,6 +10,7 @@ const B = require('../domain/branches');
 const ROLE = require('../domain/roles');
 const PERMS = require('../lib/permissions');
 const passwords = require('../auth/passwordPolicy');
+const { err } = require('../lib/errors');
 
 /**
  * Staff users of one tenant (the reference platform's Users and Access Control). Credentials
@@ -39,7 +40,6 @@ const STATUSES = ['ACTIVE', 'SUSPENDED'];
 const TYPES = ['ADMINISTRATOR', 'TELLER', 'CREDIT_OFFICER'];
 const LIMITS = { approvalLimit: 'approval_limit', disbursementLimit: 'disbursement_limit', feeLimit: 'fee_limit',
   depositLimit: 'deposit_limit', withdrawalLimit: 'withdrawal_limit', repaymentLimit: 'repayment_limit' };
-const err = (m, status = 400) => Object.assign(new Error(m), { status });
 
 const COLUMNS = `id, email, full_name, title, language, role, role_code, permissions, user_type, status, branch_id, all_branches, branch_access,
                  other_officers_clients, phone, mfa_enabled, mfa_enrolled_at, must_change_password,

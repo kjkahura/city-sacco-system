@@ -1,10 +1,13 @@
 'use strict';
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenantRead } = require('../db/tenantContext');
 const { requirePermission } = require('../tenancy/resolve');
 const PERMS = require('../lib/permissions');
 const TL = require('../domain/tills');
+const { json } = require('../lib/handlers');
+const read = (perms, fn) => json((c, req) => fn(c, req), { guard: requirePermission(...perms) });
+const write = (perm, fn, status = 200) => json((c, req) => fn(c, req), { write: true, status, guard: requirePermission(perm) });
 
 /**
  * Teller tills (the reference platform's Tellers and Tellering widgets), /api/tills.
@@ -17,12 +20,6 @@ const TL = require('../domain/tills');
  */
 
 const router = express.Router();
-const read = (perms, fn) => [requirePermission(...perms), async (req, res, next) => {
-  try { res.json(await withTenantRead(req.tenant.schema_name, (c) => fn(c, req))); } catch (e) { next(e); }
-}];
-const write = (perm, fn, status = 200) => [requirePermission(perm), async (req, res, next) => {
-  try { res.status(status).json(await withTenant(req.tenant.schema_name, (c) => fn(c, req))); } catch (e) { next(e); }
-}];
 const SEE = ['OPEN_TILL', 'CLOSE_TILL'];
 const by = (req) => ({ createdBy: req.auth.email });
 

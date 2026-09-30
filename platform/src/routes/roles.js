@@ -1,10 +1,12 @@
 'use strict';
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenant } = require('../db/tenantContext');
 const { requirePermission, forgetUser } = require('../tenancy/resolve');
 const tokens = require('../auth/tokens');
 const ROLE = require('../domain/roles');
+const { json } = require('../lib/handlers');
+const read = (perm, fn) => json((c, req) => fn(c, req), { guard: requirePermission(perm) });
 
 /**
  * Roles (the reference platform's Administration > Access > Roles), /api/roles, and the
@@ -13,9 +15,6 @@ const ROLE = require('../domain/roles');
  */
 
 const router = express.Router();
-const read = (perm, fn) => [requirePermission(perm), async (req, res, next) => {
-  try { res.json(await withTenantRead(req.tenant.schema_name, (c) => fn(c, req))); } catch (e) { next(e); }
-}];
 const write = (perm, fn, status = 200) => [requirePermission(perm), async (req, res, next) => {
   try {
     const out = await withTenant(req.tenant.schema_name, (c) => fn(c, req));

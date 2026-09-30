@@ -10,6 +10,7 @@ const { withTenant, assertSchemaName } = require('../db/tenantContext');
 const DD = require('../domain/dataDictionary');
 const { zip, unzip } = require('../lib/zip');
 const CSV = require('../lib/csv');
+const { err } = require('../lib/errors');
 
 /**
  * The tenant's own database backup (the reference platform's Database Backup API): a tenant
@@ -45,7 +46,6 @@ const RETENTION_DAYS = Number(process.env.TENANT_BACKUP_RETENTION_DAYS || 30);
 const BATCH = 5000;
 const running = new Map();
 
-const err = (m, status = 400) => Object.assign(new Error(m), { status });
 
 // --- the callback, and why it is careful ------------------------------------
 //

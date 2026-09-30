@@ -6,6 +6,7 @@ const CURRENT = ['INACTIVE', 'ACTIVE'];
 const crypto = require('crypto');
 const { hashPin, verifyPassword } = require('./passwords');
 const { signToken } = require('../tenancy/resolve');
+const { err } = require('../lib/errors');
 
 /**
  * Member sign-in for the portal.
@@ -22,7 +23,6 @@ const { signToken } = require('../tenancy/resolve');
  * the credential for fifteen minutes, and every attempt is recorded.
  */
 
-const err = (code, status = 400) => Object.assign(new Error(code), { status });
 
 /**
  * A refusal that must be committed.

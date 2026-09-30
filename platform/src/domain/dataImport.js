@@ -11,6 +11,7 @@ const B = require('./branches');
 const CL = require('./clients');
 const CF = require('./customFields');
 const IDT = require('./idTemplates');
+const { err } = require('../lib/errors');
 
 /**
  * The Excel data import (the reference platform's Data Importing and its Excel Migration
@@ -54,7 +55,6 @@ const MAX_ID = 32;
 const MAX_TEXT = 255;
 const MAX_NOTES = 2000;
 const PREVIEW_SCHEDULES = 300;
-const err = (m, status = 400) => Object.assign(new Error(m), { status });
 
 const GL_TYPES = { A: 'ASSET', L: 'LIABILITY', I: 'INCOME', E: 'EXPENSE', Q: 'EQUITY', ASSET: 'ASSET', LIABILITY: 'LIABILITY', INCOME: 'INCOME', EXPENSE: 'EXPENSE', EQUITY: 'EQUITY' };
 const USAGE = { D: 'DETAIL', H: 'HEADER', DETAIL: 'DETAIL', HEADER: 'HEADER' };

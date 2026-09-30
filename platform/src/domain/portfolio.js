@@ -2,6 +2,7 @@
 
 const { orgToday } = require('../lib/orgDate');
 const { pageQuery } = require('../lib/page');
+const { err } = require('../lib/errors');
 
 /**
  * The loan portfolio, loan by loan, as at a date: what each running loan
@@ -22,7 +23,6 @@ const { pageQuery } = require('../lib/page');
  * measure the provisioning run and the arrears job use.
  */
 
-function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 

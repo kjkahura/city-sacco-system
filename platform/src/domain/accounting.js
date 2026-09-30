@@ -1,5 +1,8 @@
 'use strict';
 
+const { err } = require('../lib/errors');
+const { localDay: isoDay } = require('../lib/dates');
+
 /**
  * Double-entry posting, SQL-backed.
  *
@@ -13,7 +16,6 @@
  * is the safeguard.
  */
 
-const err = (code, status = 400) => Object.assign(new Error(code), { status });
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
 const NIL = '00000000-0000-0000-0000-000000000000';
@@ -29,9 +31,6 @@ async function closedThrough(c, branchId) {
   return r.d ? isoDay(r.d) : null;
 }
 
-const isoDay = (d) => (d instanceof Date
-  ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  : String(d).slice(0, 10));
 
 async function assertOpen(c, date, branchIds) {
   for (const b of new Set(branchIds.map((x) => x || null))) {

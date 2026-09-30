@@ -1,6 +1,7 @@
 'use strict';
 
 const { pool } = require('../db/pool');
+const { err } = require('./errors');
 
 /**
  * Access preferences (the reference platform's Administration > Access > Preferences): the
@@ -34,7 +35,6 @@ const DEFAULTS = {
   requireUserAgent: false,
 };
 
-const err = (m, status = 400) => Object.assign(new Error(m), { status });
 const cache = new Map();
 const TTL_MS = 10_000;
 

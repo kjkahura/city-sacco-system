@@ -3,6 +3,7 @@
 const { orgToday } = require('../lib/orgDate');
 const { pageQuery } = require('../lib/page');
 const PERMS = require('../lib/permissions');
+const { err } = require('../lib/errors');
 
 /**
  * Tasks (the reference platform's Tasks): a to-do with a title, notes and a due date,
@@ -18,7 +19,6 @@ const PERMS = require('../lib/permissions');
  * branch's too; an administrator sees all.
  */
 
-function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
 const PLACEHOLDERS = {

@@ -1,5 +1,7 @@
 'use strict';
 
+const { err } = require('./errors');
+
 /**
  * The reference platform's search body ({ filterCriteria, sortingCriteria }) as SQL, for a
  * fixed map of the reference platform field names to SQL expressions. Custom fields are
@@ -15,7 +17,6 @@
  * THIS_YEAR, LAST_DAYS, EMPTY, NOT_EMPTY.
  */
 
-const err = (m, status = 400) => Object.assign(new Error(m), { status });
 
 function build(body = {}, fields, { params = [], customColumn = 'm.custom_fields', today = null } = {}) {
   const where = [];

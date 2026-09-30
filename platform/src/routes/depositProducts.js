@@ -10,6 +10,7 @@ const CF = require('../domain/customFields');
 const AC = require('../domain/accountingChanges');
 const CA = require('../domain/creditArrangements');
 const DR = require('../domain/depositRules');
+const { json } = require('../lib/handlers');
 
 /**
  * Deposit products: interest, withholding tax, overdrafts, fees, and the
@@ -411,17 +412,9 @@ router.post('/:id/accounting-method', requireAuth(), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.get('/:id/accounting-changes', requireAuth(), async (req, res, next) => {
-  try {
-    res.json(await withTenantRead(req.tenant.schema_name, (c) => AC.history(c, 'DEPOSIT', req.params.id)));
-  } catch (e) { next(e); }
-});
+router.get('/:id/accounting-changes', ...json((c, req) => AC.history(c, 'DEPOSIT', req.params.id)));
 
-router.get('/:id/gl-mapping-history', requireAuth(), async (req, res, next) => {
-  try {
-    res.json(await withTenantRead(req.tenant.schema_name, (c) => PA.mappingHistory(c, 'DEPOSIT', req.params.id)));
-  } catch (e) { next(e); }
-});
+router.get('/:id/gl-mapping-history', ...json((c, req) => PA.mappingHistory(c, 'DEPOSIT', req.params.id)));
 
 // --- fees -----------------------------------------------------------------
 

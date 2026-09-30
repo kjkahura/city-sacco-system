@@ -3,6 +3,7 @@
 const { pool } = require('../db/pool');
 const { verifyPassword } = require('./passwords');
 const AP = require('../lib/accessPreferences');
+const { err } = require('../lib/errors');
 
 /**
  * The tenant's password policy (the reference platform's password requirements and access
@@ -11,7 +12,6 @@ const AP = require('../lib/accessPreferences');
  * expiry after which the user must choose a new one.
  */
 
-const err = (m, status = 400) => Object.assign(new Error(m), { status });
 
 /** Refuse a password the policy does not allow. */
 async function check(tenant, password, { email = '', userId = null, currentHash = null } = {}) {

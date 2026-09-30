@@ -1,12 +1,15 @@
 'use strict';
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenant } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const { badRequest } = require('../lib/http');
 const PV = require('../domain/provisioning');
 const CL = require('../domain/close');
 const RT = require('../domain/returns');
+const { json } = require('../lib/handlers');
+const read = (fn) => json((c, req) => fn(c, req));
+const write = (fn) => json((c, req, _res, ctx) => fn(c, req, { actor: ctx.actor }), { write: true });
 
 /**
  * Provisioning, the year-end close, and regulatory returns.
@@ -16,24 +19,6 @@ const RT = require('../domain/returns');
  * API. Reading is open to auditors.
  */
 
-
-const read = (fn) => [
-  requireAuth(),
-  async (req, res, next) => {
-    try { res.json(await withTenantRead(req.tenant.schema_name, (c) => fn(c, req))); }
-    catch (e) { next(e); }
-  },
-];
-
-const write = (fn) => [
-  requireAuth(),
-  async (req, res, next) => {
-    try {
-      res.json(await withTenant(req.tenant.schema_name, (c) =>
-        fn(c, req, { actor: req.auth.email })));
-    } catch (e) { next(e); }
-  },
-];
 
 // --- provisioning ---------------------------------------------------------
 

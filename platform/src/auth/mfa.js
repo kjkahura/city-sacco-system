@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { pool } = require('../db/pool');
 const totp = require('./totp');
 const { hashPassword, verifyPassword } = require('./passwords');
+const { err } = require('../lib/errors');
 
 /**
  * MFA enrolment and verification.
@@ -20,7 +21,6 @@ const TICKET_TTL_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 5;
 
 const sha = (v) => crypto.createHash('sha256').update(v).digest('hex');
-const err = (code, status = 400) => Object.assign(new Error(code), { status });
 
 /** Step 1 of enrolment: hand back a secret to scan. Not active yet. */
 async function beginEnrolment(user, { issuer = 'SACCO Platform' } = {}) {

@@ -3,6 +3,7 @@
 const { orgToday, addDays } = require('../lib/orgDate');
 const acct = require('./accounting');
 const PF = require('./portfolio');
+const { err } = require('../lib/errors');
 
 /**
  * Management reports (the reference platform's Reporting menu): Portfolio, Organization,
@@ -18,7 +19,6 @@ const PF = require('./portfolio');
  *              the opening balances of a data import are left out.
  */
 
-function err(msg, status = 400) { return Object.assign(new Error(msg), { status }); }
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const pct = (a, b) => (Number(b) > 0 ? round2((Number(a) / Number(b)) * 100) : 0);
 const ISO = /^\d{4}-\d{2}-\d{2}$/;

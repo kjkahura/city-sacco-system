@@ -9,6 +9,9 @@ const { pageQuery, sendPage } = require('../lib/page');
 const MA = require('../auth/memberAuth');
 const S = require('../domain/savings');
 const L = require('../domain/loans');
+const { json } = require('../lib/handlers');
+const read = (fn) => json((c, req) => fn(c, req), { guard: requireMember(), what: 'account' });
+const write = (fn) => json((c, req) => fn(c, req, { actor: req.member.memberNo }), { write: true, status: 201, guard: requireMember(), what: 'account' });
 
 /**
  * The member portal API.
@@ -20,26 +23,6 @@ const L = require('../domain/loans');
  */
 
 const router = express.Router();
-
-const read = (fn) => [
-  requireMember(),
-  async (req, res, next) => {
-    try {
-      const out = await withTenantRead(req.tenant.schema_name, (c) => fn(c, req));
-      return out === null ? notFound(res, 'account') : res.json(out);
-    } catch (e) { next(e); }
-  },
-];
-
-const write = (fn) => [
-  requireMember(),
-  async (req, res, next) => {
-    try {
-      const out = await withTenant(req.tenant.schema_name, (c) => fn(c, req, { actor: req.member.memberNo }));
-      return out === null ? notFound(res, 'account') : res.status(201).json(out);
-    } catch (e) { next(e); }
-  },
-];
 
 /** Turn a committed refusal into the error response it stands for. */
 const refused = (res, out) => apiError(res, out.failure.status, out.failure.status, out.failure.code);

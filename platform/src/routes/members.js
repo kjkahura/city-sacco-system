@@ -12,6 +12,7 @@ const IDT = require('../domain/idTemplates');
 const CL = require('../domain/clients');
 const PERMS = require('../lib/permissions');
 const MF = require('../domain/memberFiles');
+const { json } = require('../lib/handlers');
 
 const router = express.Router();
 
@@ -131,11 +132,7 @@ router.get('/:id', requireAuth(), async (req, res, next) => {
 
 // The member's loan history: closed loans, the largest approved, on-time
 // repayment rates and completed loan cycles (./loanHistory).
-router.get('/:id/loan-history', requireAuth(), async (req, res, next) => {
-  try {
-    res.json(await withTenantRead(req.tenant.schema_name, (c) => HIST.forMember(c, req.params.id)));
-  } catch (e) { next(e); }
-});
+router.get('/:id/loan-history', ...json((c, req) => HIST.forMember(c, req.params.id)));
 
 router.post('/', requireAuth(), async (req, res, next) => {
   try {
@@ -156,11 +153,7 @@ router.patch('/:id', requireAuth(), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.delete('/:id', requireAuth(), async (req, res, next) => {
-  try {
-    res.json(await withTenant(req.tenant.schema_name, (c) => CL.remove(c, req.params.id, { user: req.auth })));
-  } catch (e) { next(e); }
-});
+router.delete('/:id', ...json((c, req) => CL.remove(c, req.params.id, { user: req.auth }), { write: true }));
 
 // State actions: { action: APPROVE | UNDO_APPROVE | REJECT | UNDO_REJECT | EXIT | UNDO_EXIT | BLACKLIST | UNDO_BLACKLIST, reason }.
 router.post('/:id/state', requireAuth(), async (req, res, next) => {
@@ -170,11 +163,7 @@ router.post('/:id/state', requireAuth(), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.get('/:id/state-history', requireAuth(), async (req, res, next) => {
-  try {
-    res.json(await withTenantRead(req.tenant.schema_name, (c) => CL.stateHistory(c, req.params.id)));
-  } catch (e) { next(e); }
-});
+router.get('/:id/state-history', ...json((c, req) => CL.stateHistory(c, req.params.id)));
 
 router.post('/:id/association', requireAuth(), async (req, res, next) => {
   try {
@@ -183,17 +172,9 @@ router.post('/:id/association', requireAuth(), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/:id/anonymize', requireAuth(), async (req, res, next) => {
-  try {
-    res.json(await withTenant(req.tenant.schema_name, (c) => CL.anonymize(c, req.params.id, { user: req.auth })));
-  } catch (e) { next(e); }
-});
+router.post('/:id/anonymize', ...json((c, req) => CL.anonymize(c, req.params.id, { user: req.auth }), { write: true }));
 
-router.get('/:id/groups', requireAuth(), async (req, res, next) => {
-  try {
-    res.json(await withTenantRead(req.tenant.schema_name, async (c) => CL.groupsOf(c, (await CL.find(c, req.params.id)).id)));
-  } catch (e) { next(e); }
-});
+router.get('/:id/groups', ...json(async (c, req) => CL.groupsOf(c, (await CL.find(c, req.params.id)).id)));
 
 // Identification documents (./idTemplates).
 const txn = (fn, { write = true, status = 200 } = {}) => [requireAuth(), async (req, res, next) => {

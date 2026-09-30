@@ -9,7 +9,7 @@
  */
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const { pageParams } = require('../lib/page');
 const { orgToday } = require('../lib/orgDate');
@@ -17,22 +17,15 @@ const COA = require('../domain/chartOfAccounts');
 const JE = require('../domain/journalEntries');
 const ACR = require('../domain/accruals');
 const { err } = require('../domain/accounting');
+const { run, pagingHeaders } = require('../lib/handlers');
 
-const run = (fn, { write = false, status = 200 } = {}) => [requireAuth(), async (req, res, next) => {
-  try {
-    const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res));
-    if (out !== undefined) res.status(status).json(out);
-  } catch (e) { next(e); }
-}];
 const by = (req) => ({ createdBy: req.auth.email, user: req.auth });
 const limited = (req) => Array.isArray(req.auth?.branches);
 const orgWide = (req) => { if (limited(req)) throw err('ALL_BRANCH_ACCESS_REQUIRED: the chart of accounts is kept for the whole organization', 403); };
 
 /** The reference platform's paging headers, with ?paginationDetails=ON. */
 function paged(req, res, { total, items }, { offset, limit }) {
-  if (String(req.query.paginationDetails || '').toUpperCase() === 'ON') {
-    res.set('items-offset', String(offset)); res.set('items-limit', String(limit)); res.set('items-total', String(total));
-  }
+  pagingHeaders(req, res, { offset, limit, total });
   return items;
 }
 

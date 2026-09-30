@@ -163,6 +163,10 @@ src/
     ledgerScope.js     accounting reports for a branch-limited user
     limits.js          rate limiting and per-tenant concurrency gates
     ratestore.js       Redis-backed counters, memory fallback
+    handlers.js        the route wrapper: tenant transaction, JSON reply,
+                       status, paging headers
+    errors.js          err(message, status), the error every layer throws
+    dates.js           local and UTC calendar days as yyyy-MM-dd
 public/                the back office console: index.html, app.js, styles.css
 portal/                the member portal: index.html, app.js, api.js, styles.css
 bin/cli.js             migrate, provision, drift, eod, backup, close, returns

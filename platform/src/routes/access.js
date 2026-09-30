@@ -2,13 +2,14 @@
 
 const express = require('express');
 const { withTenantRead } = require('../db/tenantContext');
-const { requireAuth, invalidate } = require('../tenancy/resolve');
+const { invalidate } = require('../tenancy/resolve');
 const AP = require('../lib/accessPreferences');
 const CON = require('../tenancy/consumers');
 const U = require('../tenancy/users');
 const TRAIL = require('../ops/auditTrail');
 const ROLE = require('../domain/roles');
 const { pool } = require('../db/pool');
+const { plain: wrap } = require('../lib/handlers');
 
 /**
  * Access administration (the reference platform's Administration > Access): the tenant's
@@ -26,9 +27,6 @@ const { pool } = require('../db/pool');
  *   GET|PATCH /api/profile
  */
 
-const wrap = (fn, status = 200) => [requireAuth(), async (req, res, next) => {
-  try { res.status(status).json(await fn(req)); } catch (e) { next(e); }
-}];
 const who = (req) => ({ actor: req.auth.email, actorId: req.auth.sub, actorUser: req.auth });
 
 // --- access preferences ---------------------------------------------------------

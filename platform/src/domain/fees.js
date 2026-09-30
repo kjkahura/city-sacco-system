@@ -8,6 +8,7 @@ const ledger = require('./ledger');
 const workflow = require('./workflow');
 const types = require('./productTypes');
 const FA = require('./feeAmortization');
+const { localDay: ymd } = require('../lib/dates');
 const { err, round2 } = acct;
 
 /**
@@ -38,9 +39,6 @@ const { err, round2 } = acct;
  * credited to deferred fee income (./feeAmortization).
  */
 
-const ymd = (d) => (d instanceof Date
-  ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  : String(d).slice(0, 10));
 const today = (c) => orgToday(c);
 
 

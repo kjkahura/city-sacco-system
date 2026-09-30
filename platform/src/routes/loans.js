@@ -2,9 +2,8 @@
 
 const { orgToday } = require('../lib/orgDate');
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
-const { notFound } = require('../lib/http');
 const { pageQuery, sendPage, pageParams } = require('../lib/page');
 const L = require('../domain/loans');
 const P = require('../domain/penalties');
@@ -35,6 +34,10 @@ const CF = require('../domain/customFields');
 const LM = require('../domain/loanMigration');
 const ORG = require('../domain/organization');
 const B = require('../domain/branches');
+const H = require('../lib/handlers');
+const { json } = H;
+const tx = (handler) => H.tx(handler, 'loan');
+const read = (handler) => H.read((c, req) => handler(c, req), 'loan');
 
 const router = express.Router();
 
@@ -43,39 +46,11 @@ const router = express.Router();
 // handler that wants 201 sets res.status(201) and returns; it never sends
 // the body itself, or the client could hear "created" for a transaction
 // that then fails to commit, or read before the row is visible.
-const tx = (handler) => [
-  requireAuth(),
-  async (req, res, next) => {
-    try {
-      const out = await withTenant(req.tenant.schema_name, (c) =>
-        handler(c, req, res, { actor: req.auth.email, user: req.auth }));
-      if (out === undefined) return;
-      if (out === null) return notFound(res, 'loan');
-      res.json(out);
-    } catch (e) { next(e); }
-  },
-];
-
-const read = (handler) => [
-  requireAuth(),
-  async (req, res, next) => {
-    try {
-      const out = await withTenantRead(req.tenant.schema_name, (c) => handler(c, req));
-      return out === null ? notFound(res, 'loan') : res.json(out);
-    } catch (e) { next(e); }
-  },
-];
-
-
 // --- tenant-wide lending controls ------------------------------------------
 
 // The write-off register and the approver's queue. Declared before /:id so
 // the words are not read as account numbers.
-router.get('/write-offs', requireAuth(), async (req, res, next) => {
-  try {
-    res.json(await withTenantRead(req.tenant.schema_name, (c) => WO.register(c, req.query)));
-  } catch (e) { next(e); }
-});
+router.get('/write-offs', ...json((c, req) => WO.register(c, req.query)));
 router.get('/write-off-requests', requireAuth(), async (req, res, next) => {
   try {
     sendPage(res, await withTenantRead(req.tenant.schema_name, (c) => WO.pendingRequests(c, req.query)));

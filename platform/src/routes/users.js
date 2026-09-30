@@ -6,6 +6,7 @@ const U = require('../tenancy/users');
 const { withTenantRead } = require('../db/tenantContext');
 const V = require('../domain/customViews');
 const PERMS = require('../lib/permissions');
+const { plain: wrap } = require('../lib/handlers');
 
 /**
  * Tenant user management (the reference platform's Users and Access Control), /api/users.
@@ -16,9 +17,6 @@ const PERMS = require('../lib/permissions');
  */
 
 const router = express.Router();
-const wrap = (fn, status = 200) => [requireAuth(), async (req, res, next) => {
-  try { res.status(status).json(await fn(req)); } catch (e) { next(e); }
-}];
 const actor = (req) => ({ actor: req.auth.email, actorId: req.auth.sub, actorUser: req.auth });
 
 router.get('/', ...wrap((req) => U.list(req.tenant, { status: req.query.status || null, role: req.query.role || null })));
