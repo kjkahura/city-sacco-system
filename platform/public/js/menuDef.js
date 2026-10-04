@@ -48,13 +48,13 @@ const types = (view, labels, allLabel, perms) => [
 
 export const TOP = [
   { key: 'dashboard', label: 'Dashboard', open: { key: 'dashboard', label: 'Dashboard', view: 'dashboard' } },
-  { key: 'clients', label: 'Clients', entries: states('members', CLIENT_STATES, 'All Clients') },
+  { key: 'clients', label: 'Clients', entries: states('members', CLIENT_STATES, 'All Clients', ['VIEW_CLIENT_DETAILS']) },
   { key: 'groups', label: 'Groups', entries: states('groups', CLIENT_STATES, 'All Groups', ['VIEW_GROUP_DETAILS']) },
   { key: 'loans', label: 'Loans', entries: states('loans', [
     ['partial', 'Partial Application', 'PARTIAL_APPLICATION'], ['pending', 'Pending Approval', 'PENDING_APPROVAL'],
     ['approved', 'Approved', 'APPROVED'], ['active', 'Active', 'ACTIVE'], ['arrears', 'Active in Arrears', 'IN_ARREARS'],
     ['closed', 'Closed', 'CLOSED_REPAID,CLOSED_RESCHEDULED,CLOSED_REFINANCED'], ['writtenOff', 'Written Off', 'CLOSED_WRITTEN_OFF'],
-  ], 'All Loans') },
+  ], 'All Loans', V_LOAN) },
   { key: 'deposits', label: 'Deposits', entries: states('deposits', [
     ['pending', 'Pending Approval', 'PENDING_APPROVAL'], ['approved', 'Approved', 'APPROVED'], ['active', 'Active', 'ACTIVE'],
     ['arrears', 'Active in Arrears', 'ACTIVE_IN_ARREARS'], ['matured', 'Matured', 'MATURED'], ['dormant', 'Dormant', 'DORMANT'],
@@ -74,14 +74,14 @@ export const TOP = [
     ['closed', 'Closed', 'CLOSED'], ['withdrawn', 'Withdrawn', 'WITHDRAWN'], ['rejected', 'Rejected', 'REJECTED'],
   ], 'All', ['VIEW_LINE_OF_CREDIT_DETAILS']) },
   { key: 'products', label: 'Products', entries: [
-    { key: 'loan', label: 'Loan Products', view: 'products', filter: { tab: 'loan' } },
-    { key: 'deposit', label: 'Deposit Products', view: 'products', filter: { tab: 'deposit' } },
+    { key: 'loan', label: 'Loan Products', view: 'products', filter: { tab: 'loan' }, perms: ['VIEW_LOAN_PRODUCT_DETAILS'] },
+    { key: 'deposit', label: 'Deposit Products', view: 'products', filter: { tab: 'deposit' }, perms: ['VIEW_SAVINGS_PRODUCT_DETAILS'] },
   ] },
   { key: 'reporting', label: 'Reporting', entries: [
     { key: 'reports', label: 'Reports', view: 'reports', filter: { which: 'trial-balance' }, perms: ['VIEW_REPORTS', 'VIEW_ACCOUNTING_REPORTS', 'VIEW_INTELLIGENCE'] },
     { key: 'views', label: 'Custom Views', view: 'views' },
     { key: 'templates', label: 'Report Templates', view: 'reports', filter: { which: 'templates' }, perms: ['VIEW_REPORTS'] },
-    { key: 'returns', label: 'Regulatory Returns', view: 'returns' },
+    { key: 'returns', label: 'Regulatory Returns', view: 'returns', perms: V_ACC },
     { key: 'indicators', label: 'Indicators', view: 'reports', filter: { which: 'indicators' }, perms: ['VIEW_INTELLIGENCE'] },
   ] },
   { key: 'accounting', label: 'Accounting', entries: [
@@ -91,9 +91,9 @@ export const TOP = [
     { key: 'balanceSheet', label: 'Balance Sheet', view: 'reports', filter: { which: 'balance-sheet' }, perms: V_ACC },
     { key: 'incomeStatement', label: 'Income Statement', view: 'reports', filter: { which: 'income-statement' }, perms: V_ACC },
     { key: 'accruals', label: 'Interest Accruals', view: 'accruals', perms: V_ACC },
-    { key: 'periods', label: 'Periods and Year-end Close', view: 'finance', divider: true },
-    { key: 'provisioning', label: 'Provisioning', view: 'finance', filter: { only: 'provisioning' } },
-    { key: 'branches', label: 'Branch Accounting', view: 'accounting' },
+    { key: 'periods', label: 'Periods and Year-end Close', view: 'finance', divider: true, perms: V_ACC },
+    { key: 'provisioning', label: 'Provisioning', view: 'finance', filter: { only: 'provisioning' }, perms: V_ACC },
+    { key: 'branches', label: 'Branch Accounting', view: 'accounting', perms: V_ACC },
   ] },
   { key: 'administration', label: 'Administration', open: { key: 'administration', label: 'Administration', view: 'admin' } },
 ];
@@ -185,6 +185,13 @@ export function parseHash(hash) {
   if (value === null || value === '') return { view, filter: {} };
   const hit = ENTRIES.find((e) => e.view === view && valueOf(e.filter)?.[1] === value);
   return hit ? { view, filter: { ...hit.filter } } : HOME;
+}
+
+/** A list page's title: the menu, and the entry its state names ("Loans: Active in Arrears"). */
+export function pageTitle(menuKey, state) {
+  const m = TOP.find((x) => x.key === menuKey);
+  const e = state ? (m.entries || []).find((x) => x.filter?.state === state) : null;
+  return e ? `${m.label}: ${e.label}` : m.label;
 }
 
 /** The menu and entry that open a view with a filter, for marking the bar. */

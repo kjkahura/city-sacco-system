@@ -4,6 +4,7 @@
  */
 
 import { $, S, api, apiRaw, day, el, esc, navFilter, money, openFile, toast } from './base.js';
+import { pageTitle } from './menuDef.js';
 import { ask, card, pager, table, view, wirePager, wireRows } from './ui.js';
 import { creditArrangementDetail, depositDetail } from './accounts.js';
 import { groupsView } from './groups.js';
@@ -35,7 +36,7 @@ export async function membersView(filter) {
   const assoc = can('MANAGE_CLIENT_ASSOCIATION');
 
   view().innerHTML = `
-    <div class="toolbar">
+    <div class="toolbar"><h1>${esc(pageTitle('clients', memberState.status))}</h1>
       <label>Search<input id="m-q" value="${esc(memberState.q)}" placeholder="name, number, phone, email or national ID"></label>
       <label>State<select id="m-status">
         ${['', ...MEMBER_STATES].map((s) =>

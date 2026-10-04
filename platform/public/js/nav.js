@@ -34,7 +34,7 @@ import { adminView, wireAdmin } from './admin.js';
  */
 let adminWired = false;
 
-export function go(name, filter = {}) {
+export function go(name, filter = {}, { replace = false } = {}) {
   if (!adminWired) { wireAdmin(go); adminWired = true; }
   // Administration's tabs show only on its page.
   if (name !== 'admin') el('subnav').hidden = true;
@@ -43,7 +43,8 @@ export function go(name, filter = {}) {
   const h = hashOf(name, S.filter);
   if (location.hash !== h) {
     S.hash = h;
-    location.hash = h;
+    // Correcting the hash the page was opened with replaces it, so Back does not return to it and be corrected again.
+    if (replace) history.replaceState(null, '', h); else location.hash = h;
   }
   markActive(name, S.filter);
   for (const n of el('menu-nav').children) n.classList.remove('active');
@@ -53,12 +54,14 @@ export function go(name, filter = {}) {
 /** Open the page the address hash names (an unknown one opens the dashboard). */
 export function openFromHash() {
   const { view: v, filter } = parseHash(location.hash);
-  go(VIEWS[v] ? v : 'dashboard', filter);
+  go(VIEWS[v] ? v : 'dashboard', filter, { replace: true });
 }
 
 // Pages draw one at a time, the latest last: a page opened while another is
 // still loading waits for it, and one opened and left before it started is skipped.
 // Without this, a slow page could finish after a later one and draw over it.
+// The wait is capped, so a request that never answers does not hold up the console.
+const WAIT_MS = 3000;
 let drawing = Promise.resolve();
 let latest = 0;
 
@@ -66,7 +69,8 @@ export function render() {
   const seq = ++latest;
   closeMenus();
   view().innerHTML = '<p class="hint">Loading…</p>';
-  drawing = drawing.then(async () => {
+  const previous = drawing;
+  drawing = Promise.race([previous, new Promise((ok) => setTimeout(ok, WAIT_MS))]).then(async () => {
     if (seq !== latest) return;
     const fn = VIEWS[S.view] || VIEWS.dashboard;
     try {

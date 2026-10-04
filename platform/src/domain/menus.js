@@ -34,17 +34,17 @@ const ADMINISTRATION = ['MANAGE_GENERAL_SETUP', 'MANAGE_HOLIDAYS', 'MANAGE_CURRE
   'CREATE_REPORTS', 'EDIT_REPORTS', 'MANAGE_RETURNS', 'IMPORT_DATA', 'DOWNLOAD_BACKUPS', 'VIEW_DATA_IMPORTS', 'EXTRACT_DATA'];
 const FIXED = [
   { key: 'dashboard', name: 'Dashboard', permission: null },
-  { key: 'clients', name: 'Clients', permission: null },
+  { key: 'clients', name: 'Clients', permission: ['VIEW_CLIENT_DETAILS'] },
   { key: 'groups', name: 'Groups', permission: ['VIEW_GROUP_DETAILS'] },
-  { key: 'loans', name: 'Loans', permission: null },
+  { key: 'loans', name: 'Loans', permission: ['VIEW_LOAN_ACCOUNT_DETAILS'] },
   { key: 'deposits', name: 'Deposits', permission: ['VIEW_SAVINGS_ACCOUNT_DETAILS'] },
   { key: 'loanTransactions', name: 'Loan Transactions', permission: ['VIEW_LOAN_ACCOUNT_DETAILS'] },
   { key: 'depositTransactions', name: 'Deposit Transactions', permission: ['VIEW_SAVINGS_ACCOUNT_DETAILS'] },
   { key: 'activities', name: 'Activities', permission: ['AUDIT_TRANSACTIONS'] },
   { key: 'creditArrangements', name: 'Credit Arrangements', permission: ['VIEW_LINE_OF_CREDIT_DETAILS'] },
-  { key: 'products', name: 'Products', permission: null },
+  { key: 'products', name: 'Products', permission: ['VIEW_LOAN_PRODUCT_DETAILS', 'VIEW_SAVINGS_PRODUCT_DETAILS'] },
   { key: 'reporting', name: 'Reporting', permission: null },
-  { key: 'accounting', name: 'Accounting', permission: null },
+  { key: 'accounting', name: 'Accounting', permission: ['VIEW_ACCOUNTING_REPORTS', 'LOG_JOURNAL_ENTRIES', 'MANAGE_ACCOUNTS'] },
   { key: 'administration', name: 'Administration', permission: ADMINISTRATION },
 ];
 

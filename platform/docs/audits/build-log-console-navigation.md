@@ -1,6 +1,6 @@
 # Build log: console navigation
 
-Built on 4 October 2026 from the design that John approved (`docs/superpowers/specs/2026-10-04-console-navigation-design.md`) and its plan (`docs/superpowers/plans/2026-10-04-console-navigation.md`). There are three commits on main, each starting "Console:". They are not pushed.
+Built on 4 October 2026 from the design that John approved (`docs/superpowers/specs/2026-10-04-console-navigation-design.md`) and its plan (`docs/superpowers/plans/2026-10-04-console-navigation.md`). There are four commits on main, each starting "Console:": three for the build and one for the fixes from the final review. They are not pushed.
 
 ## Built
 
@@ -31,11 +31,12 @@ Built on 4 October 2026 from the design that John approved (`docs/superpowers/sp
   - a reload resumes the session on the same page;
   - a bookmark opens it.
 - **A bad hash:** an unknown hash, or a bad value in one, opens the dashboard. An unknown Administration tab opens the first tab.
+- **A corrected hash replaces the one it corrects,** so Back leaves it instead of returning to it and being corrected again.
 - **Pages that left the bar:** Organization, Controls, Data, Users and Access still open from their hash.
 
 ### Pages filtered from the menus
 
-- **Clients, Groups and Loans:** they take a state. Groups gained a State select.
+- **Clients, Groups and Loans:** they take a state, and the title names it ("Loans: Active in Arrears"). Groups gained a State select.
 - **Loans, Closed:** this covers repaid, rescheduled and refinanced loans. `GET /api/loans?status=` takes several states separated by commas.
 - **Products:**
   - Loan Products and Deposit Products each show their own list;
@@ -66,6 +67,7 @@ Built on 4 October 2026 from the design that John approved (`docs/superpowers/sp
 - **Which side a transaction belongs to:**
   - a loan transaction is one posted on a loan account;
   - a deposit transaction is one posted on a deposit account;
+  - a posting on both kinds of account, such as a recovery taken from a guarantor's deposit and its reversal, is a loan transaction unless it is a deposit kind;
   - a reversal is listed with the side it reverses and names what it reverses.
 - **Access:**
   - the branch rules apply as on every read;
@@ -83,12 +85,14 @@ Built on 4 October 2026 from the design that John approved (`docs/superpowers/sp
 - **Permissions:**
   - tabs carry setup permissions such as MANAGE_GENERAL_SETUP, EDIT_BRANCH and CREATE_CUSTOM_FIELD;
   - so a teller has no Administration menu and no cog;
+  - every menu entry carries the permission the server checks for its page, so no entry is shown that would be refused;
   - the server's checks are unchanged.
 
 ### Pages draw one at a time
 
 - **The fault:** a page that was still loading when another was opened could finish later and draw over it. The full test run caught this when the cog was clicked and a tab was chosen straight away.
 - **The fix:** `render()` in `nav.js` now draws pages one at a time, the latest last, and skips a page left before it started.
+- **A cap on the wait:** a page waits at most three seconds for the one before it, so a request that never answers does not hold up the console.
 
 ### Server menu keys
 
@@ -96,16 +100,18 @@ Built on 4 October 2026 from the design that John approved (`docs/superpowers/sp
 
 ## Tests
 
-- **New suite:** `test/transactions-search.test.js` has 20 checks. It covers:
+- **New suite:** `test/transactions-search.test.js` has 22 checks. It covers:
   - reversals on each side;
   - filters, sorting and paging;
   - branch limits and permissions;
   - an unknown field;
   - the route order;
-  - several loan states.
+  - several loan states;
+  - a posting on both kinds of account;
+  - the menus of a user without account rights.
 - **Changed suites:**
   - `test/access.test.js`: the menu keys and a teller's menus (71);
-  - `test/console.test.js` drives the new bar throughout (168 checks). New checks cover:
+  - `test/console.test.js` drives the new bar throughout (172 checks). New checks cover:
     - the dropdowns and keyboard;
     - filtered pages and the hash;
     - Back and reload;
@@ -113,6 +119,7 @@ Built on 4 October 2026 from the design that John approved (`docs/superpowers/sp
     - a 1024 pixel window;
     - each new list;
     - every Administration tab, and a tab chosen while the last one is still loading;
+    - Back from a corrected hash, and a page whose request never answers;
     - the teller's menus.
 - **A test fix outside this build:** `test/custom-fields.test.js` saves one unique value for two members at once. Either save may win, but the test assumed the first did and failed 5 checks when the second won. It now handles either outcome.
 - **Full runs, 46 suites, in UTC and in Africa/Nairobi:** all pass except lending (2 checks), loan-accounting (8) and loan-accounts (1). Those fail the same way on the commit before this build:

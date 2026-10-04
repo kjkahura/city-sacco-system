@@ -115,6 +115,24 @@ async function login(email, password = PW) {
     const byMember = await T((c) => TS.search(c, 'LOAN', { filterCriteria: [{ field: 'memberKey', operator: 'EQUALS', value: made.NKR.m.id }] }, pg));
     check('by member', byMember.rows.length >= 2 && byMember.rows.every((r) => r.memberId === made.NKR.m.member_no), JSON.stringify(byMember.rows.map((r) => r.memberId)));
 
+    // A recovery collected from a guarantor's deposit, and its reversal, carry both accounts.
+    await T((c) => c.query(
+      `INSERT INTO transactions (reference, kind, member_id, savings_account_id, loan_account_id, amount, branch_id, allocation, created_by)
+       VALUES ('LRC-BOTH', 'LOAN_RECOVERY', $1, $2, $3, 500, $4, '{}', 'test'),
+              ('REV-BOTH', 'REVERSAL', $1, $2, $3, 500, $4, '{"reversalOf":"LRC-BOTH"}', 'test')`,
+      [made.HQ.m.id, made.HQ.sav.id, made.HQ.loan.id, hq.id]));
+    const bothDep = await T((c) => TS.search(c, 'DEPOSIT', {}, pg));
+    const bothLoan = await T((c) => TS.search(c, 'LOAN', {}, pg));
+    check('a transaction on both a loan and a deposit account is a loan transaction only',
+      !bothDep.rows.some((r) => ['LRC-BOTH', 'REV-BOTH'].includes(r.reference)) && bothLoan.rows.filter((r) => ['LRC-BOTH', 'REV-BOTH'].includes(r.reference)).length === 2,
+      JSON.stringify(bothDep.rows.map((r) => r.reference)));
+
+    // ------------------------------------------------------------------------
+    section('the menu a user without account rights gets');
+    const navNone = await call('GET', '/api/menu', null, { who: 'none' });
+    check('only what their permissions open', JSON.stringify(navNone.body.fixed.map((f) => f.key)) === JSON.stringify(['dashboard', 'clients', 'reporting']),
+      navNone.body.fixed.map((f) => f.key).join());
+
     // ------------------------------------------------------------------------
     section('the two endpoints');
     const repay = { filterCriteria: [{ field: 'type', operator: 'IN', values: ['LOAN_REPAYMENT'] }] };

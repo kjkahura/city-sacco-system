@@ -167,6 +167,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForSelector('#m-status');
     await openMenu(page, 'loans', 'arrears');
     await page.waitForSelector('#l-status');
+    check('the page title names the filter', /Loans: Active in Arrears/.test(await page.textContent('main h1')), await page.textContent('main'));
     check('a dropdown entry opens the page filtered, and the hash names it', await page.evaluate(() => location.hash) === '#loans/IN_ARREARS'
       && await page.$eval('#l-status', (x) => x.value) === 'IN_ARREARS', await page.evaluate(() => location.hash));
     check('the open menu is marked', await page.$eval('#nav [data-menu="loans"]', (b) => b.classList.contains('active')));
@@ -179,12 +180,33 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForSelector('#app:not([hidden])');
     await page.waitForSelector('#l-status');
     check('a reload resumes the session on the filtered page', await page.$eval('#l-status', (x) => x.value) === 'IN_ARREARS');
+    await openMenu(page, 'clients', 'pending');
+    await page.waitForSelector('main h1:has-text("Clients: Pending Approval")');
+    await openMenu(page, 'groups', 'active');
+    await page.waitForSelector('main h1:has-text("Groups: Active")');
+    check('Clients and Groups name their state in the title', true);
     const before = jsErrors.length;
     await page.goto(`http://localhost:${PORT}/console/#nonsense/%25%25%25`);
     await page.waitForSelector('#app:not([hidden])');
     await page.waitForSelector('#dash-tasks, #your-tasks-counts, .dashboard', { timeout: 10000 }).catch(() => {});
     check('a bad hash opens the dashboard without an error', await page.evaluate(() => location.hash) === '#dashboard' && jsErrors.length === before,
       `${await page.evaluate(() => location.hash)} ${jsErrors.slice(before).join(' | ')}`);
+    await openMenu(page, 'loans', 'all');
+    await page.waitForSelector('#l-status');
+    await page.goBack();
+    await page.waitForFunction(() => location.hash === '#dashboard');
+    await page.goBack();
+    await new Promise((r) => setTimeout(r, 1000));
+    check('Back from the corrected hash leaves it, rather than landing on it again', await page.evaluate(() => location.hash) !== '#dashboard',
+      await page.evaluate(() => location.hash));
+    await page.goForward();
+    await new Promise((r) => setTimeout(r, 500));
+    await page.route('**/api/activities?**', () => {});
+    await openMenu(page, 'activities');
+    await openMenu(page, 'clients', 'all');
+    const freed = await page.waitForSelector('#m-status', { timeout: 15000 }).then(() => true, () => false);
+    check('a page that never finishes loading does not hold up the next one', freed);
+    await page.unroute('**/api/activities?**');
     await page.setViewportSize({ width: 1024, height: 800 });
     check('at 1024 pixels the page does not scroll sideways', await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
       String(await page.evaluate(() => document.documentElement.scrollWidth)));

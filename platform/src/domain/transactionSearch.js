@@ -10,13 +10,17 @@ const { err } = require('../lib/errors');
  *
  * A loan transaction is one posted on a loan account, a deposit transaction
  * one posted on a deposit account, so a reversal is listed with the side it
- * reverses. The branch row security on transactions applies as on every
+ * reverses (a posting on both kinds of account is the loan's unless it is a
+ * deposit kind). The branch row security on transactions applies as on every
  * read, so a user limited to some branches finds only theirs.
  */
 
+// A posting on both a loan and a deposit account (a recovery taken from a
+// guarantor's deposit, and its reversal) is the loan's, unless it is one of
+// the deposit account's own kinds.
 const SIDES = {
-  LOAN: { join: 'JOIN loan_accounts x ON x.id = t.loan_account_id' },
-  DEPOSIT: { join: 'JOIN savings_accounts x ON x.id = t.savings_account_id' },
+  LOAN: { join: 'JOIN loan_accounts x ON x.id = t.loan_account_id', only: "(t.savings_account_id IS NULL OR t.kind NOT LIKE 'SAVINGS\\_%')" },
+  DEPOSIT: { join: 'JOIN savings_accounts x ON x.id = t.savings_account_id', only: "(t.loan_account_id IS NULL OR t.kind LIKE 'SAVINGS\\_%')" },
 };
 
 // Search names, after the reference platform's, and their SQL.
@@ -70,7 +74,7 @@ async function search(c, side, body = {}, { offset = 0, limit = 50 } = {}) {
             x.id AS account_id, x.account_no, x.product_id, m.id AS member_id, m.member_no, m.first_name, m.last_name,
             count(*) OVER () AS total
        FROM transactions t ${s.join} JOIN members m ON m.id = x.member_id
-      WHERE ${q.where}
+      WHERE ${s.only} AND ${q.where}
       ORDER BY ${q.order ? `${q.order}, ` : ''}t.created_at DESC, t.id
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}`, q.params);
   return { rows: rows.map(row), total: rows.length ? Number(rows[0].total) : (offset ? await count(c, s, q) : 0) };
@@ -79,7 +83,7 @@ async function search(c, side, body = {}, { offset = 0, limit = 50 } = {}) {
 // The count when a page past the end is asked for.
 async function count(c, s, q) {
   const { rows: [r] } = await c.query(
-    `SELECT count(*)::int AS n FROM transactions t ${s.join} JOIN members m ON m.id = x.member_id WHERE ${q.where}`, q.params);
+    `SELECT count(*)::int AS n FROM transactions t ${s.join} JOIN members m ON m.id = x.member_id WHERE ${s.only} AND ${q.where}`, q.params);
   return r.n;
 }
 

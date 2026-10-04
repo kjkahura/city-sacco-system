@@ -3,6 +3,7 @@
  */
 
 import { $, S, api, apiRaw, day, esc, navFilter, money, openFile, toast, today } from './base.js';
+import { pageTitle } from './menuDef.js';
 import { ask, card, pager, scheduleEditor, table, view, wirePager, wireRows } from './ui.js';
 import { activityCard, loadActivity } from './members.js';
 import { collectionsView } from './collections.js';
@@ -25,7 +26,7 @@ export async function loansView(filter) {
   if (!r.ok) throw new Error(r.error);
 
   view().innerHTML = `
-    <div class="toolbar">
+    <div class="toolbar"><h1>${esc(pageTitle('loans', loanState.status))}</h1>
       <label>Status<select id="l-status">
         ${['', 'CLOSED_REPAID,CLOSED_RESCHEDULED,CLOSED_REFINANCED', 'PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'IN_ARREARS', 'LOCKED', 'CLOSED_REPAID',
     'CLOSED_WRITTEN_OFF', 'CLOSED_RESCHEDULED', 'CLOSED_REFINANCED', 'CLOSED_REJECTED', 'CLOSED_WITHDRAWN'].map((s) =>

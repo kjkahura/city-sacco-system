@@ -24,7 +24,7 @@ export function start(session) {
   showHeaderIcon();
   loadAccess().then(() => {
     if (S.user.roleCode) el('whoami').textContent = `${S.user.name || S.user.email} (${S.user.roleCode}, ${S.user.role})`;
-    if (location.hash && location.hash !== '#') openFromHash(); else go(S.view || 'members');
+    if (location.hash && location.hash !== '#') openFromHash(); else go(S.view || 'members', {}, { replace: true });
   });
 }
 
