@@ -293,6 +293,13 @@ const COMMANDS = {
     }, { read: true });
   },
 
+  // Deliver webhooks for every tenant: events into messages, due messages sent (the sacco-notify job, every minute).
+  async 'notifications:run'() {
+    const out = await require('../src/domain/notifications/dispatch').runAll({ log: console.log });
+    console.log(`${out.length} tenant(s) with webhooks`);
+    if (out.some((r) => r.error)) process.exitCode = 1;
+  },
+
   async 'tokens:prune'() {
     console.log(`pruned ${await tokens.prune(Number(arg('days', 60)))} expired refresh tokens`);
   },

@@ -118,6 +118,11 @@ const tenantApi = express.Router();
 tenantApi.use(nullHandling());
 tenantApi.use(resolveTenant({ required: true }));
 tenantApi.use(auditTrail.recorder());
+// After a request that changed something, deliver the webhooks it raised (domain/notifications/dispatch).
+tenantApi.use((req, res, next) => {
+  if (req.method !== 'GET') res.on('finish', () => { if (res.statusCode < 400 && req.tenant) require('./domain/notifications/dispatch').afterRequest(req.tenant.schema_name); });
+  next();
+});
 // The reference platform's User-Agent rule, when the tenant's access preferences turn it on.
 tenantApi.use(auditTrail.requireUserAgent());
 tenantApi.use(rateLimit());
@@ -184,6 +189,15 @@ tenantApi.use('/client-controls', clientRoutes.controls);
 tenantApi.use('/creditarrangements', require('./routes/creditArrangements').router);
 tenantApi.use('/bulks', require('./routes/savings').bulks);
 tenantApi.use('/deposits', require('./routes/deposits').router);
+const notifications = require('./routes/notifications');
+tenantApi.use('/templates', notifications.templates);
+// The colon actions sit beside the collection, as the other searches do.
+for (const a of ['search', 'searchSorted', 'resend', 'resendAsyncByKeys', 'resendAsyncByDate']) {
+  tenantApi.post(`/communications/messages\\:${a}`, ...notifications.actions[a]);
+}
+tenantApi.use('/communications/messages', notifications.messages);
+tenantApi.use('/notifications/messages', notifications.v1);
+tenantApi.use('/notificationsettings', notifications.settings);
 
 const savings = require('./routes/savings');
 tenantApi.use('/savings', savings);

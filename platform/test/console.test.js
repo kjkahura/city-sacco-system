@@ -15,6 +15,10 @@
  * server-side test ever written, which is why this one exists.
  */
 
+// Webhooks sent from the console checks go nowhere reachable; keep their wait short and do not send after requests.
+process.env.NOTIFY_TIMEOUT_MS = '1500';
+process.env.NOTIFY_AFTER_REQUEST = 'off';
+
 let playwright;
 try {
   playwright = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -268,9 +272,9 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('#subnav [data-tab="organization"]');
     await page.waitForSelector('#org-branches');
     check('Organization has the branches and centres', !(await page.$('#org-details')));
-    await page.click('#subnav [data-tab="webhooks"]');
+    await page.click('#subnav [data-tab="events"]');
     await page.waitForSelector('main .notice');
-    check('Webhooks says it is being built', /being built/.test(await page.textContent('main .notice')));
+    check('Events Streaming says it is being built', /being built/.test(await page.textContent('main .notice')));
     await page.goto(`http://localhost:${PORT}/console/#admin/fields`);
     await page.waitForSelector('#cf-entity');
     check('#admin/fields opens the Fields tab', await page.$eval('#subnav [data-tab="fields"]', (b) => b.classList.contains('active')));
@@ -1036,6 +1040,44 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('dialog[open] button[value=ok]');
     await page.waitForFunction(() => /new.teller@uitest.local/.test(document.getElementById('till-list')?.textContent || ''));
     check('a supervisor opens a till for the new teller', /5,000\.00/.test(await page.textContent('#till-list')), await page.textContent('#till-list'));
+    section('webhooks');
+    await openAdmin(page, 'webhooks', 0);
+    await page.waitForSelector('#wh-new');
+    await page.click('#wh-new');
+    await page.waitForSelector('#wh-name');
+    await page.fill('#wh-name', 'Deposits to the bank');
+    await page.selectOption('#wh-event', 'SAVINGS:SAVINGS_DEPOSIT');
+    await page.fill('#wh-url', 'https://example.org/hooks/deposits');
+    await page.fill('#wh-body', '{"client": "');
+    await page.click('#wh-placeholders [data-ph="CLIENT_NAME"]');
+    await page.type('#wh-body', '", "amount": {{TRANSACTION_AMOUNT}}}');
+    check('the placeholder picker writes into the body', /\{\{CLIENT_NAME\}\}/.test(await page.inputValue('#wh-body')), await page.inputValue('#wh-body'));
+    await page.click('#wh-save');
+    await page.waitForSelector('#wh-secret');
+    check('saved: the signing secret is shown once', /^[0-9a-f]{64}$/.test((await page.textContent('#wh-secret')).trim()));
+    await page.click('#dlg-close');
+    await page.waitForSelector('#wh-list');
+    check('the webhook is listed', /Deposits to the bank/.test(await page.textContent('#wh-list')) && /SAVINGS_DEPOSIT/.test(await page.textContent('#wh-list')));
+    await page.click('#wh-list tr[data-row]');
+    await page.waitForSelector('#wh-test');
+    await page.click('#wh-test');
+    await page.waitForSelector('#wh-test-result', { timeout: 15000 });
+    check('a test is sent and its outcome shown', /SENT|FAILED/.test(await page.textContent('#wh-test-result')), await page.textContent('#wh-test-result'));
+    await openAdmin(page, 'webhooks', 0);
+    await page.waitForSelector('#wh-switch');
+    await page.click('#wh-switch');
+    await page.waitForFunction(() => /off/i.test(document.getElementById('wh-state')?.textContent || ''));
+    check('webhooks are switched off from the page', true);
+    await page.click('#wh-switch');
+    await page.waitForFunction(() => /on/i.test(document.getElementById('wh-state')?.textContent || ''));
+    await openAdmin(page, 'webhooks', 1);
+    await page.waitForSelector('#msg-list tr[data-row]');
+    check('the communication log lists the test message', /SAVINGS_DEPOSIT/.test(await page.textContent('#msg-list')));
+    await page.click('#msg-list tr[data-row]');
+    await page.waitForSelector('dialog[open] #msg-body');
+    check('a message opens with its body', /amount/.test(await page.textContent('dialog[open] #msg-body')));
+    await page.click('#dlg-close');
+
     section('access administration');
     await openAdmin(page, 'access', 1);
     await page.waitForSelector('#ap-form');

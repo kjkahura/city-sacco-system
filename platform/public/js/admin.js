@@ -21,6 +21,7 @@ import { viewsView } from './views.js';
 import { reportsView } from './reports.js';
 import { returnsView } from './finance.js';
 import { dataView } from './data.js';
+import { messagesView, webhooksView } from './webhooks.js';
 
 const GENERAL = ['details', 'branding', 'eod', 'holidays', 'channels', 'idTemplates', 'rates', 'currencies'];
 
@@ -34,6 +35,7 @@ const PARTS = {
   products: [['Loan and Deposit Products', () => productsView({ only: ['loan', 'deposit'] })], ['Lending Controls', () => controlsView()]],
   fields: [['Fields', () => orgView({ only: ['fields'] })]],
   views: [['Custom Views and Menu Items', () => viewsView()]],
+  webhooks: [['Webhooks', () => webhooksView()], ['Communication Log', () => messagesView()]],
   templates: [['Report Templates', () => reportsView({ which: 'templates' })], ['Product Documents', () => orgView({ only: ['documents'] })]],
   reports: [['Regulatory Return Templates', () => returnsView()]],
   data: [['Import, Backups, Data Dictionary, Extract', () => dataView()]],

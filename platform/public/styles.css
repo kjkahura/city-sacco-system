@@ -192,3 +192,8 @@ table.grouped-editor td input, table.grouped-editor td select { width: 100%; min
 .subnav .tabs, .subnav .parts { display: flex; gap: 2px; flex-wrap: wrap; }
 .subnav .parts { font-size: 13px; }
 .subnav button { background: none; border: 1px solid transparent; color: var(--muted); padding: 6px 10px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { background: var(--bg); border: 1px solid var(--line); color: var(--ink); border-radius: 12px; padding: 2px 8px; font-size: 12px; }
+pre.secret { font-size: 13px; padding: 8px; background: var(--bg); border: 1px solid var(--line); overflow-wrap: anywhere; white-space: pre-wrap; }
+label.check { display: flex; align-items: center; gap: 8px; }
+label.check input[type=checkbox] { width: auto; margin: 0; }

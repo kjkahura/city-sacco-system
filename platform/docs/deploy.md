@@ -62,6 +62,8 @@ gcloud sql databases create sacco --instance=sacco-db
 # Secrets, generated here
 openssl rand -base64 32 | tr -d '\n' | gcloud secrets create sacco-db-password --data-file=-
 openssl rand -base64 48 | tr -d '\n' | gcloud secrets create sacco-jwt-secret --data-file=-
+# The key webhook passwords and signing secrets are encrypted with. Keep it: a new one makes stored secrets unreadable.
+openssl rand -base64 48 | tr -d '\n' | gcloud secrets create sacco-secrets-key --data-file=-
 gcloud sql users create sacco --instance=sacco-db \
   --password="$(gcloud secrets versions access latest --secret=sacco-db-password)"
 
@@ -115,7 +117,7 @@ Push to `main`, or run the workflow from the Actions tab (Test and deploy > Run 
 2. **Image:** builds it and pushes it to Artifact Registry.
 3. **Migrations:** runs them as the `sacco-migrate` job.
 4. **Service:** deploys the Cloud Run service.
-5. **Scheduled jobs:** updates `sacco-eod` and `sacco-tokens`.
+5. **Scheduled jobs:** updates `sacco-eod`, `sacco-tokens` and `sacco-notify`.
 6. **Hosting:** deploys Firebase Hosting.
 7. **Check:** requests `/health` on `PROJECT_ID.web.app`.
 
@@ -148,7 +150,7 @@ For each further SACCO, run the same job with its own slug, name and email.
 ## 6. Scheduled jobs
 
 ```sh
-for s in "sacco-eod|0 22 * * *" "sacco-tokens|0 3 * * *"; do
+for s in "sacco-eod|0 22 * * *" "sacco-tokens|0 3 * * *" "sacco-notify|* * * * *"; do
   job="${s%%|*}"; cron="${s#*|}"
   gcloud scheduler jobs create http "$job" --location="$REGION" --schedule="$cron" --time-zone="Africa/Nairobi" \
     --http-method=POST --uri="https://run.googleapis.com/v2/projects/$PROJECT/locations/$REGION/jobs/$job:run" \
@@ -157,6 +159,8 @@ done
 ```
 
 The end of day is idempotent per business date, so a retried run does no harm. Each SACCO's own end-of-day settings (automatic or manual) still apply.
+
+`sacco-notify` runs every minute and delivers webhooks: it turns new events into messages and sends what is due, including retries. The service also sends a request's webhooks straight after the request, but Cloud Run slows a container's CPU once it has answered and stops idle containers, so the job is what guarantees delivery. Runs that overlap do not send a message twice.
 
 ## 7. The custom domain on Cloudflare (when you have one)
 

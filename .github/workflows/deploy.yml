@@ -102,7 +102,7 @@ jobs:
       - name: Settings
         run: |
           echo "ENV_VARS=NODE_ENV=production,PGHOST=/cloudsql/$SQL_INSTANCE,PGUSER=sacco,PGDATABASE=sacco,PGPOOL_MAX=10,SCHEDULER=off,TRUST_PROXY=2" >> "$GITHUB_ENV"
-          echo "SECRETS=PGPASSWORD=sacco-db-password:latest,JWT_SECRET=sacco-jwt-secret:latest" >> "$GITHUB_ENV"
+          echo "SECRETS=PGPASSWORD=sacco-db-password:latest,JWT_SECRET=sacco-jwt-secret:latest,SECRETS_KEY=sacco-secrets-key:latest" >> "$GITHUB_ENV"
 
       - name: Migrate the database
         run: |
@@ -124,7 +124,7 @@ jobs:
       # Scheduled work runs as jobs; Cloud Scheduler starts them (docs/deploy.md).
       - name: Update the scheduled jobs
         run: |
-          for job in "sacco-eod:eod:run" "sacco-tokens:tokens:prune"; do
+          for job in "sacco-eod:eod:run" "sacco-tokens:tokens:prune" "sacco-notify:notifications:run"; do
             name="${job%%:*}"; cmd="${job#*:}"
             gcloud run jobs deploy "$name" --image "$IMAGE" --region "$REGION" \
               --service-account "$RUNTIME_SA" --set-cloudsql-instances "$SQL_INSTANCE" \

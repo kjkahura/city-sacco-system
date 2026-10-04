@@ -102,6 +102,7 @@ async function tick({ log = console.log } = {}) {
 }
 
 let timer = null;
+let notifyTimer = null;
 
 function start({ intervalMs = 15 * 60_000, log = console.log } = {}) {
   if (timer) return timer;
@@ -109,9 +110,18 @@ function start({ intervalMs = 15 * 60_000, log = console.log } = {}) {
       `(${TASKS.map((t) => `${t.name}@${t.hour}h`).join(', ')})`);
   timer = setInterval(() => { tick({ log }).catch((e) => log('[scheduler] error', e.message)); }, intervalMs);
   timer.unref();
+  // Webhooks every minute (retries are minutes apart), under the same lock as the job.
+  notifyTimer = setInterval(() => {
+    withGlobalLock('notifications', () => require('../domain/notifications/dispatch').runAll({}))
+      .catch((e) => log('[scheduler] notifications error', e.message));
+  }, 60_000);
+  notifyTimer.unref();
   return timer;
 }
 
-function stop() { if (timer) { clearInterval(timer); timer = null; } }
+function stop() {
+  if (timer) { clearInterval(timer); timer = null; }
+  if (notifyTimer) { clearInterval(notifyTimer); notifyTimer = null; }
+}
 
 module.exports = { start, stop, tick, withGlobalLock, TASKS, localHour };

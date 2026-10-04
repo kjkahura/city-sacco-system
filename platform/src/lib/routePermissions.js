@@ -27,6 +27,8 @@ const V_MEMBER = 'VIEW_CLIENT_DETAILS';
 const V_LOAN = 'VIEW_LOAN_ACCOUNT_DETAILS';
 const V_DEP = 'VIEW_SAVINGS_ACCOUNT_DETAILS';
 const V_ACC = 'VIEW_ACCOUNTING_REPORTS';
+// Webhooks are seen by those who make or edit them, and by setup administrators (the reference platform's View Administration Details).
+const TEMPLATES_VIEW = ['CREATE_COMMUNICATION_TEMPLATES', 'EDIT_COMMUNICATION_TEMPLATES', 'MANAGE_GENERAL_SETUP'];
 const EOD = 'MANAGE_EOD_PROCESSING';
 // Changing a member or group: the details, its ID, its type, its association,
 // or (blacklisted) its custom fields. ../domain/clients checks the one a change needs.
@@ -140,6 +142,15 @@ const RULES = [
   // shape of every colon action; each checks the permission it needs.
   ['GET', '/deposits', V_DEP], ['GET', '/deposits/*', V_DEP], ['POST', '/deposits:search', V_DEP],
   ['POST', '/deposits/transactions:search', V_DEP], ['POST', '/loans/transactions:search', V_LOAN],
+  // Webhooks (the reference platform's templates, communication log and notification settings).
+  ['GET', '/templates', TEMPLATES_VIEW], ['GET', '/templates/:id', TEMPLATES_VIEW],
+  ['POST', '/templates', 'CREATE_COMMUNICATION_TEMPLATES'], ['POST', '/templates/:id', 'EDIT_COMMUNICATION_TEMPLATES'],
+  ['PATCH', '/templates/:id', 'EDIT_COMMUNICATION_TEMPLATES'], ['DELETE', '/templates/:id', 'EDIT_COMMUNICATION_TEMPLATES'],
+  ['GET', '/communications/messages/:key', 'VIEW_COMMUNICATION_HISTORY'], ['POST', '/communications/messages:search', 'VIEW_COMMUNICATION_HISTORY'],
+  ['POST', '/communications/messages:searchSorted', 'VIEW_COMMUNICATION_HISTORY'], ['POST', '/communications/messages:resend', 'RESEND_FAILED_MESSAGES'],
+  ['POST', '/communications/messages:resendAsyncByKeys', 'RESEND_FAILED_MESSAGES'], ['POST', '/communications/messages:resendAsyncByDate', 'RESEND_FAILED_MESSAGES'],
+  ['POST', '/notifications/messages/search', 'VIEW_COMMUNICATION_HISTORY'], ['POST', '/notifications/messages', 'RESEND_FAILED_MESSAGES'],
+  ['GET', '/notificationsettings/webhook', ADMIN], ['PUT', '/notificationsettings/webhook', ADMIN],
   ['POST', '/deposits', 'CREATE_SAVINGS_ACCOUNT'], ['PUT', '/deposits/:id', 'EDIT_SAVINGS_ACCOUNT'], ['PATCH', '/deposits/:id', 'EDIT_SAVINGS_ACCOUNT'],
   ['DELETE', '/deposits/:id', 'DELETE_SAVINGS_ACCOUNT'],
   ['POST', '/deposits/:id', [...DEP_STATE, 'ACTIVATE_MATURITY', 'UNDO_MATURITY', 'APPLY_ACCRUED_SAVINGS_INTEREST']],

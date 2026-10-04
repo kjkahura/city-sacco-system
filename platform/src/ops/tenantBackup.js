@@ -1,10 +1,6 @@
 'use strict';
 
 const crypto = require('crypto');
-const dns = require('dns');
-const net = require('net');
-const http = require('http');
-const https = require('https');
 const { pool } = require('../db/pool');
 const { withTenant, assertSchemaName } = require('../db/tenantContext');
 const DD = require('../domain/dataDictionary');
@@ -12,6 +8,7 @@ const { zip, unzip } = require('../lib/zip');
 const CSV = require('../lib/csv');
 const { err } = require('../lib/errors');
 const { recordAudit } = require('../lib/auditLog');
+const OUT = require('../lib/outbound');
 
 /**
  * The tenant's own database backup (the reference platform's Database Backup API): a tenant
@@ -48,83 +45,19 @@ const BATCH = 5000;
 const running = new Map();
 
 
-// --- the callback, and why it is careful ------------------------------------
+// --- the callback ------------------------------------------------------------
 //
-// A callback URL is a request the server makes to an address a client chose.
-// Left open, it would let a tenant administrator make the platform call its
-// own internal services (the metadata endpoint of a cloud host, a database
-// admin page on the private network). So: https only, no credentials in the
-// URL, and every address the name resolves to must be public. The check runs
-// inside the connection's own DNS lookup, so a name that resolves to a
-// public address when checked and a private one when connected (DNS
-// rebinding) is caught at the connection. Redirects are not followed.
-// CALLBACK_ALLOW_PRIVATE=true lifts the address check (and allows http) for
-// development and tests only.
+// A callback URL is a request the server makes to an address a client chose;
+// ../lib/outbound guards it (https only, public addresses only, checked at
+// connection time, no redirects).
 
-function isPrivateAddress(ip) {
-  if (net.isIPv4(ip)) {
-    const [a, b] = ip.split('.').map(Number);
-    return a === 0 || a === 10 || a === 127 || a >= 224
-      || (a === 100 && b >= 64 && b <= 127) // carrier-grade NAT
-      || (a === 169 && b === 254) // link-local, cloud metadata
-      || (a === 172 && b >= 16 && b <= 31)
-      || (a === 192 && b === 168)
-      || (a === 192 && b === 0)
-      || (a === 198 && (b === 18 || b === 19));
-  }
-  const v = ip.toLowerCase();
-  if (v === '::' || v === '::1') return true;
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(v);
-  if (mapped) return isPrivateAddress(mapped[1]);
-  return /^(fc|fd|fe8|fe9|fea|feb|ff)/.test(v);
-}
+const checkCallbackUrl = (raw) => OUT.checkUrl(raw, { prefix: 'CALLBACK' });
+const { isPrivateAddress } = OUT;
 
-const allowPrivate = () => process.env.CALLBACK_ALLOW_PRIVATE === 'true';
-
-function checkCallbackUrl(raw) {
-  if (raw === undefined || raw === null || raw === '') return null;
-  let u;
-  try { u = new URL(String(raw)); } catch { throw err('INVALID_CALLBACK_URL'); }
-  if (u.protocol !== 'https:' && !(allowPrivate() && u.protocol === 'http:')) throw err('CALLBACK_URL_MUST_BE_HTTPS');
-  if (u.username || u.password) throw err('CALLBACK_URL_MUST_NOT_CARRY_CREDENTIALS');
-  const host = u.hostname.replace(/^\[|\]$/g, '');
-  if (!allowPrivate() && (host === 'localhost' || host.endsWith('.localhost') || (net.isIP(host) && isPrivateAddress(host)))) {
-    throw err('CALLBACK_URL_MUST_BE_PUBLIC');
-  }
-  if (String(raw).length > 2000) throw err('CALLBACK_URL_TOO_LONG');
-  return u.toString();
-}
-
-function guardedLookup(hostname, options, cb) {
-  dns.lookup(hostname, { ...options, all: true }, (e, addresses) => {
-    if (e) return cb(e);
-    const list = Array.isArray(addresses) ? addresses : [{ address: addresses, family: options.family || 4 }];
-    if (!allowPrivate() && list.some((a) => isPrivateAddress(a.address))) {
-      return cb(Object.assign(new Error(`CALLBACK_HOST_RESOLVES_TO_A_PRIVATE_ADDRESS: ${hostname}`), { code: 'EPRIVATE' }));
-    }
-    if (options.all) return cb(null, list);
-    return cb(null, list[0].address, list[0].family);
-  });
-}
-
-function postCallback(url, body, { timeoutMs = 10_000 } = {}) {
-  return new Promise((resolve) => {
-    const u = new URL(url);
-    const payload = Buffer.from(JSON.stringify(body));
-    const lib = u.protocol === 'https:' ? https : http;
-    const req = lib.request(u, {
-      method: 'POST',
-      lookup: guardedLookup,
-      timeout: timeoutMs,
-      headers: { 'content-type': 'application/json', 'content-length': payload.length, 'user-agent': 'sacco-platform-backup' },
-    }, (res) => {
-      res.resume();
-      resolve({ status: res.statusCode, at: new Date().toISOString() });
-    });
-    req.on('timeout', () => req.destroy(new Error('CALLBACK_TIMED_OUT')));
-    req.on('error', (e) => resolve({ error: e.message, at: new Date().toISOString() }));
-    req.end(payload);
-  });
+async function postCallback(url, body, { timeoutMs = 10_000 } = {}) {
+  const out = await OUT.send({ url, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), timeoutMs, agent: 'sacco-platform-backup' });
+  return out.error ? { error: out.error === 'TIMED_OUT' ? 'CALLBACK_TIMED_OUT' : out.error, at: new Date().toISOString() }
+    : { status: out.status, at: new Date().toISOString() };
 }
 
 // --- requests -------------------------------------------------------------

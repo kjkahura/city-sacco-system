@@ -45,6 +45,36 @@ On the right are Tasks, Teller, Till and a cog that opens Administration. Admini
 
 `public/js/menuDef.js` holds every menu, entry and tab as data, with the permissions each needs. An entry the user may not open is hidden, and so is a menu left empty. The page and its filter are kept in the address hash (`#loans/IN_ARREARS`), so Back, a reload and a bookmark open the same page. The design is in `docs/superpowers/specs/2026-10-04-console-navigation-design.md`.
 
+## Webhooks
+
+After the reference platform's notifications (`docs/audits/audit-webhooks.md`).
+
+- **What a webhook sends:** it sends a request to another system when an event happens: a deposit, a loan approval, a client approved, the end of day and about 50 others.
+- **Where to set it up:** Administration > Webhooks. Each webhook has:
+  - its event and an HTTPS URL;
+  - POST, PUT or PATCH, and a JSON, XML or text body with `{{PLACEHOLDER}}`s;
+  - optional conditions and headers;
+  - basic authentication if needed;
+  - a signing secret.
+- **How events are captured:** database triggers (tenant migration 045) record them in the same transaction as the change, and only when an active webhook wants them.
+- **How messages are delivered:**
+  - only a `2xx` answer is delivered;
+  - anything else is retried 1, 5, 15 and 60 minutes, then 3, 6, 12, 18 and 24 hours after the first try, then marked failed;
+  - after 20 failures in a row the webhook pauses, and one message is tried every 10 minutes until one gets through.
+- **What each request carries:**
+  - `x-notifications-idempotency-key`, the same on retries and new on a resend;
+  - `x-sacco-signature: t=<unix seconds>,v1=<HMAC-SHA256 of "<t>.<body>">`.
+- **The communication log** keeps every message. Failed ones can be resent. Bodies are cleared after 180 days.
+- **The API:**
+  - `/api/templates`;
+  - `/api/communications/messages` (`:search`, `:searchSorted`, `:resend`, `:resendAsyncByKeys`, `:resendAsyncByDate`);
+  - `/api/notifications/messages` (v1);
+  - `/api/notificationsettings/webhook`, the tenant-wide switch.
+- **What runs the delivery:**
+  - a pass after each request that changed something;
+  - `cli notifications:run`, which the `sacco-notify` Cloud Run job runs every minute;
+  - the in-process scheduler, every minute, when it is on.
+
 ## Why schema per tenant
 
 | | Shared schema + RLS | **Schema per tenant** | Database per tenant |
