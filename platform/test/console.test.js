@@ -46,7 +46,15 @@ async function openMenu(page, menu, entry = null) {
   await page.click(`#nav [data-menu="${menu}"]`);
   await page.click(`#nav [data-entry="${menu}.${entry}"]`);
 }
-const openAdmin = async (page, tab) => { await page.click('#nav [data-entry="right.admin"]'); if (tab) await page.click(`#subnav [data-tab="${tab}"]`); };
+// Each step waits for the page it opened to finish drawing: a page still loading
+// when the next is opened would draw over it (the console does not cancel a render).
+const settled = (page) => page.waitForFunction(() => !/Loading…/.test(document.getElementById('view').textContent));
+const openAdmin = async (page, tab, part = null) => {
+  await page.click('#nav [data-entry="right.admin"]');
+  await settled(page);
+  if (tab) { await page.click(`#subnav [data-tab="${tab}"]`); await settled(page); }
+  if (part !== null) { await page.click(`#subnav [data-part="${part}"]`); await settled(page); }
+};
 
 const SLUG = 'uitest';
 const SCHEMA = `tenant_${SLUG}`;
@@ -218,6 +226,44 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('a transaction row opens its account', /Loan|LN0/.test(await page.textContent('main h1')), await page.textContent('main h1'));
     await openMenu(page, 'clients', 'all');
 
+    section('administration');
+    await page.click('#nav [data-entry="right.admin"]');
+    await page.waitForSelector('#subnav [data-tab]');
+    await page.waitForFunction(() => location.hash === '#admin/general', null, { timeout: 5000 }).catch(() => {});
+    check('the cog opens Administration at General Setup, with its 16 tabs', await page.evaluate(() => location.hash) === '#admin/general'
+      && (await page.$$('#subnav [data-tab]')).length === 16, await page.evaluate(() => location.hash));
+    await openMenu(page, 'administration');
+    await page.waitForFunction(() => location.hash === '#admin/general', null, { timeout: 5000 }).catch(() => {});
+    check('so does the Administration menu', await page.evaluate(() => location.hash) === '#admin/general', await page.evaluate(() => location.hash));
+    check('and the Administration menu is marked', await page.$eval('#nav [data-menu="administration"]', (b) => b.classList.contains('active')));
+    await page.waitForSelector('#org-details');
+    check('General Setup has the organization details, not the branches', !(await page.$('#org-branches')) && !!(await page.$('#org-channels')));
+    for (const tab of await page.$$eval('#subnav [data-tab]', (bs) => bs.map((b) => b.dataset.tab))) {
+      await page.click(`#subnav [data-tab="${tab}"]`);
+      await page.waitForFunction((t) => location.hash === `#admin/${t}` && !/Loading/.test(document.getElementById('view').textContent), tab);
+    }
+    check('every tab opens', jsErrors.length === 0, jsErrors.join(' | '));
+    await page.click('#subnav [data-tab="organization"]');
+    await page.waitForSelector('#org-branches');
+    check('Organization has the branches and centres', !(await page.$('#org-details')));
+    await page.click('#subnav [data-tab="webhooks"]');
+    await page.waitForSelector('main .notice');
+    check('Webhooks says it is being built', /being built/.test(await page.textContent('main .notice')));
+    await page.goto(`http://localhost:${PORT}/console/#admin/fields`);
+    await page.waitForSelector('#cf-entity');
+    check('#admin/fields opens the Fields tab', await page.$eval('#subnav [data-tab="fields"]', (b) => b.classList.contains('active')));
+    await openMenu(page, 'clients', 'all');
+    check('leaving Administration hides its tabs', await page.$eval('#subnav', (n) => n.hidden));
+    await openAdmin(page, 'data');
+    await openMenu(page, 'clients', 'all');
+    await settled(page);
+    await page.click('#nav [data-entry="right.admin"]');
+    await page.click('#subnav [data-tab="access"]');
+    await page.waitForSelector('#users-list');
+    await new Promise((r) => setTimeout(r, 2500));
+    check('a tab chosen while the last one is still loading is the one shown', !!(await page.$('#users-list')) && !(await page.$('#bk-list')));
+    await openMenu(page, 'clients', 'all');
+
     section('members');
     await page.waitForSelector('table tbody tr');
     const rows = await page.locator('table tbody tr').count();
@@ -360,7 +406,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
       JSON.stringify(custom.rows[0]?.allocation));
 
     section('lending controls');
-    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('controls')));
+    await openAdmin(page, 'products', 1);
     await page.waitForSelector('#controls-kv');
     check('the controls page shows the tenant\'s controls and each user\'s limits',
       /none/.test(await page.textContent('#locked-roles')) && (await page.locator('[data-limits]').count()) >= 1);
@@ -525,10 +571,12 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('and a member is added to it', true);
     await page.waitForSelector('#solidarity-loans');
     check('the group page lists its solidarity loans', /No solidarity loans/.test(await page.textContent('#solidarity-loans')));
-    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('organization')));
+    await openAdmin(page, 'clients');
     await page.waitForSelector('#client-controls');
     check('the organization page has the client and group types, role names and client controls',
       /new members start/i.test(await page.textContent('#org-clients')) && /Client/.test(await page.textContent('#org-clients')));
+    await openAdmin(page, 'organization');
+    await page.waitForSelector('[data-branch-open]');
     await page.click('[data-branch-open]');
     await page.waitForSelector('#branch-detail');
     check('a branch opens on its own page (with its report templates, when there are any)', /Running loans/.test(await page.textContent('#branch-detail')));
@@ -564,7 +612,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('dialog[open] button[value=ok]');
     await page.waitForSelector('main h1 [data-state=APPROVED]');
     check('and opens on its own page, where it is approved', /25,000|25000/.test(await page.textContent('#credit-arrangement')) && await page.locator('#ca-add').count() === 1);
-    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('organization')));
+    await openAdmin(page, 'general');
     await page.waitForSelector('#org-details');
     check('the organization page shows its details, end of day, channels and holidays',
       await page.locator('#org-channels table').count() === 1 && /AUTOMATIC/.test(await page.textContent('#eod-mode')));
@@ -576,6 +624,8 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForFunction(() => /Mashujaa Day/.test(document.querySelector('#org-holidays')?.textContent || ''));
 
     section('administration: fields');
+    await openAdmin(page, 'fields');
+    await page.waitForSelector('#cf-entity');
     await page.selectOption('#cf-entity', 'LOAN_ACCOUNT');
     await page.waitForSelector('#cf-item');
     await page.click('#cf-set-add');
@@ -631,7 +681,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('dialog[open] button[value=ok]');
     await page.waitForFunction(() => /Wairimu/.test(document.querySelector('#custom-fields')?.textContent || ''));
     check('a grouped set is edited as rows on the record', true);
-    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('organization')));
+    await openAdmin(page, 'general');
     await page.waitForSelector('#org-details');
     check('a holiday is added from the page, and the calendar shows it needs a sync', await page.locator('#calendar-pending').count() === 1);
     await openMenu(page, 'loans', 'all');
@@ -902,7 +952,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('dialog[open] #dlg-close');
 
     section('data: dictionary, import, backup');
-    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('data')));
+    await openAdmin(page, 'data');
     await page.waitForSelector('#dd-table');
     await page.selectOption('#dd-table', 'loan_installments');
     await page.waitForFunction(() => /late_fee_exempt/.test(document.getElementById('dd-cols')?.textContent || ''));
@@ -935,12 +985,12 @@ const T = (fn) => withTenant(SCHEMA, fn);
       await new Promise((r) => setTimeout(r, 250));
     }
     await openMenu(page, 'clients', 'all');
-    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('data')));
+    await openAdmin(page, 'data');
     await page.waitForSelector('#bk-list');
     check('a backup is taken from the console and listed with a download', /COMPLETE/.test(await page.textContent('#bk-list')) && !!(await page.$('#bk-list button[data-bk]')));
 
     section('users');
-    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('users')));
+    await openAdmin(page, 'access', 0);
     await page.waitForSelector('#user-add');
     check('the users page lists the tenant\'s staff', /admin@uitest.local/.test(await page.textContent('#users-list')));
     check('and the roles with their permissions', /LOAN|TELLER/.test(await page.textContent('#roles-list')) && /AUDITOR/.test(await page.textContent('#roles-list')));
@@ -965,7 +1015,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForFunction(() => /new.teller@uitest.local/.test(document.getElementById('till-list')?.textContent || ''));
     check('a supervisor opens a till for the new teller', /5,000\.00/.test(await page.textContent('#till-list')), await page.textContent('#till-list'));
     section('access administration');
-    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('access')));
+    await openAdmin(page, 'access', 1);
     await page.waitForSelector('#ap-form');
     check('the access preferences show the defaults', (await page.inputValue('#ap-form input[name=sessionTimeoutMinutes]')) === '30'
       && (await page.inputValue('#ap-form input[name=minLength]')) === '12');
@@ -1011,6 +1061,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await openMenu(page, 'dashboard');
     await page.waitForSelector('#your-tasks-counts');
     check('a teller\'s dashboard has no Tellers widget, which needs OPEN_TILL', !(await page.$('#tellers')));
+    check('a teller sees no Administration tabs', await page.$eval('#subnav', (n) => n.hidden));
     check('a teller has no Administration menu and no cog', !(await page.$('#nav [data-menu="administration"]')) && !(await page.$('#nav [data-entry="right.admin"]')));
     check('a teller has no Activities menu (AUDIT_TRANSACTIONS)', !(await page.$('#nav [data-menu="activities"]')));
 

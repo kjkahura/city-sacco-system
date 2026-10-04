@@ -49,6 +49,18 @@ export function wirePager(state, reload) {
   }));
 }
 
+/**
+ * Keep only the cards with these titles on the page (a screen shown in part,
+ * as Administration's tabs do), and drop grids left empty.
+ */
+export function keepCards(titles) {
+  for (const c of view().querySelectorAll('section.card')) {
+    const h = c.querySelector(':scope > h2');
+    if (h && !titles.includes(h.textContent)) c.remove();
+  }
+  for (const g of view().querySelectorAll('.grid')) if (!g.children.length) g.remove();
+}
+
 export const card = (title, inner) => `<section class="card"><h2>${esc(title)}</h2>${inner}</section>`;
 
 export async function ask(fields, title) {

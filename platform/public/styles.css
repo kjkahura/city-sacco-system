@@ -188,3 +188,7 @@ dialog form.card fieldset { border: 1px solid var(--line); border-radius: var(--
 dialog form.card fieldset legend { font-weight: 600; padding: 0 4px; }
 table.grouped-editor td input, table.grouped-editor td select { width: 100%; min-width: 90px; }
 #org-cf .toolbar label { display: inline-flex; gap: 6px; align-items: center; margin-right: 12px; }
+.subnav { flex-direction: column; gap: 4px; }
+.subnav .tabs, .subnav .parts { display: flex; gap: 2px; flex-wrap: wrap; }
+.subnav .parts { font-size: 13px; }
+.subnav button { background: none; border: 1px solid transparent; color: var(--muted); padding: 6px 10px; }

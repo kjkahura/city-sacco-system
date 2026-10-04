@@ -76,7 +76,8 @@ export function markActive(view, filter) {
   const hit = entryFor(view, filter);
   for (const b of el('nav').querySelectorAll('[data-menu], [data-entry^="right."]')) {
     const key = b.dataset.menu || b.dataset.entry;
-    b.classList.toggle('active', hit ? key === hit.menu : key === `right.${view === 'admin' ? 'admin' : view}`);
+    const admin = view === 'admin' && (key === 'administration' || key === 'right.admin');
+    b.classList.toggle('active', admin || (hit ? key === hit.menu : key === `right.${view}`));
   }
 }
 

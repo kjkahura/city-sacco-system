@@ -3,8 +3,8 @@
  * accounts and journal entries.
  */
 
-import { $, api, apiRaw, esc, money, openFile, toast, today } from './base.js';
-import { ask, card, pager, table, view, wirePager, wireRows } from './ui.js';
+import { $, api, apiRaw, esc, money, navFilter, openFile, toast, today } from './base.js';
+import { ask, card, keepCards, pager, table, view, wirePager, wireRows } from './ui.js';
 import { opt } from './products.js';
 import { showDialog } from './users.js';
 import { can } from './access.js';
@@ -14,7 +14,13 @@ import { go } from './nav.js';
 // Accounting: branches, inter-branch rules, closures
 // --------------------------------------------------------------------------
 
-export async function accountingView() {
+const accountingState = { only: null };
+const ACCOUNTING_PARTS = { branches: 'Branches', rules: 'Inter-branch rules', closures: 'Closures' };
+
+/** Branch accounting: branches, inter-branch rules and closures, or those named in filter.only. */
+export async function accountingView(filter) {
+  const nf = navFilter(filter);
+  if (nf) accountingState.only = nf.only || null;
   const [br, rules, closures, settings] = await Promise.all([
     api('GET', '/api/branches'), api('GET', '/api/accounting/inter-branch-rules'),
     api('GET', '/api/accounting/closures'), api('GET', '/api/accounting/settings'),
@@ -42,14 +48,18 @@ export async function accountingView() {
         <p class="hint">Automatic closures: ${s.auto_closure_enabled ? `every ${s.auto_closure_interval_days} day(s)` : 'off'}.</p>
         <button id="k-new" class="secondary">Close the books</button> <button id="k-auto" class="secondary">Automatic closures</button>`)}
     </div>`;
-  $('#b-new').addEventListener('click', async () => {
+  if (accountingState.only) {
+    keepCards(accountingState.only.map((k) => ACCOUNTING_PARTS[k]).filter(Boolean));
+    $('.toolbar h1').textContent = 'Accounting Setup';
+  }
+  $('#b-new')?.addEventListener('click', async () => {
     const d = await ask([{ label: 'Code', name: 'code' }, { label: 'Name', name: 'name' }, opt({ label: 'Town', name: 'town', value: '' })], 'New branch');
     if (!d) return;
     const res = await api('POST', '/api/branches', { code: d.code.toUpperCase(), name: d.name, town: d.town || null });
     toast(res.ok ? `Branch ${res.body.code} added` : res.error, !res.ok);
     if (res.ok) accountingView();
   });
-  $('#r-default').addEventListener('click', async () => {
+  $('#r-default')?.addEventListener('click', async () => {
     const d = await ask([{ label: 'Inter-branch GL account', name: 'glCode', value: '290-100' }], 'Default inter-branch rule');
     if (!d) return;
     const named = (rules.body || []).filter((x) => x.branch_a).map((x) => ({ id: x.id, branchA: x.branch_a, branchB: x.branch_b, glCode: x.gl_code }));
@@ -57,7 +67,7 @@ export async function accountingView() {
     toast(res.ok ? 'Rules saved' : res.error, !res.ok);
     if (res.ok) accountingView();
   });
-  $('#k-new').addEventListener('click', async () => {
+  $('#k-new')?.addEventListener('click', async () => {
     const d = await ask([
       { label: 'Close through (a past date)', name: 'closedThrough', type: 'date' },
       { label: 'Branch', name: 'branchId', options: ['', ...br.body.map((b) => b.code)], value: '' },
@@ -68,7 +78,7 @@ export async function accountingView() {
     toast(res.ok ? `Closed through ${d.closedThrough}` : res.error, !res.ok);
     if (res.ok) accountingView();
   });
-  $('#k-auto').addEventListener('click', async () => {
+  $('#k-auto')?.addEventListener('click', async () => {
     const d = await ask([
       { label: 'Automatic closures', name: 'on', options: ['false', 'true'], value: String(!!s.auto_closure_enabled) },
       opt({ label: 'Every N days', name: 'days', type: 'number', value: s.auto_closure_interval_days ?? '' }),

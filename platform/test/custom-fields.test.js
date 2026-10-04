@@ -145,6 +145,12 @@ const set = (body) => call('POST', '/api/custom-fields/sets', body);
       call('PUT', `/api/custom-fields/values/MEMBER/${m2.id}`, { _banks: [{ bankName: 'NCBA', accountNo: '777' }] }),
     ]);
     check('two records saved at once cannot both take a unique value', [p1.status, p2.status].sort().join() === '200,409', `${p1.status} ${p2.status}`);
+    // Either save may win. The checks below need the first member to hold a KCB entry and the second none.
+    if (p1.status !== 200) {
+      const cleared = await call('PUT', `/api/custom-fields/values/MEMBER/${m2.id}`, { _banks: [] });
+      const kcb = await call('PUT', `/api/custom-fields/values/MEMBER/${m1.id}`, { _banks: [{ bankName: 'KCB', accountNo: '777' }] });
+      check('(the second save won; the first member takes the value instead)', cleared.status === 200 && kcb.status === 200 && !cleared.body.values._banks?.length, `${cleared.text} ${kcb.text}`);
+    }
     r = await def({ entity: 'MEMBER', setId: '_profile', id: 'tier', name: 'Tier', type: 'SELECTION', options: [{ id: 'has space!', label: 'Odd' }] });
     check('an option ID of other characters is refused', r.status === 400 && /OPTION_ID_IS_LETTERS/.test(r.reason), r.text);
     await call('PATCH', '/api/custom-fields/sets/_profile', { notes: 'Basic details' });

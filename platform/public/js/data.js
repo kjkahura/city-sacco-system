@@ -109,7 +109,7 @@ export async function dataView() {
   el('bk-run')?.addEventListener('click', async () => {
     const r = await api('POST', '/api/database/backup', {});
     toast(r.ok ? 'Backup started; it appears here when it is ready' : r.error, !r.ok);
-    setTimeout(() => { if (S.view === 'data') render(); }, 1500);
+    setTimeout(() => { if (S.view === 'data' || (S.view === 'admin' && S.filter?.tab === 'data')) render(); }, 1500);
   });
   el('bk-some')?.addEventListener('click', async () => {
     const d = await ask([
@@ -122,7 +122,7 @@ export async function dataView() {
       ...(d.from ? { createBackupFromDate: new Date(d.from).toISOString() } : {}),
     });
     toast(r.ok ? 'Backup started' : r.error, !r.ok);
-    setTimeout(() => { if (S.view === 'data') render(); }, 1500);
+    setTimeout(() => { if (S.view === 'data' || (S.view === 'admin' && S.filter?.tab === 'data')) render(); }, 1500);
   });
   view().querySelectorAll('[data-bk]').forEach((b) => b.addEventListener('click', () => openFile(`/api/database/backup/${b.dataset.bk}/file`, b.dataset.name, { save: true })));
 }

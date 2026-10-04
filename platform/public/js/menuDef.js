@@ -78,7 +78,7 @@ export const TOP = [
     { key: 'deposit', label: 'Deposit Products', view: 'products', filter: { tab: 'deposit' } },
   ] },
   { key: 'reporting', label: 'Reporting', entries: [
-    { key: 'reports', label: 'Reports', view: 'reports', perms: ['VIEW_REPORTS', 'VIEW_ACCOUNTING_REPORTS', 'VIEW_INTELLIGENCE'] },
+    { key: 'reports', label: 'Reports', view: 'reports', filter: { which: 'trial-balance' }, perms: ['VIEW_REPORTS', 'VIEW_ACCOUNTING_REPORTS', 'VIEW_INTELLIGENCE'] },
     { key: 'views', label: 'Custom Views', view: 'views' },
     { key: 'templates', label: 'Report Templates', view: 'reports', filter: { which: 'templates' }, perms: ['VIEW_REPORTS'] },
     { key: 'returns', label: 'Regulatory Returns', view: 'returns' },

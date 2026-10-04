@@ -141,7 +141,9 @@ el('menu-nav').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-menu-item]');
   if (!b) return;
   S.view = 'menu';
+  S.filter = {};
   S.menuItem = b.dataset.menuItem;
+  el('subnav').hidden = true;
   markActive('menu', {});
   for (const n of el('menu-nav').children) n.classList.toggle('active', n === b);
   render();

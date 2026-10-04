@@ -4,8 +4,8 @@
  * product documents.
  */
 
-import { $, S, api, day, el, esc, toast, today } from './base.js';
-import { ask, card, table, view } from './ui.js';
+import { $, S, api, day, el, esc, navFilter, toast, today } from './base.js';
+import { ask, card, keepCards, table, view } from './ui.js';
 import { branchDetail } from './accounts.js';
 import { clientsSetup } from './groups.js';
 import { opt } from './products.js';
@@ -123,7 +123,19 @@ export function wireCustomFields(cf, entity, id, reload) {
   }));
 }
 
-export async function orgView() {
+// The organization page's parts and their cards, for Administration's tabs.
+const ORG_PARTS = {
+  details: 'Organization details', branding: 'Branding', eod: 'End of day', branches: 'Branches and centres',
+  holidays: 'Holidays and non-working days', channels: 'Transaction channels', idTemplates: 'ID templates', rates: 'Rates',
+  currencies: 'Currencies', fields: 'Fields', documents: 'Product documents',
+};
+const orgState = { only: null };
+
+/** The organization's setup: every part, or those named in filter.only (clients: the client and group setup). */
+export async function orgView(filter) {
+  const nf = navFilter(filter);
+  if (nf) orgState.only = nf.only || null;
+  const only = orgState.only;
   const admin = S.user.role === 'TENANT_ADMIN';
   const manage = ['TENANT_ADMIN', 'MANAGER'].includes(S.user.role);
   const [org, eodS, branches, centres, cal, chans, idt, rates, curs] = await Promise.all([
@@ -225,7 +237,12 @@ export async function orgView() {
       ${manage ? '<button class="secondary" id="doc-list">Templates of a product</button> <button class="secondary" id="doc-add">New template</button>' : ''}
       <div id="org-docs"></div>`)}`;
 
-  clientsSetup($('#org-clients'));
+  if (only) {
+    keepCards(only.map((k) => ORG_PARTS[k]).filter(Boolean));
+    if (!only.includes('clients')) $('#org-clients').remove();
+    $('.toolbar h1').textContent = only.includes('clients') && only.length === 1 ? 'Client Setup' : 'Organization';
+  }
+  if ($('#org-clients')) clientsSetup($('#org-clients'));
   const done = (res, msg) => { toast(res.ok ? msg : res.error, !res.ok); if (res.ok) orgView(); };
   const on = (sel, fn) => { const b = $(sel); if (b) b.addEventListener('click', fn); };
   const each = (attr, fn) => view().querySelectorAll(`[data-${attr}]`).forEach((b) => b.addEventListener('click', () => fn(b.dataset[attr.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())])));

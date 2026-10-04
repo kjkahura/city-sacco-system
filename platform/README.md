@@ -26,6 +26,25 @@ container (`Dockerfile`) runs on Google Cloud Run in `europe-west1` with
 Cloud SQL for PostgreSQL 16, Firebase Hosting (`firebase.json`) serves it, and
 Cloudflare holds the custom domain's DNS.
 
+## The console's navigation
+
+The back office console has a top bar after the reference platform. The menus are:
+
+- Dashboard
+- Clients and Groups: by state
+- Loans and Deposits: by account state
+- Loan Transactions and Deposit Transactions: by type
+- Activities
+- Credit Arrangements: by state
+- Products: loan products and deposit products
+- Reporting: reports, custom views, report templates, regulatory returns and indicators
+- Accounting: journal entries, the chart of accounts, the three statements, interest accruals, periods and year-end close, provisioning and branch accounting
+- Administration
+
+On the right are Tasks, Teller, Till and a cog that opens Administration. Administration has 16 tabs, from General Setup to Data. SMS, Email, Webhooks, Events Streaming and Apps show that they are being built.
+
+`public/js/menuDef.js` holds every menu, entry and tab as data, with the permissions each needs. An entry the user may not open is hidden, and so is a menu left empty. The page and its filter are kept in the address hash (`#loans/IN_ARREARS`), so Back, a reload and a bookmark open the same page. The design is in `docs/superpowers/specs/2026-10-04-console-navigation-design.md`.
+
 ## Why schema per tenant
 
 | | Shared schema + RLS | **Schema per tenant** | Database per tenant |
