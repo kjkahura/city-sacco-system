@@ -77,6 +77,24 @@ nav button.active { color: var(--ink); border-color: var(--line); background: va
 nav button[hidden] { display: none; }
 .menu-nav { padding: 4px 20px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 13px; }
 .menu-nav:empty { display: none; }
+/* The bar takes a row of its own under the SACCO's name and the user; menus wrap rather than hide. */
+#nav { position: relative; order: 10; flex: 1 1 100%; min-width: 0; flex-wrap: nowrap; align-items: flex-start; gap: 8px; margin: 0 -8px; }
+#nav .menus { display: flex; flex-wrap: wrap; gap: 2px; min-width: 0; }
+#nav .menus > button { white-space: nowrap; padding: 6px 8px; font-size: 13px; }
+#nav .icons { display: flex; gap: 2px; margin-left: auto; }
+#nav button.icon { padding: 6px; line-height: 0; }
+#nav [aria-haspopup]::after { content: ""; display: inline-block; margin-left: 6px; border: 4px solid transparent; border-top-color: currentColor; vertical-align: -1px; }
+#nav [role=menu] {
+  position: absolute; z-index: 50; margin: 0; padding: 4px 0; list-style: none; min-width: 220px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgba(0, 0, 0, .12);
+}
+#nav [role=menu][hidden] { display: none; }
+#nav [role=menu] li.divider { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 4px; }
+#nav [role=menuitem] { display: block; width: 100%; text-align: left; border: none; border-radius: 0; color: var(--ink); padding: 6px 14px; }
+#nav [role=menuitem]:hover, #nav [role=menuitem]:focus { background: var(--bg); outline: none; }
+.subnav { display: flex; gap: 2px; flex-wrap: wrap; padding: 4px 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.subnav[hidden] { display: none; }
+.subnav button.active { color: var(--ink); border-color: var(--line); background: var(--bg); }
 .perm-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; max-height: 50vh; overflow: auto; }
 .perm-groups fieldset { border: 1px solid var(--line); padding: 6px 8px; }
 .perm-groups label.check { display: block; font-size: 13px; }

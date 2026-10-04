@@ -2,7 +2,7 @@
  * Loans: the list and a loan's page.
  */
 
-import { $, S, api, apiRaw, day, esc, money, openFile, toast, today } from './base.js';
+import { $, S, api, apiRaw, day, esc, navFilter, money, openFile, toast, today } from './base.js';
 import { ask, card, pager, scheduleEditor, table, view, wirePager, wireRows } from './ui.js';
 import { activityCard, loadActivity } from './members.js';
 import { collectionsView } from './collections.js';
@@ -16,7 +16,9 @@ import { entityReports } from './templates.js';
 
 const loanState = { offset: 0, limit: 25, status: '' };
 
-export async function loansView() {
+export async function loansView(filter) {
+  const f = navFilter(filter);
+  if (f) { loanState.status = f.state || ''; loanState.offset = 0; }
   const qs = new URLSearchParams({ offset: loanState.offset, limit: loanState.limit });
   if (loanState.status) qs.set('status', loanState.status);
   const r = await api('GET', `/api/loans?${qs}`);
@@ -25,9 +27,9 @@ export async function loansView() {
   view().innerHTML = `
     <div class="toolbar">
       <label>Status<select id="l-status">
-        ${['', 'PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'IN_ARREARS', 'LOCKED', 'CLOSED_REPAID',
+        ${['', 'CLOSED_REPAID,CLOSED_RESCHEDULED,CLOSED_REFINANCED', 'PARTIAL_APPLICATION', 'PENDING_APPROVAL', 'APPROVED', 'ACTIVE', 'IN_ARREARS', 'LOCKED', 'CLOSED_REPAID',
     'CLOSED_WRITTEN_OFF', 'CLOSED_RESCHEDULED', 'CLOSED_REFINANCED', 'CLOSED_REJECTED', 'CLOSED_WITHDRAWN'].map((s) =>
-    `<option ${s === loanState.status ? 'selected' : ''} value="${s}">${s || 'Any'}</option>`).join('')}
+    `<option ${s === loanState.status ? 'selected' : ''} value="${s}">${s.includes(',') ? 'CLOSED (repaid, rescheduled, refinanced)' : s || 'Any'}</option>`).join('')}
       </select></label>
       <span class="spacer"></span>
       <button id="collection-sheet" class="secondary">Collection sheet</button>

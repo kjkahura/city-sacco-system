@@ -161,7 +161,12 @@ function pdfText(buf) {
     const nav = await call('GET', '/api/menu', null, { who: 'teller' });
     const navNames = nav.body.items.map((i) => i.name);
     check('the teller\'s navigation: the predefined items with views they may open', navNames.includes('Clients') && navNames.includes('Loans') && !navNames.includes('Activities'), navNames.join(','));
-    check('and the items without views', nav.body.fixed.some((f) => f.key === 'dashboard') && nav.body.fixed.some((f) => f.key === 'reports'));
+    check('and the items without views', nav.body.fixed.some((f) => f.key === 'dashboard') && nav.body.fixed.some((f) => f.key === 'reporting'));
+    const navAdmin = await call('GET', '/api/menu');
+    const keys = navAdmin.body.fixed.map((f) => f.key);
+    check('the menu reports the 13 top menus in order', JSON.stringify(keys) === JSON.stringify(['dashboard', 'clients', 'groups', 'loans', 'deposits',
+      'loanTransactions', 'depositTransactions', 'activities', 'creditArrangements', 'products', 'reporting', 'accounting', 'administration']), keys.join());
+    check('a teller has no Administration menu', !nav.body.fixed.some((f) => f.key === 'administration'), nav.body.fixed.map((f) => f.key).join());
     const navAud = await call('GET', '/api/menu', null, { who: 'auditor' });
     check('an auditor has Activities (AUDIT_TRANSACTIONS)', navAud.body.items.some((i) => i.name === 'Activities'));
     const item = await call('POST', '/api/menu-items', { name: 'Collections desk', type: 'LOANS' }, { who: 'manager' });

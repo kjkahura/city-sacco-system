@@ -40,33 +40,13 @@
   <header>
     <img id="sacco-icon" alt="" hidden class="sacco-icon">
     <strong id="sacco-name">&nbsp;</strong>
-    <nav id="nav">
-      <button data-view="dashboard">Dashboard</button>
-      <button data-view="members" class="active">Members</button>
-      <button data-view="groups" data-perm="VIEW_GROUP_DETAILS">Groups</button>
-      <button data-view="loans">Loans</button>
-      <button data-view="teller" data-perm="VIEW_SAVINGS_ACCOUNT_DETAILS VIEW_LOAN_ACCOUNT_DETAILS">Teller</button>
-      <button data-view="tills" data-perm="OPEN_TILL CLOSE_TILL ADD_CASH REMOVE_CASH">Tills</button>
-      <button data-view="tasks" data-perm="VIEW_TASK">Tasks</button>
-      <button data-view="reports" data-perm="VIEW_REPORTS VIEW_ACCOUNTING_REPORTS VIEW_INTELLIGENCE">Reports</button>
-      <button data-view="views">Views</button>
-      <button data-view="finance">Period &amp; provisions</button>
-      <button data-view="returns">Returns</button>
-      <button data-view="products">Products</button>
-      <button data-view="controls">Controls</button>
-      <button data-view="accounting">Accounting</button>
-      <button data-view="chart" data-perm="VIEW_ACCOUNTING_REPORTS MANAGE_ACCOUNTS">Chart of accounts</button>
-      <button data-view="journal" data-perm="VIEW_ACCOUNTING_REPORTS LOG_JOURNAL_ENTRIES">Journal</button>
-      <button data-view="organization">Organization</button>
-      <button data-view="data">Data</button>
-      <button data-view="users" data-perm="VIEW_USER_DETAILS VIEW_ROLE">Users</button>
-      <button data-view="access" data-perm="MANAGE_ACCESS_PREFERENCES VIEW_API_CONSUMERS_AND_KEYS MANAGE_AUDIT_TRAIL">Access</button>
-    </nav>
+    <nav id="nav" aria-label="Main menu"></nav>
     <span class="spacer"></span>
     <button id="whoami" class="link" title="Your profile"></button>
     <button id="logout" class="link">Sign out</button>
   </header>
   <nav id="menu-nav" class="menu-nav" aria-label="Menu items"></nav>
+  <nav id="subnav" class="subnav" aria-label="Administration" hidden></nav>
 
   <main id="view"></main>
   <div id="toast" class="toast" hidden></div>

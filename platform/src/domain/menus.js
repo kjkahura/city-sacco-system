@@ -24,12 +24,28 @@ const VISIBLE = `(v.owner_email = lower($1) OR $3::boolean OR v.all_users OR $2 
 const who = (user) => [user.email, user.roleCode || user.role, user.role === ADMIN];
 
 /** Items without views, as the reference platform has them, each with what it needs. */
+// The console's top menus (public/js/menuDef.js), each with the permissions
+// of its entries: the user needs any one. null: shown to every user.
+const ADMINISTRATION = ['MANAGE_GENERAL_SETUP', 'MANAGE_HOLIDAYS', 'MANAGE_CURRENCIES', 'MANAGE_INDEX_RATES', 'MANAGE_EOD_PROCESSING',
+  'MANAGE_INTERBRANCH_GLACCOUNT_RULES', 'MAKE_ACCOUNTING_CLOSURE', 'CREATE_ACCOUNTING_RATES', 'EDIT_BRANCH',
+  'VIEW_USER_DETAILS', 'VIEW_ROLE', 'MANAGE_ACCESS_PREFERENCES', 'VIEW_API_CONSUMERS_AND_KEYS', 'MANAGE_AUDIT_TRAIL',
+  'CREATE_LOAN_PRODUCT', 'EDIT_LOAN_PRODUCT', 'CREATE_SAVINGS_PRODUCT', 'EDIT_SAVINGS_PRODUCT', 'CREATE_CUSTOM_FIELD', 'EDIT_CUSTOM_FIELD',
+  'CREATE_COMMUNICATION_TEMPLATES', 'EDIT_COMMUNICATION_TEMPLATES', 'CREATE_PRODUCT_DOCUMENT_TEMPLATES', 'EDIT_PRODUCT_DOCUMENT_TEMPLATES',
+  'CREATE_REPORTS', 'EDIT_REPORTS', 'MANAGE_RETURNS', 'IMPORT_DATA', 'DOWNLOAD_BACKUPS', 'VIEW_DATA_IMPORTS', 'EXTRACT_DATA'];
 const FIXED = [
   { key: 'dashboard', name: 'Dashboard', permission: null },
-  { key: 'reports', name: 'Reporting', permission: 'VIEW_REPORTS' },
-  { key: 'accounting', name: 'Accounting', permission: null },
+  { key: 'clients', name: 'Clients', permission: null },
+  { key: 'groups', name: 'Groups', permission: ['VIEW_GROUP_DETAILS'] },
+  { key: 'loans', name: 'Loans', permission: null },
+  { key: 'deposits', name: 'Deposits', permission: ['VIEW_SAVINGS_ACCOUNT_DETAILS'] },
+  { key: 'loanTransactions', name: 'Loan Transactions', permission: ['VIEW_LOAN_ACCOUNT_DETAILS'] },
+  { key: 'depositTransactions', name: 'Deposit Transactions', permission: ['VIEW_SAVINGS_ACCOUNT_DETAILS'] },
+  { key: 'activities', name: 'Activities', permission: ['AUDIT_TRANSACTIONS'] },
+  { key: 'creditArrangements', name: 'Credit Arrangements', permission: ['VIEW_LINE_OF_CREDIT_DETAILS'] },
   { key: 'products', name: 'Products', permission: null },
-  { key: 'administration', name: 'Administration', permission: null },
+  { key: 'reporting', name: 'Reporting', permission: null },
+  { key: 'accounting', name: 'Accounting', permission: null },
+  { key: 'administration', name: 'Administration', permission: ADMINISTRATION },
 ];
 
 function shape(m, user) {
@@ -56,7 +72,7 @@ async function navigation(c, user) {
   const items = await list(c, user);
   const views = await V.list(c, user);
   return {
-    fixed: FIXED.filter((f) => !f.permission || PERMS.can(user, f.permission)).map(({ key, name }) => ({ key, name })),
+    fixed: FIXED.filter((f) => !f.permission || f.permission.some((code) => PERMS.can(user, code))).map(({ key, name }) => ({ key, name })),
     items: items.map((m) => ({
       ...m,
       views: views.filter((v) => v.menuItemId === m.id || (!v.menuItemId && m.predefined && v.entity === m.type))

@@ -32,6 +32,9 @@ export const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
 export const money = (n) => (n === null || n === undefined || n === ''
   ? '' : Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 
+/** A page's filter from the navigation, or null when the page was called another way (a reload after an action, an event). */
+export const navFilter = (f) => (f && Object.getPrototypeOf(f) === Object.prototype ? f : null);
+
 export const day = (d) => (d ? String(d).slice(0, 10) : '');
 // The organization's day, in its own time zone, as the server counts it.
 export const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: S.sacco?.timezone || 'Africa/Nairobi' }).format(new Date());

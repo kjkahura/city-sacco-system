@@ -13,7 +13,9 @@
  *   base.js      state, DOM helpers, the API client
  *   session.js   start, sign out, profile, reauthentication
  *   ui.js        tables, pagers, cards, dialogs, the schedule editor
- *   nav.js       the pages the navigation opens
+ *   menuDef.js   the menus, their entries and the Administration tabs, as data
+ *   topbar.js    the top bar drawn from menuDef.js
+ *   nav.js       the pages the navigation opens, and the address hash
  *   access.js    what the signed-in user may do, the menu
  *   one module per page or record: members, accounts, groups, loans,
  *   collections, teller, reports, dashboard, views, finance, products,
@@ -25,6 +27,7 @@ import { S, api, el, refreshSession, toast } from './base.js';
 import { profileDialog, signOut, start } from './session.js';
 import { showLoginLogo } from './organization.js';
 import { render } from './nav.js';
+import { markActive } from './topbar.js';
 
 // --------------------------------------------------------------------------
 // Sign in
@@ -117,15 +120,6 @@ el('logout').addEventListener('click', async () => {
   signOut();
 });
 
-el('nav').addEventListener('click', (e) => {
-  const b = e.target.closest('button[data-view]');
-  if (!b) return;
-  S.view = b.dataset.view;
-  for (const n of el('nav').children) n.classList.toggle('active', n === b);
-  for (const n of el('menu-nav').children) n.classList.remove('active');
-  render();
-});
-
 // The SACCO's logo on the sign-in screen, once the SACCO is known.
 if (S.tenant) setTimeout(() => showLoginLogo(S.tenant), 0);
 el('login-form').querySelector('input[name=tenant]').addEventListener('change', (ev) => showLoginLogo(String(ev.target.value || '').trim().toLowerCase()));
@@ -148,7 +142,7 @@ el('menu-nav').addEventListener('click', (e) => {
   if (!b) return;
   S.view = 'menu';
   S.menuItem = b.dataset.menuItem;
-  for (const n of el('nav').children) n.classList.remove('active');
+  markActive('menu', {});
   for (const n of el('menu-nav').children) n.classList.toggle('active', n === b);
   render();
 });

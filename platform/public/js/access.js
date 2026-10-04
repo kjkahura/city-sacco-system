@@ -4,6 +4,8 @@
  */
 
 import { $, S, api, el, esc } from './base.js';
+import { drawTopbar } from './topbar.js';
+import { go } from './nav.js';
 
 // --------------------------------------------------------------------------
 // Access: what the signed-in user may do, from GET /api/auth/me
@@ -12,11 +14,11 @@ import { $, S, api, el, esc } from './base.js';
 /** True when the user holds any of the permission codes (an administrator holds them all). */
 export const can = (...codes) => S.user?.role === 'TENANT_ADMIN' || codes.some((c) => (S.user?.permissions || []).includes(c));
 
-/** Load the user's permissions, hide the pages they may not open, and build their menu items. */
+/** Load the user's permissions, draw the top bar with what they may open, and build their menu items. */
 export async function loadAccess() {
   const me = await api('GET', '/api/auth/me');
   if (me.ok) S.user = { ...S.user, ...me.body };
-  for (const b of el('nav').querySelectorAll('button[data-perm]')) b.hidden = !can(...b.dataset.perm.split(' '));
+  drawTopbar(go);
   await loadMenu();
 }
 

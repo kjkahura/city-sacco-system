@@ -3,7 +3,7 @@
  * identification files.
  */
 
-import { $, S, api, apiRaw, day, el, esc, money, openFile, toast } from './base.js';
+import { $, S, api, apiRaw, day, el, esc, navFilter, money, openFile, toast } from './base.js';
 import { ask, card, pager, table, view, wirePager, wireRows } from './ui.js';
 import { creditArrangementDetail, depositDetail } from './accounts.js';
 import { groupsView } from './groups.js';
@@ -24,7 +24,9 @@ const MEMBER_STATES = ['PENDING_APPROVAL', 'INACTIVE', 'ACTIVE', 'EXITED', 'BLAC
 const LANGUAGES = ['ENGLISH', 'SWAHILI', 'FRENCH', 'PORTUGESE', 'SPANISH', 'GERMAN', 'ITALIAN', 'CHINESE', 'RUSSIAN', 'NORWEGIAN'];
 export const stateBadge = (s) => `<span class="badge ${['ACTIVE', 'INACTIVE'].includes(s) ? '' : 'bad'}" data-state="${esc(s)}">${esc(String(s).replace(/_/g, ' ').toLowerCase())}</span>`;
 
-export async function membersView() {
+export async function membersView(filter) {
+  const f = navFilter(filter);
+  if (f) { memberState.status = f.state || ''; memberState.q = ''; memberState.offset = 0; }
   const qs = new URLSearchParams({ offset: memberState.offset, limit: memberState.limit });
   if (memberState.q) qs.set('q', memberState.q);
   if (memberState.status) qs.set('status', memberState.status);

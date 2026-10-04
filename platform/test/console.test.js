@@ -41,6 +41,13 @@ function check(label, cond, detail = '') {
   else { fail++; failures.push(`${label} ${detail}`); console.log(`  FAIL ${label} ${detail}`); }
 }
 
+async function openMenu(page, menu, entry = null) {
+  if (entry === null) return page.click(`#nav [data-menu="${menu}"]`);
+  await page.click(`#nav [data-menu="${menu}"]`);
+  await page.click(`#nav [data-entry="${menu}.${entry}"]`);
+}
+const openAdmin = async (page, tab) => { await page.click('#nav [data-entry="right.admin"]'); if (tab) await page.click(`#subnav [data-tab="${tab}"]`); };
+
 const SLUG = 'uitest';
 const SCHEMA = `tenant_${SLUG}`;
 const PORT = 4099;
@@ -112,6 +119,70 @@ const T = (fn) => withTenant(SCHEMA, fn);
       (await page.textContent('#sacco-name')).includes('Console Test SACCO'),
       await page.textContent('#sacco-name'));
 
+    section('menu definition');
+    const md = await page.evaluate(async () => {
+      const m = await import('/console/js/menuDef.js');
+      const all = () => true, none = () => false;
+      return {
+        top: m.TOP.map((x) => x.key), tabs: m.ADMIN_TABS.length,
+        hidden: m.visibleMenus(none).map((x) => x.key),
+        hash: m.hashOf('loans', { state: 'IN_ARREARS' }),
+        back: m.parseHash('#loans/IN_ARREARS'), bad: m.parseHash('#nonsense/%%%'), badTab: m.parseHash('#admin/unknown'),
+        badValue: m.parseHash('#loans/%%%'), full: m.visibleMenus(all).length,
+      };
+    });
+    check('13 top menus', md.top.length === 13 && md.full === 13, md.top.join());
+    check('16 Administration tabs', md.tabs === 16);
+    check('a user with no permissions still has the Dashboard', md.hidden.includes('dashboard') && !md.hidden.includes('loanTransactions'), md.hidden.join());
+    check('a filter round-trips through the hash', md.hash === '#loans/IN_ARREARS' && md.back.view === 'loans' && md.back.filter.state === 'IN_ARREARS', JSON.stringify(md.back));
+    check('a bad hash opens the dashboard', md.bad.view === 'dashboard' && md.badValue.view === 'dashboard', JSON.stringify([md.bad, md.badValue]));
+    check('an unknown tab opens the first tab', md.badTab.view === 'admin' && md.badTab.filter.tab === 'general', JSON.stringify(md.badTab));
+
+    section('top bar');
+    await page.waitForSelector('#nav [data-menu]');
+    check('the bar has the 13 menus and four icons on the right', (await page.$$('#nav [data-menu]')).length === 13
+      && (await page.$$('#nav [data-entry^="right."]')).length === 4, String((await page.$$('#nav [data-menu]')).length));
+    await page.click('#nav [data-menu="loans"]');
+    const loanEntries = await page.$$('#nav [data-dropdown="loans"]:not([hidden]) [role=menuitem]');
+    check('Loans opens a dropdown of eight entries, All Loans after a divider', loanEntries.length === 8
+      && await page.$eval('#nav [data-entry="loans.all"]', (b) => b.closest('li').classList.contains('divider')), String(loanEntries.length));
+    await page.keyboard.press('ArrowDown');
+    check('ArrowDown moves focus into the list', await page.evaluate(() => document.activeElement?.dataset.entry === 'loans.partial'));
+    await page.keyboard.press('Escape');
+    check('Escape closes it', await page.$eval('#nav [data-dropdown="loans"]', (u) => u.hidden));
+    await page.click('#nav [data-menu="clients"]');
+    await page.click('#nav [data-menu="groups"]');
+    check('one dropdown open at a time', (await page.$$('#nav [data-dropdown]:not([hidden])')).length === 1);
+    await page.click('#view', { position: { x: 5, y: 5 } });
+    check('a click outside closes it', (await page.$$('#nav [data-dropdown]:not([hidden])')).length === 0);
+    await openMenu(page, 'clients', 'all');
+    await page.waitForSelector('#m-status');
+    await openMenu(page, 'loans', 'arrears');
+    await page.waitForSelector('#l-status');
+    check('a dropdown entry opens the page filtered, and the hash names it', await page.evaluate(() => location.hash) === '#loans/IN_ARREARS'
+      && await page.$eval('#l-status', (x) => x.value) === 'IN_ARREARS', await page.evaluate(() => location.hash));
+    check('the open menu is marked', await page.$eval('#nav [data-menu="loans"]', (b) => b.classList.contains('active')));
+    await page.goBack();
+    await page.waitForSelector('#m-status');
+    check('Back returns to the previous page', await page.evaluate(() => location.hash) === '#members');
+    await page.goForward();
+    await page.waitForSelector('#l-status');
+    await page.reload();
+    await page.waitForSelector('#app:not([hidden])');
+    await page.waitForSelector('#l-status');
+    check('a reload resumes the session on the filtered page', await page.$eval('#l-status', (x) => x.value) === 'IN_ARREARS');
+    const before = jsErrors.length;
+    await page.goto(`http://localhost:${PORT}/console/#nonsense/%25%25%25`);
+    await page.waitForSelector('#app:not([hidden])');
+    await page.waitForSelector('#dash-tasks, #your-tasks-counts, .dashboard', { timeout: 10000 }).catch(() => {});
+    check('a bad hash opens the dashboard without an error', await page.evaluate(() => location.hash) === '#dashboard' && jsErrors.length === before,
+      `${await page.evaluate(() => location.hash)} ${jsErrors.slice(before).join(' | ')}`);
+    await page.setViewportSize({ width: 1024, height: 800 });
+    check('at 1024 pixels the page does not scroll sideways', await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+      String(await page.evaluate(() => document.documentElement.scrollWidth)));
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openMenu(page, 'clients', 'all');
+
     section('members');
     await page.waitForSelector('table tbody tr');
     const rows = await page.locator('table tbody tr').count();
@@ -129,7 +200,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('a member opens', /Member\d+/.test(memberHeading), memberHeading);
 
     section('loans');
-    await page.click('nav button[data-view=loans]');
+    await openMenu(page, 'loans', 'all');
     await page.waitForSelector('table tbody tr');
     await page.click('table tbody tr');
     await page.waitForSelector('main h1 .badge');
@@ -254,7 +325,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
       JSON.stringify(custom.rows[0]?.allocation));
 
     section('lending controls');
-    await page.click('nav button[data-view=controls]');
+    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('controls')));
     await page.waitForSelector('#controls-kv');
     check('the controls page shows the tenant\'s controls and each user\'s limits',
       /none/.test(await page.textContent('#locked-roles')) && (await page.locator('[data-limits]').count()) >= 1);
@@ -376,7 +447,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('custom fields are shown and edited on the member', true);
 
     section('members and groups');
-    await page.click('nav button[data-view=members]');
+    await openMenu(page, 'clients', 'all');
     await page.waitForSelector('#m-new');
     check('the state filter has the reference platform\'s six states', await page.locator('#m-status option').count() === 7);
     await page.click('#m-new');
@@ -403,7 +474,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForSelector('dialog[open] table');
     check('the state history lists the changes', /UNDO_BLACKLIST/.test(await page.textContent('dialog[open]')));
     await page.click('dialog[open] #dlg-close');
-    await page.click('nav button[data-view=groups]');
+    await openMenu(page, 'groups', 'all');
     await page.waitForSelector('#g-new');
     await page.click('#g-new');
     await page.waitForSelector('dialog[open] input[name=groupName]');
@@ -419,7 +490,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('and a member is added to it', true);
     await page.waitForSelector('#solidarity-loans');
     check('the group page lists its solidarity loans', /No solidarity loans/.test(await page.textContent('#solidarity-loans')));
-    await page.click('nav button[data-view=organization]');
+    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('organization')));
     await page.waitForSelector('#client-controls');
     check('the organization page has the client and group types, role names and client controls',
       /new members start/i.test(await page.textContent('#org-clients')) && /Client/.test(await page.textContent('#org-clients')));
@@ -458,7 +529,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('dialog[open] button[value=ok]');
     await page.waitForSelector('main h1 [data-state=APPROVED]');
     check('and opens on its own page, where it is approved', /25,000|25000/.test(await page.textContent('#credit-arrangement')) && await page.locator('#ca-add').count() === 1);
-    await page.click('nav button[data-view=organization]');
+    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('organization')));
     await page.waitForSelector('#org-details');
     check('the organization page shows its details, end of day, channels and holidays',
       await page.locator('#org-channels table').count() === 1 && /AUTOMATIC/.test(await page.textContent('#eod-mode')));
@@ -525,10 +596,10 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('dialog[open] button[value=ok]');
     await page.waitForFunction(() => /Wairimu/.test(document.querySelector('#custom-fields')?.textContent || ''));
     check('a grouped set is edited as rows on the record', true);
-    await page.click('nav button[data-view=organization]');
+    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('organization')));
     await page.waitForSelector('#org-details');
     check('a holiday is added from the page, and the calendar shows it needs a sync', await page.locator('#calendar-pending').count() === 1);
-    await page.click('nav button[data-view=loans]');
+    await openMenu(page, 'loans', 'all');
     await page.waitForSelector('#collection-sheet');
     await page.click('#collection-sheet');
     await page.waitForSelector('#c-view');
@@ -544,7 +615,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('posting the selected rows posts a batch and reports it', /Batch posted/.test(await page.textContent('#batch-result')), await page.textContent('#batch-result'));
 
     section('reports');
-    await page.click('nav button[data-view=reports]');
+    await openMenu(page, 'reporting', 'reports');
     await page.waitForSelector('#r-out table');
     const tbText = await page.textContent('#r-out');
     check('the trial balance renders', /Total \(whole book/.test(tbText));
@@ -570,7 +641,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('a report downloads as a workbook', /indicators\.xlsx$/.test(dl.suggestedFilename()), dl.suggestedFilename());
 
     section('dashboard');
-    await page.click('nav button[data-view=dashboard]');
+    await openMenu(page, 'dashboard');
     await page.waitForSelector('text=Upcoming repayments');
     const dash = await page.textContent('main');
     check('the dashboard shows indicators, upcoming repayments, favourite views and the latest activity',
@@ -590,7 +661,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForSelector('#latest-activity:not([data-stale])');
 
     section('views');
-    await page.click('nav button[data-view=views]');
+    await openMenu(page, 'reporting', 'views');
     await page.click('#v-new');
     await page.waitForSelector('#v-form');
     await page.selectOption('#v-form select[name=entity]', 'LOANS');
@@ -605,7 +676,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForSelector('[data-v-fav]');
     await page.click('[data-v-fav]');
     await page.waitForSelector('[data-v-fav][data-on=""]');
-    await page.click('nav button[data-view=dashboard]');
+    await openMenu(page, 'dashboard');
     await page.waitForSelector('#fav-views');
     check('marked a favourite, it is on the dashboard', /Console loans/.test(await page.textContent('#fav-views')));
 
@@ -615,7 +686,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('#menu-nav button:has-text("Loans")');
     await page.waitForSelector('main h1:has-text("Loans")');
     check('a menu item lists the views filed under it', /Console loans/.test(await page.textContent('main')), (await page.textContent('main')).slice(0, 200));
-    await page.click('nav button[data-view=views]');
+    await openMenu(page, 'reporting', 'views');
     await page.waitForSelector('#mi-new');
     await page.click('#mi-new');
     await page.fill('dialog[open] input[name=name]', 'Collections desk');
@@ -623,7 +694,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('dialog[open] button[value=ok]');
     await page.waitForSelector('#menu-nav button:has-text("Collections desk")');
     check('a new menu item is added to the navigation', true);
-    await page.click('nav button[data-view=tasks]');
+    await page.click('#nav [data-entry="right.tasks"]');
     await page.waitForSelector('#task-new');
     await page.click('#task-new');
     await page.fill('dialog[open] input[name=title]', 'Call the guarantor');
@@ -631,20 +702,20 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('dialog[open] button[value=ok]');
     await page.waitForFunction(() => /Call the guarantor/.test(document.getElementById('task-list')?.textContent || ''));
     check('a task is made on the Tasks page', true);
-    await page.click('nav button[data-view=dashboard]');
+    await openMenu(page, 'dashboard');
     await page.waitForSelector('#your-tasks-counts');
     check('the Your Tasks widget counts it as due today', /1 due today/.test(await page.textContent('#your-tasks-counts')), await page.textContent('#your-tasks-counts'));
     await page.click('#your-tasks [data-act=complete]');
     await page.waitForFunction(() => /0 due today/.test(document.getElementById('your-tasks-counts')?.textContent || ''));
     check('and completing it there takes it off', true);
     check('the Tellers widget is on an administrator\'s dashboard', !!(await page.$('#tellers')));
-    await page.click('nav button[data-view=reports]');
+    await openMenu(page, 'reporting', 'reports');
     await page.selectOption('#r-which', 'templates');
     await page.waitForSelector('#rt-list');
     check('Other reports lists the report templates', /No report templates yet|run/.test(await page.textContent('#r-out')));
 
     section('period and provisions');
-    await page.click('nav button[data-view=finance]');
+    await openMenu(page, 'accounting', 'periods');
     await page.waitForSelector('.notice');
     const financeText = await page.textContent('main');
     check('it says plainly that no provisioning rates are set',
@@ -659,7 +730,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
       await page.textContent('#toast'));
 
     section('returns');
-    await page.click('nav button[data-view=returns]');
+    await openMenu(page, 'reporting', 'returns');
     await page.waitForSelector('table tbody tr');
     check('the sample template is listed',
       (await page.textContent('main')).includes('SAMPLE_FINPOS'));
@@ -673,7 +744,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('and it ties to the ledger', x1.trim() === '0.00', x1);
 
     section('loan products');
-    await page.click('nav button[data-view=products]');
+    await openMenu(page, 'products', 'loan');
     await page.waitForSelector('table tbody tr');
     const productsText = await page.textContent('main');
     check('the seeded product is listed with its accounting settings',
@@ -754,7 +825,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
       && /the shared SA series/.test(await page.textContent('#deposit-product-type')) && await page.locator('#d-delete').count() === 1);
     check('and the state its new accounts start in', /New accounts start/.test(await page.textContent('#deposit-product-type'))
       && /active/.test(await page.textContent('#deposit-product-type')));
-    await page.click('nav button[data-view=accounting]');
+    await openMenu(page, 'accounting', 'branches');
     await page.waitForSelector('#k-new');
     check('the accounting screen shows branches, inter-branch rules and closures',
       /Inter-branch rules/.test(await page.textContent('main')) && /The books are open/.test(await page.textContent('main')));
@@ -767,7 +838,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('a branch is added from the console', true);
 
     section('chart of accounts and journal entries');
-    await page.click('nav button[data-view=chart]');
+    await openMenu(page, 'accounting', 'chart');
     await page.waitForSelector('#coa-table');
     check('the chart of accounts lists the accounts with their balances', /100-200/.test(await page.textContent('#coa-table')) && /Manual entries/.test(await page.textContent('#coa-table')));
     await page.click('#coa-new');
@@ -778,7 +849,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForFunction(() => /580-100 saved/.test(document.getElementById('toast').textContent));
     await page.waitForFunction(() => /Printing and stationery/.test(document.getElementById('coa-table')?.textContent || ''));
     check('an account is added from the console', true);
-    await page.click('nav button[data-view=journal]');
+    await openMenu(page, 'accounting', 'journal');
     await page.waitForSelector('#je-new');
     await page.click('#je-new');
     await page.waitForSelector('dialog[open] textarea[name=debits]');
@@ -795,7 +866,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('dialog[open] #dlg-close');
 
     section('data: dictionary, import, backup');
-    await page.click('nav button[data-view=data]');
+    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('data')));
     await page.waitForSelector('#dd-table');
     await page.selectOption('#dd-table', 'loan_installments');
     await page.waitForFunction(() => /late_fee_exempt/.test(document.getElementById('dd-cols')?.textContent || ''));
@@ -827,13 +898,13 @@ const T = (fn) => withTenant(SCHEMA, fn);
       if (b.rows[0]?.status !== 'IN_PROGRESS') break;
       await new Promise((r) => setTimeout(r, 250));
     }
-    await page.click('nav button[data-view=members]');
-    await page.click('nav button[data-view=data]');
+    await openMenu(page, 'clients', 'all');
+    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('data')));
     await page.waitForSelector('#bk-list');
     check('a backup is taken from the console and listed with a download', /COMPLETE/.test(await page.textContent('#bk-list')) && !!(await page.$('#bk-list button[data-bk]')));
 
     section('users');
-    await page.click('nav button[data-view=users]');
+    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('users')));
     await page.waitForSelector('#user-add');
     check('the users page lists the tenant\'s staff', /admin@uitest.local/.test(await page.textContent('#users-list')));
     check('and the roles with their permissions', /LOAN|TELLER/.test(await page.textContent('#roles-list')) && /AUDITOR/.test(await page.textContent('#roles-list')));
@@ -848,7 +919,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('a new user is created and the temporary password is shown once', /^[A-Za-z0-9]{4}(-[A-Za-z0-9]{4}){3}$/.test(tempPw), tempPw);
     await page.click('dialog[open] button[value=cancel]');
     await page.waitForFunction(() => /new.teller@uitest.local/.test(document.getElementById('users-list')?.textContent || ''));
-    await page.click('nav button[data-view=tills]');
+    await page.click('#nav [data-entry="right.tills"]');
     await page.waitForSelector('#till-open');
     await page.click('#till-open');
     await page.waitForSelector('dialog[open] select[name=tellerEmail]');
@@ -858,7 +929,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForFunction(() => /new.teller@uitest.local/.test(document.getElementById('till-list')?.textContent || ''));
     check('a supervisor opens a till for the new teller', /5,000\.00/.test(await page.textContent('#till-list')), await page.textContent('#till-list'));
     section('access administration');
-    await page.click('nav button[data-view=access]');
+    await page.evaluate(() => import('/console/js/nav.js').then((n) => n.go('access')));
     await page.waitForSelector('#ap-form');
     check('the access preferences show the defaults', (await page.inputValue('#ap-form input[name=sessionTimeoutMinutes]')) === '30'
       && (await page.inputValue('#ap-form input[name=minLength]')) === '12');
@@ -884,6 +955,8 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('#dlg-close');
     await page.click('#logout');
     await page.waitForSelector('#login:not([hidden])');
+    // The page was reloaded in the top bar section, so the SACCO field starts empty.
+    await page.fill('input[name=tenant]', SLUG);
     await page.fill('input[name=email]', 'new.teller@uitest.local');
     await page.fill('input[name=password]', tempPw);
     await page.click('button[type=submit]');
@@ -895,13 +968,15 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('and then signs in', /TELLER/.test(await page.textContent('#whoami')), await page.textContent('#whoami'));
 
     section('a teller\'s till');
-    await page.click('nav button[data-view=teller]');
+    await page.click('#nav [data-entry="right.teller"]');
     await page.waitForSelector('#my-till');
     check('the Tellering card shows the teller\'s till and its expected cash', /5,000\.00/.test(await page.textContent('#my-till')), await page.textContent('#my-till'));
     check('closing is a supervisor\'s (CLOSE_TILL): the teller has no close button', !(await page.$('main [data-act=close]')));
-    await page.click('nav button[data-view=dashboard]');
+    await openMenu(page, 'dashboard');
     await page.waitForSelector('#your-tasks-counts');
     check('a teller\'s dashboard has no Tellers widget, which needs OPEN_TILL', !(await page.$('#tellers')));
+    check('a teller has no Administration menu and no cog', !(await page.$('#nav [data-menu="administration"]')) && !(await page.$('#nav [data-entry="right.admin"]')));
+    check('a teller has no Activities menu (AUDIT_TRANSACTIONS)', !(await page.$('#nav [data-menu="activities"]')));
 
     section('no JavaScript errors anywhere in that');
     check('the browser reported no page errors', jsErrors.length === 0, jsErrors.join(' | '));

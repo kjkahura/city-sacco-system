@@ -2,7 +2,7 @@
  * Groups and the client setup.
  */
 
-import { $, S, api, esc, toast } from './base.js';
+import { $, S, api, esc, navFilter, toast } from './base.js';
 import { ask, card, pager, table, view, wirePager, wireRows } from './ui.js';
 import { memberDetail, newHolder, stateBadge } from './members.js';
 import { opt } from './products.js';
@@ -12,13 +12,18 @@ import { can } from './access.js';
 // Groups (the reference platform's groups: account holders with individual members in roles)
 // --------------------------------------------------------------------------
 
-const groupState = { offset: 0, limit: 25 };
+const groupState = { offset: 0, limit: 25, state: '' };
+const GROUP_STATES = ['PENDING_APPROVAL', 'INACTIVE', 'ACTIVE', 'EXITED', 'BLACKLISTED', 'REJECTED'];
 
-export async function groupsView() {
-  const r = await api('GET', `/api/groups?offset=${groupState.offset}&limit=${groupState.limit}&paginationDetails=ON`);
+export async function groupsView(filter) {
+  const f = navFilter(filter);
+  if (f) { groupState.state = f.state || ''; groupState.offset = 0; }
+  const r = await api('GET', `/api/groups?offset=${groupState.offset}&limit=${groupState.limit}&paginationDetails=ON${groupState.state ? `&state=${encodeURIComponent(groupState.state)}` : ''}`);
   if (!r.ok) throw new Error(r.error);
   view().innerHTML = `
-    <div class="toolbar"><h1>Groups</h1>${can('CREATE_GROUP') ? '<button id="g-new">New group</button>' : ''}</div>
+    <div class="toolbar"><h1>Groups</h1>
+      <label>State<select id="g-state">${['', ...GROUP_STATES].map((s) => `<option ${s === groupState.state ? 'selected' : ''} value="${s}">${s ? s.replace(/_/g, ' ').toLowerCase() : 'Any'}</option>`).join('')}</select></label>
+      ${can('CREATE_GROUP') ? '<button id="g-new">New group</button>' : ''}</div>
     <p class="hint">A group holds loans and deposit accounts of its own; its members are individual members, each with any group role names.
     A group is inactive until it has a running account.</p>
     ${table([
@@ -28,6 +33,7 @@ export async function groupsView() {
     ${pager(groupState, r.total)}`;
   wireRows(r.body, (g) => memberDetail({ id: g.encodedKey }));
   wirePager(groupState, groupsView);
+  $('#g-state').addEventListener('change', (e) => { groupState.state = e.target.value; groupState.offset = 0; groupsView(); });
   const nb = $('#g-new');
   if (nb) nb.addEventListener('click', () => newHolder('GROUP', groupsView));
 }

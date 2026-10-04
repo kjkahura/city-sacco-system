@@ -8,7 +8,7 @@ import { ask } from './ui.js';
 import { showHeaderIcon } from './organization.js';
 import { loginsTable, showDialog } from './users.js';
 import { loadAccess } from './access.js';
-import { render } from './nav.js';
+import { go, openFromHash } from './nav.js';
 
 export function start(session) {
   S.access = session.accessToken;
@@ -24,7 +24,7 @@ export function start(session) {
   showHeaderIcon();
   loadAccess().then(() => {
     if (S.user.roleCode) el('whoami').textContent = `${S.user.name || S.user.email} (${S.user.roleCode}, ${S.user.role})`;
-    render();
+    if (location.hash && location.hash !== '#') openFromHash(); else go(S.view || 'members');
   });
 }
 
