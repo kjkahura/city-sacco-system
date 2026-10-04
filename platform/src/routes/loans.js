@@ -139,10 +139,11 @@ router.get('/', requireAuth(), async (req, res, next) => {
       c,
       `SELECT l.*, m.member_no, m.first_name, m.last_name
        FROM loan_accounts l JOIN members m ON m.id = l.member_id
-       WHERE ($1::text IS NULL OR l.status = $1::text)
+       WHERE ($1::text[] IS NULL OR l.status = ANY($1::text[]))
          AND ($2::uuid IS NULL OR l.member_id = $2::uuid)
        ORDER BY l.created_at DESC, l.id`,
-      [req.query.status || null, req.query.memberId || null],
+      // One state, or several separated by commas (the console's Closed: repaid, rescheduled, refinanced).
+      [req.query.status ? String(req.query.status).split(',').map((x) => x.trim()).filter(Boolean) : null, req.query.memberId || null],
       req.query
     ));
     sendPage(res, page);

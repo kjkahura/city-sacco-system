@@ -170,6 +170,11 @@ tenantApi.post('/clients\\:search', ...clientRoutes.searchClients);
 tenantApi.post('/groups\\:search', ...clientRoutes.searchGroups);
 tenantApi.post('/creditarrangements\\:search', ...require('./routes/creditArrangements').search);
 tenantApi.post('/deposits\\:search', ...require('./routes/deposits').search);
+// Transactions across accounts. Mounted before /loans and /deposits, whose
+// /:id\\::action routes would otherwise read 'transactions' as an account.
+const txSearch = require('./routes/transactionSearch');
+tenantApi.post('/loans/transactions\\:search', ...txSearch.loans);
+tenantApi.post('/deposits/transactions\\:search', ...txSearch.deposits);
 tenantApi.use('/clients', clientRoutes.clients);
 tenantApi.use('/groups', clientRoutes.groups);
 tenantApi.use('/client-types', clientRoutes.types);

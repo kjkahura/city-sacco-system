@@ -230,6 +230,34 @@ export async function journalView() {
   wireRows(res.body, (l) => journalEntryDialog(l.journalEntryId));
 }
 
+const accrualState = { offset: 0, limit: 50, from: '', to: '' };
+
+/** Interest accruals: each accrual line posted, by booking date (POST /api/accounting/interestaccrual:search). */
+export async function accrualsView() {
+  const s = accrualState;
+  const criteria = [];
+  if (s.from) criteria.push({ field: 'bookingDate', operator: 'AFTER_INCLUSIVE', value: s.from });
+  if (s.to) criteria.push({ field: 'bookingDate', operator: 'BEFORE_INCLUSIVE', value: s.to });
+  const qs = new URLSearchParams({ paginationDetails: 'ON', offset: String(s.offset), limit: String(s.limit) });
+  const res = await api('POST', `/api/accounting/interestaccrual:search?${qs}`, { filterCriteria: criteria });
+  if (!res.ok) throw new Error(res.error);
+  view().innerHTML = `
+    <div class="toolbar"><h1>Interest Accruals</h1><span class="spacer"></span>
+      <label>From<input id="ac-from" type="date" value="${esc(s.from)}"></label>
+      <label>To<input id="ac-to" type="date" value="${esc(s.to)}"></label></div>
+    <p class="hint">Interest accrued on loans and deposit accounts, line by line, as the end of day posted it.</p>
+    ${table([
+    { label: 'Booked', value: (l) => String(l.bookingDate || '').slice(0, 10) }, { label: 'Entry', key: 'entryType' },
+    { label: 'Account', value: (l) => l.accountId || '' }, { label: 'Product', key: 'productId' },
+    { label: 'GL account', value: (l) => `${l.glAccountId} ${l.glAccountName || ''}` }, { label: 'Branch', value: (l) => l.branchId || '' },
+    { label: 'Amount', num: true, value: (l) => money(l.amount) },
+  ], res.body, { empty: 'No accruals posted in these dates' })}
+    ${pager(s, res.total)}`;
+  wirePager(s, accrualsView);
+  $('#ac-from').addEventListener('change', (e) => { s.from = e.target.value; s.offset = 0; accrualsView(); });
+  $('#ac-to').addEventListener('change', (e) => { s.to = e.target.value; s.offset = 0; accrualsView(); });
+}
+
 /** "GL code, amount[, branch code]" per line. */
 function journalLines(text) {
   return String(text || '').split('\n').map((x) => x.trim()).filter(Boolean).map((x) => {

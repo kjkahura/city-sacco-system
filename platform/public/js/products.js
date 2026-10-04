@@ -2,7 +2,7 @@
  * Loan products and their fees.
  */
 
-import { $, api, esc, money, toast } from './base.js';
+import { $, api, esc, money, navFilter, toast } from './base.js';
 import { ask, card, table, view, wireRows } from './ui.js';
 import { depositProductsSection } from './depositProducts.js';
 
@@ -297,7 +297,16 @@ async function productDetail(p0) {
   });
 }
 
-export async function productsView() {
+const productState = { parts: ['loan', 'deposit'] };
+
+/** Loan products, deposit products or both (filter.tab from the Products menu, filter.only from Administration). */
+export async function productsView(filter) {
+  const f = navFilter(filter);
+  if (f) productState.parts = f.only || (f.tab ? [f.tab] : ['loan', 'deposit']);
+  if (!productState.parts.includes('loan')) {
+    view().innerHTML = '';
+    return depositProductsSection();
+  }
   const r = await api('GET', '/api/loan-products');
   if (!r.ok) throw new Error(r.error);
   view().innerHTML = `
@@ -357,7 +366,7 @@ export async function productsView() {
     toast(res.ok ? `${res.body.id} created` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) productsView();
   });
-  depositProductsSection();
+  if (productState.parts.includes('deposit')) depositProductsSection();
 }
 
 // A product's accounting method changes through its own action, after the

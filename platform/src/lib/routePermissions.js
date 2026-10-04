@@ -139,6 +139,7 @@ const RULES = [
   // The reference platform's /deposits, the same accounts and rules as /savings. POST /deposits/:id is the
   // shape of every colon action; each checks the permission it needs.
   ['GET', '/deposits', V_DEP], ['GET', '/deposits/*', V_DEP], ['POST', '/deposits:search', V_DEP],
+  ['POST', '/deposits/transactions:search', V_DEP], ['POST', '/loans/transactions:search', V_LOAN],
   ['POST', '/deposits', 'CREATE_SAVINGS_ACCOUNT'], ['PUT', '/deposits/:id', 'EDIT_SAVINGS_ACCOUNT'], ['PATCH', '/deposits/:id', 'EDIT_SAVINGS_ACCOUNT'],
   ['DELETE', '/deposits/:id', 'DELETE_SAVINGS_ACCOUNT'],
   ['POST', '/deposits/:id', [...DEP_STATE, 'ACTIVATE_MATURITY', 'UNDO_MATURITY', 'APPLY_ACCRUED_SAVINGS_INTEREST']],

@@ -183,6 +183,41 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.setViewportSize({ width: 1280, height: 800 });
     await openMenu(page, 'clients', 'all');
 
+    section('lists from the menus');
+    await openMenu(page, 'deposits', 'active');
+    await page.waitForSelector('main h1');
+    check('Deposits: Active lists the active accounts', /Deposits: Active/.test(await page.textContent('main h1'))
+      && (await page.$$('main table tbody tr[data-row]')).length >= 1, await page.textContent('main'));
+    await openMenu(page, 'loanTransactions', 'disbursements');
+    await page.waitForSelector('main h1:has-text("Loan Transactions: Disbursements")');
+    check('Loan Transactions: Disbursements has the 60,000 disbursement', /60,000\.00/.test(await page.textContent('main table')), await page.textContent('main'));
+    await openMenu(page, 'depositTransactions', 'deposits');
+    await page.waitForSelector('main h1:has-text("Deposit Transactions: Deposits")');
+    check('Deposit Transactions: Deposits has the 250,000 deposit', /250,000\.00/.test(await page.textContent('main table')), await page.textContent('main'));
+    await openMenu(page, 'activities');
+    await page.waitForSelector('main h1:has-text("Activities")');
+    await page.waitForSelector('#act-user');
+    check('Activities lists activity, with filters for dates, user, entity and branch', (await page.$$('main table tbody tr[data-row]')).length >= 1
+      && await page.$('#act-from') && await page.$('#act-entity') && await page.$('#act-branch'));
+    await openMenu(page, 'creditArrangements', 'all');
+    await page.waitForSelector('main h1:has-text("Credit Arrangements")');
+    check('Credit Arrangements: none yet', /No credit arrangements/.test(await page.textContent('main')));
+    await openMenu(page, 'accounting', 'accruals');
+    await page.waitForSelector('main h1:has-text("Interest Accruals")');
+    check('Accounting: Interest Accruals opens', true);
+    await openMenu(page, 'accounting', 'trialBalance');
+    await page.waitForSelector('#r-which');
+    check('Accounting: Trial Balance opens the report', await page.$eval('#r-which', (x) => x.value) === 'trial-balance');
+    await openMenu(page, 'products', 'deposit');
+    await page.waitForSelector('main h1:has-text("Deposit products")');
+    check('Products: Deposit Products shows the deposit products only', !(await page.$('main h1:has-text("Loan products")')));
+    await openMenu(page, 'loanTransactions', 'all');
+    await page.waitForSelector('main h1:has-text("Loan Transactions")');
+    await page.click('main table tbody tr[data-row]');
+    await page.waitForSelector('#back');
+    check('a transaction row opens its account', /Loan|LN0/.test(await page.textContent('main h1')), await page.textContent('main h1'));
+    await openMenu(page, 'clients', 'all');
+
     section('members');
     await page.waitForSelector('table tbody tr');
     const rows = await page.locator('table tbody tr').count();
@@ -800,8 +835,9 @@ const T = (fn) => withTenant(SCHEMA, fn);
       /Dynamic/.test(await page.textContent('main')) && /Reducing, equal installments/.test(await page.textContent('main')));
 
     section('deposit products and accounting');
+    await openMenu(page, 'products', 'deposit');
     await page.waitForSelector('#d-new');
-    check('deposit products are listed under loan products with their accounting',
+    check('deposit products are listed, with their accounting',
       /Deposit products/.test(await page.textContent('main')) && /SAV01/.test(await page.textContent('main')) && /CASH/.test(await page.textContent('main')));
     await page.click('#d-new');
     await page.waitForSelector('dialog[open]');

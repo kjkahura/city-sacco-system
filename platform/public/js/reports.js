@@ -2,7 +2,7 @@
  * Reports: the list, the filters each takes, running and exporting one.
  */
 
-import { $, api, day, el, esc, money, openFile } from './base.js';
+import { $, api, day, el, esc, money, navFilter, openFile } from './base.js';
 import { card, pager, table, view, wirePager } from './ui.js';
 import { can } from './access.js';
 import { templatesReport } from './templates.js';
@@ -36,8 +36,10 @@ const reportDef = (w) => (REPORTS.find(([v]) => v === w) || REPORTS[0])[2];
 const ACCOUNTING_REPORTS = ['trial-balance', 'balance-sheet', 'income-statement', 'prudential'];
 const reportAllowed = ([v]) => (ACCOUNTING_REPORTS.includes(v) ? can('VIEW_ACCOUNTING_REPORTS') : v === 'indicators' ? can('VIEW_INTELLIGENCE') : can('VIEW_REPORTS'));
 
-export async function reportsView() {
+export async function reportsView(filter) {
   const R = reportState;
+  const f = navFilter(filter);
+  if (f?.which && f.which !== R.which) { R.which = f.which; R.offset = 0; R.groupBy = ''; }
   if (!branchList) {
     const b = await api('GET', '/api/branches');
     branchList = b.ok ? b.body : [];

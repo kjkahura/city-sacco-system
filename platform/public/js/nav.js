@@ -15,7 +15,8 @@ import { dashboardView } from './dashboard.js';
 import { viewsView } from './views.js';
 import { financeView, returnsView } from './finance.js';
 import { productsView } from './products.js';
-import { accountingView, chartView, journalView } from './accounting.js';
+import { accountingView, accrualsView, chartView, journalView } from './accounting.js';
+import { activitiesView, creditArrangementsView, depositTransactionsView, depositsView, loanTransactionsView } from './lists.js';
 import { controlsView } from './controls.js';
 import { orgView } from './organization.js';
 import { dataView } from './data.js';
@@ -64,6 +65,12 @@ window.addEventListener('hashchange', () => {
 });
 
 const VIEWS = {
+  deposits: depositsView,
+  loanTransactions: loanTransactionsView,
+  depositTransactions: depositTransactionsView,
+  activities: activitiesView,
+  creditArrangements: creditArrangementsView,
+  accruals: accrualsView,
   access: accessView,
   menu: menuView,
   tasks: tasksView,

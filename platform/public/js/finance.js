@@ -2,14 +2,14 @@
  * Provisioning, the year-end close and the regulatory returns.
  */
 
-import { $, api, day, el, esc, money, toast, today } from './base.js';
+import { $, api, day, el, esc, money, navFilter, toast, today } from './base.js';
 import { ask, card, table, view, wireRows } from './ui.js';
 
 // --------------------------------------------------------------------------
 // Provisioning and the year-end close
 // --------------------------------------------------------------------------
 
-export async function financeView() {
+export async function financeView(filter) {
   const [bands, years, settings] = await Promise.all([
     api('GET', '/api/provisioning/bands'),
     api('GET', '/api/periods'),
@@ -112,6 +112,10 @@ export async function financeView() {
   });
 
   wireRows(years.body || [], yearDetail);
+  // Accounting > Provisioning opens this page at its Provisioning card.
+  if (navFilter(filter)?.only === 'provisioning') {
+    [...view().querySelectorAll('.card h2')].find((h) => h.textContent === 'Provisioning')?.scrollIntoView();
+  }
 }
 
 async function yearDetail(y) {
