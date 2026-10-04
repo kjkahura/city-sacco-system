@@ -114,9 +114,29 @@ Built on 5 October 2026 from `audit-webhooks.md`. John accepted its 11 decision 
   - a message's body and outcome;
   - resend of selected failed messages.
 
+## Fixes from the final review
+
+A fresh reviewer read the whole build. These were fixed, each with a check that failed first:
+
+- **The pass after a request ran as that user.** For a user limited to some branches, row security hid other branches' records. Their messages went out with blank names, and repayment reminders for other branches were lost for the day. The pass now runs as the system.
+- **A batch could outlast its lease.** A message could then be sent twice, and a receiver answering a byte at a time was never cut off. The fixes:
+  - messages are now claimed one at a time, just before they are sent;
+  - only the holder of the lease records the outcome;
+  - every request has a deadline for the whole exchange, not just per idle period.
+- **IPv4 written in an IPv6 form got past the address guard.** This covered mapped, compatible, NAT64 and 6to4 forms. They are now read as the IPv4 address they carry, and site-local and documentation ranges are refused too.
+- **Branch limits in the log:** a user limited to some branches saw every branch's messages. Messages now carry their branch, and the log has row security like the other branch records.
+- **Message order:** messages are sent in the order their events happened, so a posting goes before its reversal.
+- **A changed URL:** queued messages now follow a webhook to its new URL. A message whose webhook was deleted fails with `MISSING_TEMPLATE_KEY` rather than going out unsigned.
+- **An empty value outside quotation marks in a JSON body** becomes `null`, so the body stays valid.
+- **The pass after a request** now runs only for a SACCO with an active webhook (checked every 30 seconds), and it logs its errors.
+- **Triggers:** every trigger first checks whether any webhook is active, so a SACCO with none does no other lookup.
+- **The circuit breaker:** after a pause, a success sends the waiting messages in the same pass.
+
+Left for later: masking header values in the API and the change log (headers can carry tokens), and rate limits on `:test`.
+
 ## Tests
 
-- **New suite:** `test/webhooks.test.js` has 68 checks. It covers:
+- **New suite:** `test/webhooks.test.js` has 75 checks. It covers:
   - the guard;
   - event capture, including a rolled-back change and a deactivated webhook;
   - every template validation, secrets and permissions;

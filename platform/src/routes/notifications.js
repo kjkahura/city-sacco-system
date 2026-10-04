@@ -26,13 +26,15 @@ templates.get('/catalog', ...H.run(async () => {
   const C = require('../domain/notifications/catalog');
   return { events: C.EVENTS, placeholders: Object.keys(C.PLACEHOLDERS), operators: TPL.OPERATORS };
 }));
-templates.post('/', ...H.run((c, req, _res, { actor }) => TPL.create(c, req.body, { actor }), { write: true, status: 201 }));
+const changed = (req, out) => { D.forget(req.tenant.schema_name); return out; };
+templates.post('/', ...H.run(async (c, req, _res, { actor }) => changed(req, await TPL.create(c, req.body, { actor })), { write: true, status: 201 }));
 templates.post('/:id\\:test', ...H.plain(async (req) => MSG.shape(await D.testTemplate(req.tenant.schema_name, req.params.id, { actor: req.auth.email }))));
 templates.post('/:id\\:rotateSecret', ...H.run((c, req, _res, { actor }) => TPL.rotateSecret(c, req.params.id, { actor }), { write: true }));
 templates.get('/:id', ...H.run((c, req) => TPL.get(c, req.params.id)));
-templates.patch('/:id', ...H.run((c, req, _res, { actor }) => TPL.patch(c, req.params.id, req.body, { actor }), { write: true }));
+templates.patch('/:id', ...H.run(async (c, req, _res, { actor }) => changed(req, await TPL.patch(c, req.params.id, req.body, { actor })), { write: true }));
 templates.delete('/:id', ...H.run(async (c, req, res, { actor }) => {
   await TPL.remove(c, req.params.id, { actor });
+  changed(req);
   res.status(204).end();
 }, { write: true }));
 

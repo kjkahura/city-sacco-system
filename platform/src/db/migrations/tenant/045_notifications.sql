@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS notification_messages (
   group_id              uuid,
   loan_id               uuid,
   savings_account_id    uuid,
+  branch_id             uuid,
   test                  boolean NOT NULL DEFAULT false,
   created_by            text,
   created_at            timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -88,6 +89,13 @@ CREATE TABLE IF NOT EXISTS notification_messages (
 CREATE INDEX IF NOT EXISTS notification_messages_due_idx ON notification_messages (next_attempt_at) WHERE state IN ('QUEUED', 'WAITING');
 CREATE INDEX IF NOT EXISTS notification_messages_created_idx ON notification_messages (created_at DESC);
 CREATE INDEX IF NOT EXISTS notification_messages_template_idx ON notification_messages (template_id, created_at DESC);
+
+-- A user limited to some branches reads the messages of those branches
+-- (row security under sacco_branch_scoped, as in migration 032). The
+-- dispatcher runs as the system and sees them all.
+ALTER TABLE notification_messages ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS branch_access ON notification_messages;
+CREATE POLICY branch_access ON notification_messages USING (platform.branch_visible(branch_id, NULL));
 
 CREATE TABLE IF NOT EXISTS notification_settings (
   id                 boolean PRIMARY KEY DEFAULT true CHECK (id),
@@ -102,6 +110,12 @@ INSERT INTO notification_settings (id) VALUES (true) ON CONFLICT DO NOTHING;
 -- --------------------------------------------------------------------------
 -- Raising an event
 -- --------------------------------------------------------------------------
+
+-- Whether any webhook is active: each trigger asks first, so a SACCO with
+-- none does no other lookup.
+CREATE OR REPLACE FUNCTION notify_any() RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (SELECT 1 FROM notification_templates WHERE activated)
+$$;
 
 CREATE OR REPLACE FUNCTION notify_event(p_event text, p_target text, p_member uuid, p_loan uuid, p_savings uuid,
   p_arrangement uuid, p_transaction uuid, p_journal uuid, p_branch uuid, p_activity text, p_data jsonb DEFAULT '{}')
@@ -118,6 +132,7 @@ END $$;
 -- Members and groups.
 CREATE OR REPLACE FUNCTION notify_members() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF NOT notify_any() THEN RETURN NULL; END IF;
   PERFORM notify_event(CASE WHEN NEW.holder_type = 'GROUP' THEN 'GROUP_CREATED' ELSE 'CLIENT_CREATED' END,
     CASE WHEN NEW.holder_type = 'GROUP' THEN 'GROUP' ELSE 'CLIENT' END, NEW.id, NULL, NULL, NULL, NULL, NULL, NEW.branch_id, NULL);
   RETURN NULL;
@@ -128,6 +143,7 @@ CREATE TRIGGER members_notify AFTER INSERT ON members FOR EACH ROW EXECUTE FUNCT
 CREATE OR REPLACE FUNCTION notify_member_states() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE m record;
 BEGIN
+  IF NOT notify_any() THEN RETURN NULL; END IF;
   SELECT holder_type, branch_id INTO m FROM members WHERE id = NEW.member_id;
   IF m.holder_type = 'GROUP' THEN RETURN NULL; END IF;
   PERFORM notify_event(CASE NEW.action WHEN 'APPROVE' THEN 'CLIENT_APPROVED' WHEN 'REJECT' THEN 'CLIENT_REJECTED' END,
@@ -141,6 +157,7 @@ CREATE TRIGGER member_state_changes_notify AFTER INSERT ON member_state_changes 
 -- Loan accounts.
 CREATE OR REPLACE FUNCTION notify_loans() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF NOT notify_any() THEN RETURN NULL; END IF;
   IF TG_OP = 'INSERT' THEN
     PERFORM notify_event('LOAN_CREATED', 'LOANS', NEW.member_id, NEW.id, NULL, NEW.credit_arrangement_id, NULL, NULL, NEW.branch_id, NULL);
   ELSIF NEW.credit_arrangement_id IS DISTINCT FROM OLD.credit_arrangement_id THEN
@@ -159,6 +176,7 @@ CREATE TRIGGER loan_accounts_notify AFTER INSERT OR UPDATE OF credit_arrangement
 CREATE OR REPLACE FUNCTION notify_loan_states() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE l record;
 BEGIN
+  IF NOT notify_any() THEN RETURN NULL; END IF;
   SELECT member_id, branch_id INTO l FROM loan_accounts WHERE id = NEW.loan_id;
   PERFORM notify_event(CASE NEW.to_status
       WHEN 'APPROVED' THEN 'LOAN_APPROVAL' WHEN 'IN_ARREARS' THEN 'ACCOUNT_IN_ARREARS'
@@ -175,6 +193,7 @@ CREATE TRIGGER loan_state_history_notify AFTER INSERT ON loan_state_history FOR 
 -- Deposit accounts.
 CREATE OR REPLACE FUNCTION notify_savings() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF NOT notify_any() THEN RETURN NULL; END IF;
   IF TG_OP = 'INSERT' THEN
     PERFORM notify_event('SAVINGS_CREATED', 'SAVINGS', NEW.member_id, NULL, NEW.id, NEW.credit_arrangement_id, NULL, NULL, NEW.branch_id, NULL);
     RETURN NULL;
@@ -210,6 +229,7 @@ DECLARE
   tgt text;
   original text;
 BEGIN
+  IF NOT notify_any() THEN RETURN NULL; END IF;
   IF NEW.kind = 'REVERSAL' THEN
     SELECT kind INTO original FROM transactions WHERE reference = NEW.allocation->>'reversalOf';
     ev := CASE original
@@ -238,6 +258,7 @@ DECLARE
   r record;
   ev text;
 BEGIN
+  IF NOT notify_any() THEN RETURN NULL; END IF;
   r := CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
   IF TG_OP = 'INSERT' THEN ev := 'CREDIT_ARRANGEMENT_CREATED';
   ELSIF TG_OP = 'DELETE' THEN ev := 'CREDIT_ARRANGEMENT_DELETED';
@@ -256,6 +277,7 @@ CREATE TRIGGER credit_arrangements_notify AFTER INSERT OR UPDATE OR DELETE ON cr
 -- Journal entries.
 CREATE OR REPLACE FUNCTION notify_journal() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF NOT notify_any() THEN RETURN NULL; END IF;
   PERFORM notify_event(CASE WHEN NEW.reversal_of IS NULL THEN 'JOURNAL_ENTRY_ADDED' ELSE 'JOURNAL_ENTRY_ADJUSTED' END,
     'ACCOUNTING', NULL, NULL, NULL, NULL, NULL, NEW.id, NEW.branch_id, NULL,
     jsonb_build_object('transactionId', NEW.transaction_id, 'sourceType', NEW.source_type));
@@ -267,6 +289,7 @@ CREATE TRIGGER journal_entries_notify AFTER INSERT ON journal_entries FOR EACH R
 -- End of day.
 CREATE OR REPLACE FUNCTION notify_eod() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF NOT notify_any() THEN RETURN NULL; END IF;
   IF NEW.state = 'COMPLETE' THEN
     PERFORM notify_event('END_OF_DAY_PROCESSING_COMPLETED', 'BACKGROUND_PROCESS', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
       jsonb_build_object('businessDate', NEW.business_date, 'trigger', NEW.trigger));
@@ -280,6 +303,7 @@ CREATE TRIGGER eod_completions_notify AFTER INSERT ON eod_completions FOR EACH R
 CREATE OR REPLACE FUNCTION notify_audit() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE group_member boolean;
 BEGIN
+  IF NOT notify_any() THEN RETURN NULL; END IF;
   IF NEW.action = 'HOLIDAY_SYNC_COMPLETED' THEN
     PERFORM notify_event('HOLIDAY_SYNC_COMPLETED', 'ADMINISTRATIVE', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
   ELSIF NEW.action = 'MEMBER_PORTAL_ACTIVATED' THEN

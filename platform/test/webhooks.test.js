@@ -86,6 +86,8 @@ const hookUrl = (p = '/hook') => `http://localhost:${RECEIVER}${p}`;
     check('localhost, private and metadata addresses are refused', ['https://localhost/x', 'https://10.0.0.1/x', 'https://169.254.169.254/latest', 'https://[::1]/x']
       .every((u) => throwsCode(() => OUT.checkUrl(u, { prefix: 'WEBHOOK' }), 'MUST_BE_PUBLIC')));
     check('a public https URL is accepted', OUT.checkUrl('https://example.org/x', { prefix: 'WEBHOOK' }) === 'https://example.org/x');
+    check('IPv4 written as IPv6 is refused too', ['https://[::ffff:127.0.0.1]/x', 'https://[::7f00:1]/x', 'https://[64:ff9b::a9fe:a9fe]/x', 'https://[2002:a9fe:a9fe::1]/x', 'https://[fec0::1]/x']
+      .every((u) => throwsCode(() => OUT.checkUrl(u, { prefix: 'WEBHOOK' }), 'MUST_BE_PUBLIC')));
     const blocked = await OUT.send({ url: `http://localhost:${RECEIVER}/x` });
     check('a request to a private address is stopped at the connection', !!blocked.error && received.length === 0, JSON.stringify(blocked));
     process.env.CALLBACK_ALLOW_PRIVATE = 'true';
@@ -95,6 +97,13 @@ const hookUrl = (p = '/hook') => `http://localhost:${RECEIVER}${p}`;
     answer = { status: 200, delayMs: 1500 };
     const slow = await OUT.send({ url: hookUrl('/slow'), body: '{}', timeoutMs: 300 });
     check('a slow receiver times out', slow.error === 'TIMED_OUT', JSON.stringify(slow));
+    // A receiver that answers a byte at a time keeps the socket busy; the whole request still has a deadline.
+    const dribbler = http.createServer((req, res) => { res.writeHead(200); const t = setInterval(() => res.write('.'), 100); req.on('close', () => clearInterval(t)); setTimeout(() => { clearInterval(t); res.end(); }, 3000); });
+    await new Promise((ok) => dribbler.listen(4127, ok));
+    const t0 = Date.now();
+    const dribbled = await OUT.send({ url: 'http://localhost:4127/d', body: '{}', timeoutMs: 400 });
+    dribbler.close();
+    check('a receiver that trickles its answer is cut off at the deadline', dribbled.error === 'TIMED_OUT' && Date.now() - t0 < 1500, `${JSON.stringify(dribbled)} ${Date.now() - t0}ms`);
     answer = { status: 200 };
     received.length = 0;
 
@@ -116,6 +125,8 @@ const hookUrl = (p = '/hook') => `http://localhost:${RECEIVER}${p}`;
     };
     await mk('manager', { role: 'MANAGER', branchId: 'HQ' });
     await mk('teller', { role: 'TELLER', branchId: 'HQ' });
+    await call('POST', '/api/branches', { code: 'NKR', name: 'Nakuru' });
+    await mk('hqonly', { role: 'MANAGER', branchId: 'HQ', accessRights: { allBranches: false } });
     const m1 = (await call('POST', '/api/members', { firstName: 'Wanjiru', lastName: 'O"Hook\nline', branchId: 'HQ', phone: '0700000001' })).body;
     const sav = (await call('POST', '/api/savings', { memberId: m1.id, productId: 'SAV01' })).body;
     check('a member and a deposit account', m1?.id && sav?.id, JSON.stringify(sav).slice(0, 200));
@@ -276,10 +287,10 @@ const hookUrl = (p = '/hook') => `http://localhost:${RECEIVER}${p}`;
     answer = { status: 200 };
     await T((c) => c.query("UPDATE notification_templates SET circuit_open_until = now() - interval '1 second' WHERE id = $1", [hook.id]));
     await runNow();
-    check('after 10 minutes one message is tried; its success closes the circuit', received.length === before + 1
-      && (await T((c) => c.query('SELECT circuit_open_until FROM notification_templates WHERE id = $1', [hook.id]))).rows[0].circuit_open_until === null);
-    await runNow();
-    check('and the rest follow', received.length === before + 2 && (await msgs()).filter((m) => m.state === 'WAITING').length === 0);
+    const probe = received.slice(before).map((x) => JSON.parse(x.body).amount);
+    check('after 10 minutes the oldest message is tried first; its success closes the circuit and the rest follow', probe.join() === '400,401'
+      && (await T((c) => c.query('SELECT circuit_open_until FROM notification_templates WHERE id = $1', [hook.id]))).rows[0].circuit_open_until === null
+      && (await msgs()).filter((m) => m.state === 'WAITING').length === 0, probe.join());
 
     received.length = 0;
     await call('POST', `/api/savings/${sav.id}/deposits`, { amount: 500, channelId: 'cash' });
@@ -364,6 +375,67 @@ const hookUrl = (p = '/hook') => `http://localhost:${RECEIVER}${p}`;
     r = await call('POST', '/api/communications/messages:resendAsyncByDate', { startDate: new Date(Date.now() - 60_000).toISOString(), endDate: new Date().toISOString(), templateTypes: ['WEB_HOOK'] });
     await runNow();
     check('switched on, failed messages are resent by date', r.status === 200 && received.length === 1, `${r.status} ${r.text} ${received.length}`);
+
+    // ------------------------------------------------------------------------
+    section('branches, order and changes (the final review)');
+    const m2 = (await call('POST', '/api/members', { firstName: 'Baraka', lastName: 'Nakuru', branchId: 'NKR' })).body;
+    const sav2 = (await call('POST', '/api/savings', { memberId: m2.id, productId: 'SAV01' })).body;
+    received.length = 0;
+    await call('POST', `/api/savings/${sav2.id}/deposits`, { amount: 700, channelId: 'cash' });
+    process.env.NOTIFY_AFTER_REQUEST = 'on';
+    const lim = await call('POST', `/api/savings/${sav.id}/deposits`, { amount: 701, channelId: 'cash' }, { who: 'hqonly' });
+    for (let i = 0; i < 40 && received.length < 2; i += 1) await new Promise((r) => setTimeout(r, 100));
+    process.env.NOTIFY_AFTER_REQUEST = 'off';
+    await new Promise((r) => setTimeout(r, 300));
+    const nkrBody = received.map((x) => { try { return JSON.parse(x.body); } catch { return {}; } }).find((b) => b.amount === 700);
+    check('a pass started by a branch-limited user still fills other branches\' messages', lim.status < 300 && nkrBody && nkrBody.client === 'Baraka Nakuru',
+      `${lim.text} ${received.map((x) => x.body).join(' | ')}`);
+    r = await call('POST', '/api/communications/messages:search?limit=500', [{ field: 'event', operator: 'EQUALS', value: 'SAVINGS_DEPOSIT' }], { who: 'hqonly' });
+    const all = await call('POST', '/api/communications/messages:search?limit=500', [{ field: 'event', operator: 'EQUALS', value: 'SAVINGS_DEPOSIT' }]);
+    check('a branch-limited user sees only their branches\' messages', r.status === 200 && r.body.length > 0 && r.body.length < all.body.length
+      && r.body.every((m) => m.depositAccountKey !== sav2.id), `${r.body?.length} of ${all.body?.length}`);
+
+    received.length = 0;
+    const d1 = await call('POST', `/api/savings/${sav.id}/deposits`, { amount: 800, channelId: 'cash' });
+    const { rows: [d1tx] } = await T((c) => c.query("SELECT reference FROM transactions WHERE kind = 'SAVINGS_DEPOSIT' ORDER BY created_at DESC LIMIT 1"));
+    await call('PATCH', `/api/templates/${hook.id}`, [{ op: 'REPLACE', path: '/event', value: 'SAVINGS_DEPOSIT' }]);
+    const revTpl = (await call('POST', '/api/templates', { name: 'Reversals feed', target: 'SAVINGS', event: 'SAVINGS_DEPOSIT_REVERSAL', url: hookUrl('/reversals'),
+      body: '{"event": "{{EVENT}}", "of": "{{REVERSAL_OF}}"}' })).body;
+    await call('POST', `/api/savings/transactions/${d1tx.reference}/reversal`, { notes: 'order' });
+    for (let i = 0; i < 6; i += 1) await call('POST', `/api/savings/${sav.id}/deposits`, { amount: 900 + i, channelId: 'cash' });
+    await runNow();
+    const order = received.map((x) => { try { return JSON.parse(x.body); } catch { return {}; } });
+    const iDep = order.findIndex((b) => b.amount === 800);
+    const iRev = order.findIndex((b) => b.of === d1tx.reference);
+    check('messages are sent in the order their events happened: a posting before its reversal', d1.status < 300 && iDep >= 0 && iRev > iDep
+      && order.filter((b) => b.amount >= 900).map((b) => b.amount).join() === '900,901,902,903,904,905', JSON.stringify(order));
+
+    answer = { status: 500 };
+    await call('POST', `/api/savings/${sav.id}/deposits`, { amount: 950, channelId: 'cash' });
+    await runNow();
+    answer = { status: 200 };
+    received.length = 0;
+    await call('PATCH', `/api/templates/${hook.id}`, [{ op: 'REPLACE', path: '/url', value: hookUrl('/moved') }]);
+    await T((c) => c.query("UPDATE notification_messages SET next_attempt_at = now() WHERE state IN ('QUEUED', 'WAITING')"));
+    await runNow();
+    check('a webhook moved to a new URL sends its queued messages there, not to the old one', received.length === 1 && received[0].url === '/moved', received.map((x) => x.url).join());
+    answer = { status: 500 };
+    await call('POST', `/api/savings/${sav.id}/deposits`, { amount: 960, channelId: 'cash' });
+    await runNow();
+    answer = { status: 200 };
+    await call('DELETE', `/api/templates/${revTpl.id}`);
+    const orphanId = (await msgs()).pop().id;
+    await call('DELETE', `/api/templates/${hook.id}`);
+    received.length = 0;
+    await T((c) => c.query("UPDATE notification_messages SET next_attempt_at = now() WHERE state IN ('QUEUED', 'WAITING')"));
+    await runNow();
+    const orphan = (await msgs()).find((m) => m.id === orphanId);
+    check('a message whose webhook was deleted is not sent unsigned: it fails with MISSING_TEMPLATE_KEY', received.length === 0 && orphan.state === 'FAILED'
+      && orphan.failure_reason === 'MISSING_TEMPLATE_KEY', JSON.stringify(orphan));
+
+    const R = require('../src/domain/notifications/render');
+    const filled = R.fill('{"loan": {{LOAN_AMOUNT}}, "name": "{{CLIENT_NAME}}"}', { CLIENT_NAME: 'A' }, 'JSON');
+    check('an unquoted placeholder with no value is JSON null, not a broken body', filled === '{"loan": null, "name": "A"}', filled);
 
     // FURTHER SECTIONS
   } catch (e) {

@@ -198,6 +198,10 @@ async function patch(c, id, ops, { actor }) {
     [t.id, v.name, v.target, v.event, v.body, v.activated, v.trigger, v.triggerDays, v.subscriptionOption, v.filtersLinkingOperator,
       JSON.stringify(v.filterConstraints), v.url, v.requestType, v.contentType, v.authType, v.username, authSecret, JSON.stringify(v.headers),
       v.signingEnabled, signingSecret]);
+  // Queued and waiting messages follow the webhook to its new address.
+  if (after.url !== t.url) {
+    await c.query(`UPDATE notification_messages SET destination = $2 WHERE template_id = $1 AND state IN ('QUEUED', 'WAITING')`, [t.id, after.url]);
+  }
   await recordAudit(c, { actor, action: 'WEBHOOK_EDITED', entity: 'notification_template', entityId: t.id, before: JSON.stringify(before), after: JSON.stringify(shape(after)) });
   return { ...shape(after), ...(shown ? { signingSecret: shown } : {}) };
 }
