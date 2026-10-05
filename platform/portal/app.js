@@ -542,7 +542,7 @@ async function loadNotifications() {
   try { list = await api.getNotifications(); } catch (e) { box.textContent = friendly(e.code || e.message); return; }
   if (!list.length) { box.innerHTML = '<p class="hint">The SACCO sends no email notifications yet.</p>'; return; }
   box.innerHTML = list.map((n) => `<label class="check-row"><input type="checkbox" data-tpl="${esc(n.templateKey)}" ${n.subscribed ? 'checked' : ''}>
-    ${esc(n.name)}</label>`).join('');
+    ${esc(n.name)} <span class="hint">(${n.channel === 'SMS' ? 'SMS' : 'email'})</span></label>`).join('');
   box.querySelectorAll('[data-tpl]').forEach((cb) => cb.addEventListener('change', async () => {
     try {
       await api.setNotification(cb.dataset.tpl, cb.checked);

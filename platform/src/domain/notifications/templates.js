@@ -11,7 +11,8 @@ const S = require('./secrets');
  * Templates (the reference platform's templates API): what event, under
  * which conditions, sent where and how, with what body. A template is a
  * webhook (WEB_HOOK), a streaming template (EVENT_STREAM, ../streaming) or
- * an email (EMAIL: a subject, a recipient and an HTML body).
+ * an email (EMAIL: a subject, a recipient and an HTML body) or an SMS
+ * (SMS: a recipient and a text of at most six segments).
  *
  * The basic authentication password and the signing secret are stored
  * sealed (./secrets) and never returned; the signing secret is shown once,
@@ -22,17 +23,21 @@ const REQUEST_TYPES = ['POST', 'PUT', 'PATCH'];
 const CONTENT_TYPES = ['PLAIN_TEXT', 'JSON', 'XML'];
 const OPERATORS = ['EQUALS', 'DIFFERENT_THAN', 'MORE_THAN', 'LESS_THAN', 'BETWEEN', 'IN', 'STARTS_WITH', 'EMPTY', 'NOT_EMPTY'];
 const iso = (v) => (v instanceof Date ? v.toISOString() : v || null);
-const TYPES = ['WEB_HOOK', 'EVENT_STREAM', 'EMAIL'];
+const TYPES = ['WEB_HOOK', 'EVENT_STREAM', 'EMAIL', 'SMS'];
+const SMS = require('./channels/sms');
 const RECIPIENTS = ['CLIENT', 'CREDIT_OFFICER', 'GROUP_ROLE'];
 // An email goes to someone the event's member, group or account leads to.
 const PERSON_TARGETS = ['CLIENT', 'GROUP', 'LOANS', 'SAVINGS'];
-const AUDIT = { WEB_HOOK: 'WEBHOOK', EVENT_STREAM: 'STREAM_TEMPLATE', EMAIL: 'EMAIL_TEMPLATE' };
+const AUDIT = { WEB_HOOK: 'WEBHOOK', EVENT_STREAM: 'STREAM_TEMPLATE', EMAIL: 'EMAIL_TEMPLATE', SMS: 'SMS_TEMPLATE' };
+// The SMS sample: the text filled with the placeholders' sample values, for its length.
+const smsSample = (body) => SMS.segments(R.fill(body, C.PLACEHOLDERS, 'PLAIN_TEXT'));
 const auditName = (type, what) => `${AUDIT[type] || 'TEMPLATE'}_${what}`;
 
 function shape(t) {
   return {
     id: t.id, name: t.name, type: t.type, ...(t.type === 'EVENT_STREAM' ? { topic: t.topic } : {}),
-    ...(t.type === 'EMAIL' ? { subject: t.subject, recipient: t.recipient, recipientRole: t.recipient_role || null } : {}), target: t.target, event: t.event, body: t.body, activated: t.activated,
+    ...(t.type === 'EMAIL' ? { subject: t.subject, recipient: t.recipient, recipientRole: t.recipient_role || null } : {}),
+    ...(t.type === 'SMS' ? { recipient: t.recipient, recipientRole: t.recipient_role || null, segments: smsSample(t.body).count } : {}), target: t.target, event: t.event, body: t.body, activated: t.activated,
     trigger: t.trigger, triggerDays: t.trigger_days, subscriptionOption: t.subscription_option,
     filtersLinkingOperator: t.filters_linking_operator, filterConstraints: t.filter_constraints,
     url: t.url, requestType: t.request_type, contentType: t.content_type,
@@ -93,8 +98,10 @@ async function normalise(c, b, { current = null } = {}) {
   if (!TYPES.includes(type)) throw err(`TYPE_IS_ONE_OF: ${TYPES.join(', ')}`);
   if (current && type !== current.type) throw err('A_TEMPLATE_KEEPS_ITS_TYPE');
   const email = type === 'EMAIL';
-  // Streaming templates and emails have no address, authorization, headers or signature.
-  const stream = type === 'EVENT_STREAM' || email;
+  const sms = type === 'SMS';
+  const person = email || sms;
+  // Streaming templates, emails and SMS have no address, authorization, headers or signature.
+  const stream = type === 'EVENT_STREAM' || person;
   const event = String(b.event || '').toUpperCase();
   if (C.NOT_SUPPORTED.includes(event)) throw err(`EVENT_NOT_SUPPORTED: ${event} has no source on this platform`);
   const targets = C.targetsOf(event);
@@ -102,11 +109,11 @@ async function normalise(c, b, { current = null } = {}) {
   const target = String(b.target || targets[0]).toUpperCase();
   if (!C.TARGETS.includes(target)) throw err(`UNKNOWN_TARGET: ${target}`);
   if (!targets.includes(target)) throw err(`EVENT_NOT_FOR_TARGET: ${event} is for ${targets.join(' or ')}`);
-  if (email && !PERSON_TARGETS.includes(target)) throw err(`EMAIL_TARGET_MUST_BE_ONE_OF: ${PERSON_TARGETS.join(', ')}; ${event} has no member to write to`);
+  if (person && !PERSON_TARGETS.includes(target)) throw err(`${type}_TARGET_MUST_BE_ONE_OF: ${PERSON_TARGETS.join(', ')}; ${event} has no member to write to`);
   const requestType = String(b.requestType || 'POST').toUpperCase();
   if (!REQUEST_TYPES.includes(requestType)) throw err(`INVALID_REQUEST_TYPE: ${requestType}; POST, PUT or PATCH`);
-  const contentType = email ? 'HTML' : String(b.contentType || 'JSON').toUpperCase();
-  if (!email && !CONTENT_TYPES.includes(contentType)) throw err(`INVALID_CONTENT_TYPE: ${contentType}; ${CONTENT_TYPES.join(', ')}`);
+  const contentType = email ? 'HTML' : sms ? 'PLAIN_TEXT' : String(b.contentType || 'JSON').toUpperCase();
+  if (!person && !CONTENT_TYPES.includes(contentType)) throw err(`INVALID_CONTENT_TYPE: ${contentType}; ${CONTENT_TYPES.join(', ')}`);
   // A streaming template is read by subscribers: it has no address, authorization or signature.
   let url = null;
   if (!stream) {
@@ -127,12 +134,16 @@ async function normalise(c, b, { current = null } = {}) {
     if (!subject) throw err('SUBJECT_REQUIRED');
     if (subject.length > 255) throw err('SUBJECT_IS_AT_MOST_255_CHARACTERS');
     if (/[\r\n]/.test(subject)) throw err('SUBJECT_IS_ONE_LINE');
+  }
+  if (person) {
     recipient = String(b.recipient || 'CLIENT').toUpperCase();
-    if (!RECIPIENTS.includes(recipient)) throw err(`RECIPIENT_IS_ONE_OF: ${RECIPIENTS.join(', ')}`);
+    // Credit officers have no phone number on record (docs/audits/audit-sms.md, decision 5).
+    const allowed = sms ? RECIPIENTS.filter((x) => x !== 'CREDIT_OFFICER') : RECIPIENTS;
+    if (!allowed.includes(recipient)) throw err(`RECIPIENT_IS_ONE_OF: ${allowed.join(', ')}`);
     if (recipient === 'GROUP_ROLE') {
       if (target === 'CLIENT') throw err('A_GROUP_ROLE_RECIPIENT_IS_FOR_GROUPS_AND_THEIR_ACCOUNTS');
       recipientRole = String(b.recipientRole || '').trim();
-      if (!recipientRole) throw err('RECIPIENT_ROLE_REQUIRED: the group role whose holders get the email');
+      if (!recipientRole) throw err('RECIPIENT_ROLE_REQUIRED: the group role whose holders get the message');
       const { rows: role } = await c.query('SELECT 1 FROM group_role_names WHERE id = $1', [recipientRole]);
       if (!role.length) throw err(`UNKNOWN_RECIPIENT_ROLE: ${recipientRole}`);
     }
@@ -141,7 +152,8 @@ async function normalise(c, b, { current = null } = {}) {
   const unknown = R.namesIn(`${subject || ''} ${body}`).filter((n) => !(n in C.PLACEHOLDERS) && !custom.has(n));
   if (unknown.length) throw err(`UNKNOWN_PLACEHOLDER: ${unknown.join(', ')}`);
   const sample = Object.fromEntries([...custom].map((k) => [k, 'sample']));
-  if (!email) R.assertBody(R.fill(body, { ...sample, ...C.PLACEHOLDERS }, contentType), contentType);
+  if (sms) SMS.assertLength(R.fill(body, { ...sample, ...C.PLACEHOLDERS }, 'PLAIN_TEXT'));
+  else if (!email) R.assertBody(R.fill(body, { ...sample, ...C.PLACEHOLDERS }, contentType), contentType);
   const auth = stream ? {} : b.authorization || {};
   const authType = String(auth.type || 'NONE').toUpperCase();
   if (!['NONE', 'BASIC'].includes(authType)) throw err('AUTHORIZATION_IS_NONE_OR_BASIC');

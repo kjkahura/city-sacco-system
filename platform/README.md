@@ -126,6 +126,40 @@ After the reference platform's email notifications (`docs/audits/audit-email.md`
   - any other failure: `MESSAGING_EXCEPTION` with the server's answer. A 4xx answer, a timeout or a network error is retried on the webhook schedule; a 5xx answer fails at once.
 - **Manual email:** Send email on member, group, loan and deposit pages, or `POST /api/communications/messages:sendEmail` with `clientKey`, `groupKey`, `loanAccountKey` or `depositAccountKey`, and a `templateKey` or a `subject` and `body`. It goes to the holder's address and needs SEND_MANUAL_EMAIL (managers and administrators); changing a template's text before sending needs EDIT_COMMUNICATION_TEMPLATES.
 
+## SMS
+
+After the reference platform's SMS notifications (`docs/audits/audit-sms.md`). Pluggable: no company's gateway is built in.
+
+- **Providers (`src/domain/notifications/channels/sms-providers/`):**
+  - a provider is a module with fields, `validate`, `describe`, `server`, `send` and an optional `parseDeliveryReport` (see the README there);
+  - the built-in one, `HTTP`, is a generic HTTPS gateway described by fields: the URL, method, body format, the header the API key goes in, a body template with `{{to}}`, `{{text}}`, `{{from}}` and `{{id}}`, where the answer carries the message ID, an optional success field, and how delivery reports are read;
+  - most aggregators are set up from Administration > SMS > Settings with no code.
+- **Settings:**
+  - the provider, the sender ID (up to 11 letters and digits, or a number) and the pace (60 a minute);
+  - the API key is sealed, never returned, and must be typed again when the gateway's address or key header changes;
+  - the gateway URL passes the outbound guard;
+  - a test SMS reports the gateway's answer;
+  - template users read the settings; administrators change and test them.
+- **Numbers and length:**
+  - numbers go to the gateway in E.164, read from local forms with the tenant's country;
+  - a message is at most six segments (GSM-7: 160 characters in one, then 153 a segment; UCS-2: 70, then 67).
+- **Templates (Administration > SMS > SMS Templates):** type `SMS`, with the webhook's events and conditions, a plain text and a recipient (`CLIENT` or `GROUP_ROLE`). Credit officers have no phone number on record. The form counts segments.
+- **Delivery:**
+  - as `SMS` messages in the communication log, with the gateway's message ID and the segments;
+  - no number: `MISSING_SMS_RECIPIENT`;
+  - an unreadable number: `UNDEFINED_DESTINATION`;
+  - switched off: `SMS_SERVICE_NOT_ENABLED`;
+  - 401 or 403: `INVALID_SMS_GATEWAY_CREDENTIALS`;
+  - other 4xx answers: `SMS_GATEWAY_ERROR`, failed at once;
+  - 5xx answers and network errors: `SMS_GATEWAY_ERROR`, retried on the webhook schedule.
+- **Delivery reports:**
+  - an administrator makes the address (`POST /api/notificationsettings/sms:callbackToken`), `/hooks/sms/<tenant>/<token>`, shown once (`PUBLIC_BASE_URL` sets its host);
+  - the gateway posts JSON or a form there;
+  - the provider's fields say where the message ID and status are and which statuses mean delivered or not;
+  - the log shows `deliveryStatus`.
+- **Manual SMS:** Send SMS on member, group, loan and deposit pages, or `POST /api/communications/messages:sendSms`. It needs SEND_MANUAL_SMS (managers and administrators).
+- **Subscriptions:** as for email, on the member and group pages and in the portal's Settings.
+
 ## Why schema per tenant
 
 | | Shared schema + RLS | **Schema per tenant** | Database per tenant |

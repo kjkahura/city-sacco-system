@@ -233,13 +233,13 @@ export async function subscriptionsCard(box, memberId, { isGroup = false } = {})
   const r = await api('GET', base);
   if (!r.ok) { box.innerHTML = ''; return; }
   const edit = can(isGroup ? 'EDIT_GROUP' : 'EDIT_CLIENT');
-  box.innerHTML = card('Email subscriptions', `${table([
-    { label: 'Template', key: 'name' }, { label: 'Event', key: 'event' },
+  box.innerHTML = card('Email and SMS subscriptions', `${table([
+    { label: 'Template', key: 'name' }, { label: 'Channel', value: (x) => (x.channel === 'SMS' ? 'SMS' : 'email') }, { label: 'Event', key: 'event' },
     { label: 'Option', value: (x) => (x.subscriptionOption === 'OPT_IN' ? 'opt in' : 'opt out') },
     { label: 'Subscribed', value: (x) => (x.subscribed ? 'subscribed' : 'not subscribed') },
     { label: 'Changed by', value: (x) => x.lastModifiedBy || '' },
     { label: '', html: true, value: (x) => (edit ? `<button class="link" data-sub-toggle="${esc(x.templateKey)}" data-now="${x.subscribed}">${x.subscribed ? 'unsubscribe' : 'subscribe'}</button>` : '') },
-  ], r.body, { empty: 'No email templates write to members yet' })}`);
+  ], r.body, { empty: 'No email or SMS templates write to members yet' })}`);
   box.querySelectorAll('[data-sub-toggle]').forEach((b) => b.addEventListener('click', async () => {
     const res = await api('PUT', `${base}/${b.dataset.subToggle}`, { subscribed: b.dataset.now !== 'true' });
     toast(res.ok ? 'Subscription changed' : res.error, !res.ok);

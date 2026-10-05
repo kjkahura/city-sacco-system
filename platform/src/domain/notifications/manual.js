@@ -8,6 +8,7 @@ const CTX = require('./context');
 const CH = require('./channels');
 const D = require('./dispatch');
 const MSG = require('./messages');
+const SMS = require('./channels/sms');
 
 /**
  * A manual email (the reference platform's Send > Send Email): to a member
@@ -68,4 +69,38 @@ async function sendEmail(schema, b = {}, { actor, user }) {
   return withTenant(schema, async (c) => MSG.shape((await c.query('SELECT * FROM notification_messages WHERE id = $1', [queued.id])).rows[0]));
 }
 
-module.exports = { sendEmail };
+/**
+ * A manual SMS (Send > Send SMS): to the holder's phone number, from a
+ * template or typed, at most six segments once filled. SEND_MANUAL_SMS;
+ * changing a template's text needs EDIT_COMMUNICATION_TEMPLATES.
+ */
+async function sendSms(schema, b = {}, { actor, user }) {
+  const queued = await withTenant(schema, async (c) => {
+    if (!(await CH.ready(c, 'SMS'))) throw err('SMS_SERVICE_NOT_ENABLED: switch SMS on in Administration > SMS > Settings', 409);
+    const e = await holderOf(c, b);
+    let t = null;
+    if (b.templateKey) {
+      if (!uuid.test(String(b.templateKey))) throw err('TEMPLATE_NOT_FOUND', 404);
+      ({ rows: [t] } = await c.query("SELECT * FROM notification_templates WHERE id = $1 AND type = 'SMS'", [b.templateKey]));
+      if (!t) throw err('TEMPLATE_NOT_FOUND', 404);
+      if (b.body !== undefined && b.body !== t.body && !PERMS.can(user, 'EDIT_COMMUNICATION_TEMPLATES')) {
+        throw err('CHANGING_A_TEMPLATE_BEFORE_SENDING_NEEDS_EDIT_COMMUNICATION_TEMPLATES', 403);
+      }
+    }
+    const bodyText = String(b.body ?? t?.body ?? '');
+    if (!bodyText.trim()) throw err('BODY_REQUIRED');
+    const { rows: [holder] } = await c.query('SELECT phone FROM members WHERE id = $1', [e.member_id]);
+    if (!holder?.phone) throw err('MISSING_SMS_RECIPIENT: the client or group has no phone number', 400);
+    const { rows: [tn] } = await c.query('SELECT country_code FROM platform.tenants WHERE schema_name = current_schema()');
+    if (!SMS.toE164(holder.phone, tn?.country_code || 'KE')) throw err(`UNDEFINED_DESTINATION: ${holder.phone} is not a phone number`, 400);
+    const event = { ...e, event: t?.event || 'MANUAL_SMS' };
+    const values = await CTX.build(c, event);
+    const text = R.fill(bodyText, values, 'PLAIN_TEXT');
+    SMS.assertLength(text);
+    return D.queueSms(c, { t, e: event, to: holder.phone, text, manual: true, actor });
+  });
+  await D.sendDue(schema, [queued.id]);
+  return withTenant(schema, async (c) => MSG.shape((await c.query('SELECT * FROM notification_messages WHERE id = $1', [queued.id])).rows[0]));
+}
+
+module.exports = { sendEmail, sendSms };

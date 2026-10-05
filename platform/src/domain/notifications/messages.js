@@ -23,6 +23,8 @@ function shape(m, { full = true } = {}) {
     waitingReason: m.state === 'WAITING' ? m.waiting_reason : null, responseStatus: m.response_status ?? null,
     nextAttemptDate: ['QUEUED', 'WAITING'].includes(m.state) ? iso(m.next_attempt_at) : null, test: m.test,
     ...(m.type === 'EMAIL' ? { subject: m.subject ?? null, manual: Boolean(m.manual) } : {}),
+    ...(m.type === 'SMS' ? { manual: Boolean(m.manual), segments: m.segments ?? null, providerMessageId: m.provider_message_id || null,
+      deliveryStatus: m.delivery_status || null, deliveryDetail: m.delivery_detail || null, deliveryDate: iso(m.delivered_at) } : {}),
   };
   if (full) out.body = m.body ?? null;
   return out;
@@ -35,6 +37,7 @@ const FIELDS = {
   userKey: { sql: 'm.created_by', type: 'text' }, state: { sql: 'm.state', type: 'text' },
   failureReason: { sql: 'm.failure_reason', type: 'text' }, failureCause: { sql: 'm.failure_cause', type: 'text' },
   destination: { sql: 'm.destination', type: 'text' }, type: { sql: 'm.type', type: 'text' }, event: { sql: 'm.event', type: 'text' },
+  deliveryStatus: { sql: 'm.delivery_status', type: 'text' },
   templateKey: { sql: 'm.template_id::text', type: 'text' }, loanAccountKey: { sql: 'm.loan_id::text', type: 'text' },
   depositAccountKey: { sql: 'm.savings_account_id::text', type: 'text' },
 };

@@ -24,6 +24,7 @@ import { dataView } from './data.js';
 import { messagesView, webhooksView } from './webhooks.js';
 import { streamTemplatesView, subscriptionsView } from './streaming.js';
 import { emailSettingsView, emailTemplatesView } from './email.js';
+import { smsSettingsView, smsTemplatesView } from './sms.js';
 
 const GENERAL = ['details', 'branding', 'eod', 'holidays', 'channels', 'idTemplates', 'rates', 'currencies'];
 
@@ -40,6 +41,7 @@ const PARTS = {
   webhooks: [['Webhooks', () => webhooksView()], ['Communication Log', () => messagesView()]],
   events: [['Streaming Templates', () => streamTemplatesView()], ['Subscriptions', () => subscriptionsView()]],
   email: [['Email Templates', () => emailTemplatesView()], ['Settings', () => emailSettingsView()]],
+  sms: [['SMS Templates', () => smsTemplatesView()], ['Settings', () => smsSettingsView()]],
   templates: [['Report Templates', () => reportsView({ which: 'templates' })], ['Product Documents', () => orgView({ only: ['documents'] })]],
   reports: [['Regulatory Return Templates', () => returnsView()]],
   data: [['Import, Backups, Data Dictionary, Extract', () => dataView()]],

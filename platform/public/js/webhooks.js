@@ -171,7 +171,7 @@ export async function messagesView() {
   const resend = can('RESEND_FAILED_MESSAGES');
   view().innerHTML = `
     <div class="toolbar"><h1>Communication Log</h1>
-      <label>Type<select id="msg-type">${[['', 'Any'], ['WEB_HOOK', 'Webhook'], ['EMAIL', 'Email']].map(([v, l]) => `<option value="${v}" ${v === s.type ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Type<select id="msg-type">${[['', 'Any'], ['WEB_HOOK', 'Webhook'], ['EMAIL', 'Email'], ['SMS', 'SMS']].map(([v, l]) => `<option value="${v}" ${v === s.type ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label>State<select id="msg-state">${['', 'QUEUED', 'WAITING', 'SENT', 'FAILED'].map((v) => `<option value="${v}" ${v === s.state ? 'selected' : ''}>${v || 'Any'}</option>`).join('')}</select></label>
       <label>Event<input id="msg-event" value="${esc(s.event)}" placeholder="e.g. SAVINGS_DEPOSIT"></label>
       <label>From<input id="msg-from" type="date" value="${esc(s.from)}"></label>
@@ -180,9 +180,10 @@ export async function messagesView() {
     <div id="msg-list">${table([
     ...(resend ? [{ label: '', html: true, value: (m) => (m.state === 'FAILED' ? `<input type="checkbox" data-pick="${esc(m.encodedKey)}" aria-label="select">` : '') }] : []),
     { label: 'Created', value: (m) => String(m.creationDate || '').replace('T', ' ').slice(0, 19) },
-    { label: 'Type', value: (m) => (m.type === 'EMAIL' ? 'email' : 'webhook') },
+    { label: 'Type', value: (m) => ({ EMAIL: 'email', SMS: 'SMS' }[m.type] || 'webhook') },
     { label: 'Event', key: 'event' }, { label: 'State', key: 'state' }, { label: 'Retries', num: true, key: 'numRetries' },
-    { label: 'Destination', key: 'destination' }, { label: 'Subject', value: (m) => m.subject || '' }, { label: 'Reason', value: (m) => m.failureReason || m.waitingReason || '' },
+    { label: 'Destination', key: 'destination' }, { label: 'Subject', value: (m) => m.subject || '' },
+    { label: 'Delivery', value: (m) => (m.deliveryStatus ? m.deliveryStatus.toLowerCase() : '') }, { label: 'Reason', value: (m) => m.failureReason || m.waitingReason || '' },
     { label: '', value: (m) => (m.test ? 'test' : '') },
   ], r.body, { onRow: true, empty: 'No messages match' })}</div>
     ${pager(s, r.total)}`;

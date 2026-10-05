@@ -9,6 +9,8 @@ import { opt } from './products.js';
 import { orgView } from './organization.js';
 import { can } from './access.js';
 import { entityReports } from './templates.js';
+import { sendEmailDialog } from './email.js';
+import { sendSmsDialog } from './sms.js';
 
 const CA_ACTIONS = [
   ['APPROVE', 'Approve', ['PENDING_APPROVAL'], 'APPROVE_LINE_OF_CREDIT'], ['REJECT', 'Reject', ['PENDING_APPROVAL'], 'REJECT_LINE_OF_CREDIT'],
@@ -155,7 +157,8 @@ export async function depositDetail(a, holder = null) {
       <div class="toolbar">${DEP_ACTIONS.filter((x) => x.from.includes(b.status) && can(x.code) && (!x.when || x.when(b, tx.body || [])))
     .map((x) => `<button class="secondary" id="dep-act-${x.action}">${esc(x.label)}</button>`).join('')}
       ${can('DELETE_SAVINGS_ACCOUNT') && !(tx.body || []).length ? '<button class="secondary" id="dep-delete">Delete account</button>' : ''}
-      ${can('SEND_MANUAL_EMAIL') ? '<button class="secondary" id="dep-email">Send email</button>' : ''}</div>`)}
+      ${can('SEND_MANUAL_EMAIL') ? '<button class="secondary" id="dep-email">Send email</button>' : ''}
+      ${can('SEND_MANUAL_SMS') ? '<button class="secondary" id="dep-sms">Send SMS</button>' : ''}</div>`)}
       ${card('Blocks and holds', `<div id="deposit-blocks">${table([
     { label: 'Kind', value: (x) => (x.creditDebitIndicator ? `hold (${x.creditDebitIndicator})` : 'block') }, { label: 'Reference', value: (x) => esc(x.externalReferenceId) },
     { label: 'Amount', num: true, value: (x) => money(x.amount) }, { label: 'Seized', num: true, value: (x) => (x.seizedAmount === undefined ? '' : money(x.seizedAmount)) },
@@ -169,6 +172,7 @@ export async function depositDetail(a, holder = null) {
   ], tx.body || [], { empty: 'No transactions' }))}${activityCard()}`;
   loadActivity('savings', a.id);
   $('#dep-email')?.addEventListener('click', () => sendEmailDialog({ depositAccountKey: a.id }));
+  $('#dep-sms')?.addEventListener('click', () => sendSmsDialog({ depositAccountKey: a.id }));
   $('#back').addEventListener('click', () => (holder ? memberDetail(holder) : membersView()));
   const again = () => depositDetail(a, holder);
   const onDep = (sel, fn) => { const x = $(sel); if (x) x.addEventListener('click', fn); };

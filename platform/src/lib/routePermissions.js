@@ -157,6 +157,10 @@ const RULES = [
   ['GET', '/clients/:id/notification-subscriptions', V_MEMBER], ['PUT', '/clients/:id/notification-subscriptions/:templateId', 'EDIT_CLIENT'],
   ['GET', '/groups/:id/notification-subscriptions', V_MEMBER], ['PUT', '/groups/:id/notification-subscriptions/:templateId', 'EDIT_GROUP'],
   ['GET', '/communications/email-templates', 'SEND_MANUAL_EMAIL'],
+  // SMS: as email, with the providers' fields and the delivery report address.
+  ['GET', '/notificationsettings/sms', TEMPLATES_VIEW], ['GET', '/notificationsettings/sms/providers', TEMPLATES_VIEW],
+  ['PUT', '/notificationsettings/sms', ADMIN], ['POST', '/notificationsettings/sms:test', ADMIN], ['POST', '/notificationsettings/sms:callbackToken', ADMIN],
+  ['POST', '/communications/messages:sendSms', 'SEND_MANUAL_SMS'], ['GET', '/communications/sms-templates', 'SEND_MANUAL_SMS'],
   // Events streaming: API consumers (and administrators) that read streams. The list is also
   // shown under Administration > Events Streaming to those who see the templates.
   ['POST', '/v1/subscriptions', 'CONSUME_EVENT_STREAMS'], ['GET', '/v1/subscriptions', ['CONSUME_EVENT_STREAMS', ...TEMPLATES_VIEW]],

@@ -195,13 +195,16 @@ tenantApi.use('/deposits', require('./routes/deposits').router);
 const notifications = require('./routes/notifications');
 tenantApi.use('/templates', notifications.templates);
 // The colon actions sit beside the collection, as the other searches do.
-for (const a of ['search', 'searchSorted', 'resend', 'resendAsyncByKeys', 'resendAsyncByDate', 'sendEmail']) {
+for (const a of ['search', 'searchSorted', 'resend', 'resendAsyncByKeys', 'resendAsyncByDate', 'sendEmail', 'sendSms']) {
   tenantApi.post(`/communications/messages\\:${a}`, ...notifications.actions[a]);
 }
 tenantApi.get('/communications/email-templates', ...notifications.emailTemplates);
+tenantApi.get('/communications/sms-templates', ...notifications.smsTemplates);
 tenantApi.use('/communications/messages', notifications.messages);
 tenantApi.use('/notifications/messages', notifications.v1);
 tenantApi.post('/notificationsettings/email\\:test', ...notifications.emailTest);
+tenantApi.post('/notificationsettings/sms\\:test', ...notifications.smsTest);
+tenantApi.post('/notificationsettings/sms\\:callbackToken', ...notifications.smsCallbackToken);
 tenantApi.use('/notificationsettings', notifications.settings);
 
 const savings = require('./routes/savings');
@@ -269,6 +272,9 @@ tenantApi.get('/', requireAuth(), (req, res) => res.json({
   timezone: req.tenant.timezone,
 }));
 
+// SMS gateways' delivery reports (routes/notifications): no tenant user, a token in the address.
+app.all('/hooks/sms/:tenant/:token', rateLimit({ limit: 600, keyFn: (req) => `hook:sms:${req.params.tenant}:${req.ip}` }),
+  express.urlencoded({ extended: false, limit: '256kb' }), require('./routes/notifications').smsDeliveryReport);
 app.use('/api', tenantApi);
 
 // ---------------------------------------------------------------------------

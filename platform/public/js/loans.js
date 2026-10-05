@@ -11,6 +11,7 @@ import { opt } from './products.js';
 import { customFieldsCard, wireCustomFields } from './organization.js';
 import { entityReports } from './templates.js';
 import { sendEmailDialog } from './email.js';
+import { sendSmsDialog } from './sms.js';
 import { can } from './access.js';
 
 // --------------------------------------------------------------------------
@@ -155,7 +156,8 @@ export async function loanDetail(row) {
     ${l.notes ? `<p class="hint">${esc(l.notes)}</p>` : ''}
     <div class="toolbar">${actions.map(([a, label]) =>
     `<button data-action="${a}" class="${['approve', 'disburse', 'repay', 'request-approval'].includes(a) ? '' : 'secondary'}">${label}</button>`).join('')}
-      ${can('SEND_MANUAL_EMAIL') ? '<button class="secondary" id="loan-email">Send email</button>' : ''}</div>
+      ${can('SEND_MANUAL_EMAIL') ? '<button class="secondary" id="loan-email">Send email</button>' : ''}
+      ${can('SEND_MANUAL_SMS') ? '<button class="secondary" id="loan-sms">Send SMS</button>' : ''}</div>
     <div class="grid">
       ${card('Balances', `<dl class="kv">
         <dt>Principal</dt><dd>${money(l.principal)}</dd>
@@ -409,6 +411,7 @@ export async function loanDetail(row) {
     if (res.ok) reload();
   }));
   $('#loan-email')?.addEventListener('click', () => sendEmailDialog({ loanAccountKey: l.id }));
+  $('#loan-sms')?.addEventListener('click', () => sendSmsDialog({ loanAccountKey: l.id }));
   view().querySelectorAll('[data-action]').forEach((btn) => btn.addEventListener('click', async () => {
     const a = btn.dataset.action;
     let res;

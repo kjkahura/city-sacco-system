@@ -10,6 +10,7 @@ const S = require('./secrets');
 const CTX = require('./context');
 const CH = require('./channels');
 const SUBS = require('./subscriptions');
+const SMSCH = require('./channels/sms');
 const requestContext = require('../../lib/requestContext');
 
 /**
@@ -114,10 +115,14 @@ async function publish(c, t, e, values) {
 
 // --- emails -------------------------------------------------------------------------
 
-/** Who an email template writes to for an event: [{ address, memberId }]; memberId is null for staff. */
+/**
+ * Who an email or SMS template writes to for an event: [{ address, memberId }]
+ * (the email address or the phone number, as recorded); memberId is null for staff.
+ */
 async function recipientsOf(c, t, e) {
   if (!e.member_id) return [];
-  const { rows: [holder] } = await c.query('SELECT id, holder_type, email, credit_officer, status FROM members WHERE id = $1', [e.member_id]);
+  const field = t.type === 'SMS' ? 'phone' : 'email';
+  const { rows: [holder] } = await c.query('SELECT id, holder_type, email, phone, credit_officer, status FROM members WHERE id = $1', [e.member_id]);
   if (!holder) return [];
   if (t.recipient === 'CREDIT_OFFICER') {
     const loan = e.loan_id ? (await c.query('SELECT credit_officer FROM loan_accounts WHERE id = $1', [e.loan_id])).rows[0] : null;
@@ -136,12 +141,12 @@ async function recipientsOf(c, t, e) {
   if (t.recipient === 'GROUP_ROLE') {
     if (holder.holder_type !== 'GROUP') return [];
     const { rows } = await c.query(
-      `SELECT m.id, m.email, m.status FROM group_member_roles r JOIN members m ON m.id = r.member_id
+      `SELECT m.id, m.email, m.phone, m.status FROM group_member_roles r JOIN members m ON m.id = r.member_id
         WHERE r.group_id = $1 AND r.role_name_id = $2 ORDER BY m.member_no`, [holder.id, t.recipient_role]);
-    return rows.filter((r) => !gone(r.status)).map((r) => ({ address: r.email, memberId: r.id }));
+    return rows.filter((r) => !gone(r.status)).map((r) => ({ address: r[field], memberId: r.id }));
   }
   if (gone(holder.status)) return [];
-  return [{ address: holder.email, memberId: holder.id }];
+  return [{ address: holder[field], memberId: holder.id }];
 }
 
 /** One email message, queued, or failed at once when there is no address or the body is too large. */
@@ -172,6 +177,43 @@ async function queueEmails(c, t, e, values) {
   return n;
 }
 
+// --- SMS --------------------------------------------------------------------------
+
+/**
+ * One SMS message, queued, or failed at once: no number (MISSING_SMS_RECIPIENT),
+ * a number that cannot be read (UNDEFINED_DESTINATION) or a text over six
+ * segments once filled. The number is kept in E.164.
+ */
+async function queueSms(c, { t = null, e, to, recipientId = null, text, manual = false, actor = null }) {
+  const { rows: [tn] } = await c.query('SELECT country_code FROM platform.tenants WHERE schema_name = current_schema()');
+  const number = to ? SMSCH.toE164(to, tn?.country_code || 'KE') : null;
+  const seg = SMSCH.segments(text);
+  let failure = null;
+  if (!to) failure = ['MISSING_SMS_RECIPIENT', 'The recipient has no phone number'];
+  else if (!number) failure = ['UNDEFINED_DESTINATION', `Not a phone number: ${String(to).slice(0, 40)}`];
+  else if (seg.count > SMSCH.MAX_SEGMENTS) failure = ['MAX_MESSAGE_SIZE_LIMIT_EXCEEDED', `${seg.count} segments; at most ${SMSCH.MAX_SEGMENTS}`];
+  const { rows: [holder] } = e.member_id ? await c.query('SELECT holder_type FROM members WHERE id = $1', [e.member_id]) : { rows: [] };
+  const group = holder?.holder_type === 'GROUP' ? e.member_id : null;
+  const { rows: [m] } = await c.query(
+    `INSERT INTO notification_messages (template_id, event_id, type, event, state, failure_reason, failure_cause, destination, content_type,
+       body, segments, member_id, group_id, loan_id, savings_account_id, branch_id, manual, created_by)
+     VALUES ($1,$2,'SMS',$3,$4,$5,$6,$7,'PLAIN_TEXT',$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+    [t?.id || null, e.id || null, e.event, failure ? 'FAILED' : 'QUEUED', failure?.[0] || null, failure?.[1] || null, number || to || null,
+      text, seg.count, recipientId || (group ? null : e.member_id || null), group, e.loan_id || null, e.savings_account_id || null,
+      e.branch_id || null, manual, actor]);
+  return m;
+}
+
+async function queueSmses(c, t, e, values) {
+  let n = 0;
+  for (const r of await recipientsOf(c, t, e)) {
+    if (r.memberId && !(await SUBS.subscribed(c, t, r.memberId))) continue;
+    await queueSms(c, { t, e, to: r.address, recipientId: r.memberId, text: R.fill(t.body, values, 'PLAIN_TEXT') });
+    n += 1;
+  }
+  return n;
+}
+
 function wants(t, e) {
   // Only an event with more than one target (ACCOUNT_IN_ARREARS: loans or deposits) is matched on the target too.
   const targets = C.targetsOf(e.event) || [];
@@ -192,6 +234,7 @@ async function processEvents(c, limit = 500) {
         if (!meets(t, values)) continue;
         if (t.type === 'EVENT_STREAM') { await publish(c, t, e, values); queued += 1; }
         else if (t.type === 'EMAIL') queued += await queueEmails(c, t, e, values);
+        else if (t.type === 'SMS') queued += await queueSmses(c, t, e, values);
         else { await queueFor(c, t, e, values); queued += 1; }
       }
     }
@@ -282,7 +325,8 @@ async function record(c, m, out) {
   if (out.ok) {
     await c.query(
       `UPDATE notification_messages SET state = 'SENT', waiting_reason = NULL, sent_at = now(), response_status = $2,
-         first_attempt_at = COALESCE(first_attempt_at, now()), failure_reason = NULL, failure_cause = NULL WHERE id = $1`, [m.id, out.status || null]);
+         first_attempt_at = COALESCE(first_attempt_at, now()), failure_reason = NULL, failure_cause = NULL,
+         provider_message_id = COALESCE($3, provider_message_id) WHERE id = $1`, [m.id, out.status || null, out.providerMessageId || null]);
     if (m.template_id && !webhook) await c.query('UPDATE notification_templates SET last_sent_at = now() WHERE id = $1', [m.template_id]);
     if (m.template_id && webhook) {
       await c.query(`UPDATE notification_templates SET last_sent_at = now(), consecutive_failures = 0, circuit_open_until = NULL WHERE id = $1`, [m.template_id]);
@@ -330,8 +374,34 @@ async function sendEmail(schema, m) {
   return { id: m.id, state, error: out.ok ? null : `${out.reason}: ${out.cause}` };
 }
 
+/** An SMS, sent through the SACCO's gateway; the switch off fails it with the reason. */
+async function sendSms(schema, m) {
+  const { ready, country } = await withTenant(schema, async (c) => ({
+    ready: await CH.ready(c, 'SMS'),
+    country: (await c.query('SELECT country_code FROM platform.tenants WHERE schema_name = current_schema()')).rows[0]?.country_code || 'KE',
+  }));
+  // Checked again here, not only when queued: a resent message must still have a number and fit.
+  const number = m.destination ? SMSCH.toE164(m.destination, country) : null;
+  const seg = SMSCH.segments(m.body || '');
+  let out;
+  if (!ready) out = { ok: false, reason: 'SMS_SERVICE_NOT_ENABLED', cause: 'SMS is switched off or not set up for this SACCO', permanent: true };
+  else if (!m.destination) out = { ok: false, reason: 'MISSING_SMS_RECIPIENT', cause: 'The recipient has no phone number', permanent: true };
+  else if (!number) out = { ok: false, reason: 'UNDEFINED_DESTINATION', cause: `Not a phone number: ${String(m.destination).slice(0, 40)}`, permanent: true };
+  else if (seg.count > SMSCH.MAX_SEGMENTS) out = { ok: false, reason: 'MAX_MESSAGE_SIZE_LIMIT_EXCEEDED', cause: `${seg.count} segments; at most ${SMSCH.MAX_SEGMENTS}`, permanent: true };
+  else {
+    try {
+      out = await ready.module.send(ready.settings, ready.secret, { to: number, text: m.body || '', id: m.idempotency_key });
+    } catch (e) {
+      out = { ok: false, reason: 'SMS_GATEWAY_ERROR', cause: String(e.message || e).slice(0, 500), permanent: true };
+    }
+  }
+  const state = await withTenant(schema, (c) => record(c, m, out));
+  return { id: m.id, state, error: out.ok ? null : `${out.reason}: ${out.cause}` };
+}
+
 async function sendOne(schema, m) {
   if (m.type === 'EMAIL') return sendEmail(schema, m);
+  if (m.type === 'SMS') return sendSms(schema, m);
   const ctx = await withTenant(schema, async (c) => {
     const { rows: [t] } = m.template_id ? await c.query('SELECT * FROM notification_templates WHERE id = $1', [m.template_id]) : { rows: [] };
     const { rows: [s] } = await c.query('SELECT webhook_state FROM notification_settings WHERE id');
@@ -391,6 +461,7 @@ async function reminders(c) {
       const values = await CTX.build(c, e);
       if (!meets(t, values)) continue;
       if (t.type === 'EMAIL') n += await queueEmails(c, t, e, values);
+      else if (t.type === 'SMS') n += await queueSmses(c, t, e, values);
       else if (t.type === 'EVENT_STREAM') { await publish(c, t, e, values); n += 1; }
       else { await queueFor(c, t, e, values); n += 1; }
     }
@@ -494,4 +565,4 @@ async function testTemplate(schema, id, { actor }) {
   return withTenant(schema, async (c) => (await c.query('SELECT * FROM notification_messages WHERE id = $1', [m.id])).rows[0]);
 }
 
-module.exports = { runTenant, runAll, afterRequest, forget, testTemplate, meets, publish, queueEmail, sendDue, RETRY_MINUTES };
+module.exports = { runTenant, runAll, afterRequest, forget, testTemplate, meets, publish, queueEmail, queueSms, sendDue, RETRY_MINUTES };

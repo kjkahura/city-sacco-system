@@ -16,6 +16,7 @@ import { can } from './access.js';
 import { memberTasks } from './tasks.js';
 import { entityReports } from './templates.js';
 import { sendEmailDialog, subscriptionsCard } from './email.js';
+import { sendSmsDialog } from './sms.js';
 
 // --------------------------------------------------------------------------
 // Members
@@ -257,6 +258,7 @@ export async function memberDetail(m0) {
       ${actions.map(([a, label]) => `<button class="secondary" data-state-action="${a}">${esc(label)}</button>`).join('')}
       ${!isGroup ? '<button class="secondary" id="m-history">State history</button>' : ''}
       ${can('SEND_MANUAL_EMAIL') && m.email && !m.anonymized_at ? '<button class="secondary" id="m-email">Send email</button>' : ''}
+      ${can('SEND_MANUAL_SMS') && m.phone && !m.anonymized_at ? '<button class="secondary" id="m-sms">Send SMS</button>' : ''}
       ${!isGroup && m.status === 'EXITED' && !m.anonymized_at && can('ANONYMIZE_CLIENT') ? '<button class="secondary" id="m-anon">Anonymize</button>' : ''}
       ${can(P.del) ? '<button class="secondary" id="m-delete">Delete</button>' : ''}
     </div>
@@ -387,6 +389,7 @@ export async function memberDetail(m0) {
     if (res.ok) reload();
   }));
   on('#m-email', () => sendEmailDialog(isGroup ? { groupKey: m.id } : { clientKey: m.id }));
+  on('#m-sms', () => sendSmsDialog(isGroup ? { groupKey: m.id } : { clientKey: m.id }));
   subscriptionsCard($('#member-subs'), m.id, { isGroup });
   on('#m-history', async () => {
     const r = await api('GET', `/api/members/${m.id}/state-history`);

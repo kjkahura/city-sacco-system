@@ -112,4 +112,43 @@ module.exports.v1 = v1;
 module.exports.settings = settings;
 module.exports.emailTest = emailTest;
 module.exports.subscriptions = subscriptions;
+
+// --- SMS: settings, providers, the test, the delivery report address, manual SMS ------------
+
+const SMSCH = require('../domain/notifications/channels/sms');
+settings.get('/sms', ...H.run((c) => CH.get(c, 'SMS')));
+settings.get('/sms/providers', ...H.run(async () => require('../domain/notifications/channels/sms-providers').list()));
+settings.put('/sms', ...H.run((c, req, _res, { actor }) => CH.save(c, 'SMS', req.body, { actor }), { write: true }));
+module.exports.smsTest = H.run((c, req) => CH.test(c, 'SMS', { to: req.body?.to, settings: req.body?.settings || {} }));
+// The address a gateway posts delivery reports to: PUBLIC_BASE_URL when set, else https and this request's own host
+// (never http: the token is the secret).
+module.exports.smsCallbackToken = H.run(async (c, req, _res, { actor }) => {
+  const token = await CH.newCallbackToken(c, 'SMS', { actor });
+  const base = process.env.PUBLIC_BASE_URL || `https://${req.get('host')}`;
+  return { callbackUrl: `${base.replace(/\/+$/, '')}/hooks/sms/${req.tenant.slug}/${token}` };
+}, { write: true });
+actions.sendSms = H.plain(async (req) => require('../domain/notifications/manual').sendSms(req.tenant.schema_name, req.body || {}, H.ctxOf(req)), 201);
+module.exports.smsTemplates = H.run(async (c) => (await c.query(
+  "SELECT id, name, body FROM notification_templates WHERE type = 'SMS' AND activated ORDER BY lower(name)")).rows
+  .map((t) => ({ ...t, segments: SMSCH.segments(t.body).count })));
+
+/**
+ * A gateway's delivery report: /hooks/sms/<tenant>/<token>, outside the
+ * tenant API (the gateway has no user). The token is the secret; a wrong one
+ * is not found. Runs as the system.
+ */
+module.exports.smsDeliveryReport = async (req, res) => {
+  try {
+    const { pool } = require('../db/pool');
+    const { withTenant } = require('../db/tenantContext');
+    const requestContext = require('../lib/requestContext');
+    const { rows: [t] } = await pool.query("SELECT schema_name FROM platform.tenants WHERE slug = $1 AND status = 'ACTIVE'", [req.params.tenant]);
+    if (!t) { res.status(404).json({ error: 'NOT_FOUND' }); return; }
+    const n = await requestContext.run(null, () => withTenant(t.schema_name, (c) => CH.deliveryReport(c, 'SMS', req.params.token, { body: req.body, query: req.query })));
+    res.status(200).json({ received: n });
+  } catch (e) {
+    res.status(e.status === 404 ? 404 : 500).json({ error: e.status === 404 ? 'NOT_FOUND' : 'ERROR' });
+    if (e.status !== 404) console.warn(`[sms report] ${e.message}`);
+  }
+};
 module.exports.emailTemplates = emailTemplates;
