@@ -211,3 +211,8 @@ body.sandbox { padding-bottom: 28px; }
 .gs-steps { list-style: none; padding: 0; margin: 0; }
 .gs-steps li { display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .gs-steps li .gs-title { flex: 1; }
+
+/* apps ------------------------------------------------------------------- */
+.app-card .app-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.app-card .app-tabs button.active { background: var(--accent); color: var(--accent-ink); }
+.app-frame { width: 100%; min-height: 560px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }

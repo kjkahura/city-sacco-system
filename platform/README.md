@@ -160,6 +160,25 @@ After the reference platform's SMS notifications (`docs/audits/audit-sms.md`). P
 - **Manual SMS:** Send SMS on member, group, loan and deposit pages, or `POST /api/communications/messages:sendSms`. It needs SEND_MANUAL_SMS (managers and administrators).
 - **Subscriptions:** as for email, on the member and group pages and in the portal's Settings.
 
+## Apps
+
+- **What an app is:** another provider's web application shown in the back office (`src/domain/apps.js`, tenant migration 049), as on the reference platform. Administration > Apps installs it from its definition, the reference platform's XML, loaded from an HTTPS address through the outbound guard or pasted.
+- **The definition reader** (`src/lib/appDefinition.js`) is our own and small. It refuses a DOCTYPE, entity declarations and processing instructions, and definitions over 64 KB.
+- **Where apps show:** a tab on the member, group, loan, deposit, credit arrangement, branch and product pages and the Reports page, and on the dashboard for menu apps. Each extension point is a location, a label and an address. Centre and user locations are accepted and opened through the API; the console has no page of their own for them.
+- **The App Key** is agreed with the provider (up to 32 characters), sealed, and never returned.
+- **Opening an app:**
+  - the console asks `POST /api/apps/:id/launch` with the location and the record;
+  - the server checks the user may see that record (permission and branch), signs the context (`PART1.PART2`, base64url HMAC-SHA256 with the App Key) and answers a one-time launch address, `/apps/frame/<tenant>/<token>`, good for a minute;
+  - the launch page posts `signed_request` to the app; its CSP allows a form post to that app's origin only;
+  - the console shows it in a sandboxed frame (no top navigation). The console's CSP allows HTTPS frames and still posts forms only to itself.
+  - The context names the app, tenant, location, record, user, the time, an expiry five minutes on, a nonce and the API base address (from `PUBLIC_BASE_URL`, never the request's host; null when it is not set). Every opening is audited, and a used launch keeps no signed request.
+  - Apps open for staff users only: an API key can neither list nor open them.
+- **Install and uninstall:** the definition's `installURL` and `uninstallURL` get a signed form post. A failed install call cancels the install.
+- **The app's API access:** installing can make an API consumer for the app with a role or permissions, its key shown once, or link one already made. Uninstalling deactivates a consumer it made.
+- **Who manages and who sees apps:** `MANAGE_APPS` manages them, with re-authentication when it is on. Making the app's API consumer also needs `CREATE_API_CONSUMERS_AND_KEYS`, and linking one `VIEW_API_CONSUMERS_AND_KEYS`. An app is seen by everyone who sees its page, or by chosen roles.
+- **Sandbox:** a clone keeps the apps disabled, without App Keys or API consumers.
+- **For providers:** `docs/developer-guide.md`, section 6.
+
 ## Getting started and the sandbox
 
 - **Getting Started** (Administration > Getting Started, `GET /api/setup-checklist`): the setup steps of a new SACCO, roughly in order. Each step's state is read from the book: `DONE`, `DEFAULT` (the seeded defaults are in place) or `TODO`, with a link to the page where it is done.

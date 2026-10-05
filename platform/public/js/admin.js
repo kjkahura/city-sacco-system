@@ -26,6 +26,7 @@ import { streamTemplatesView, subscriptionsView } from './streaming.js';
 import { emailSettingsView, emailTemplatesView } from './email.js';
 import { smsSettingsView, smsTemplatesView } from './sms.js';
 import { gettingStartedView, sandboxView } from './sandbox.js';
+import { appsAdminView } from './apps.js';
 
 const GENERAL = ['details', 'branding', 'eod', 'holidays', 'channels', 'idTemplates', 'rates', 'currencies'];
 
@@ -46,6 +47,7 @@ const PARTS = {
   sms: [['SMS Templates', () => smsTemplatesView()], ['Settings', () => smsSettingsView()]],
   templates: [['Report Templates', () => reportsView({ which: 'templates' })], ['Product Documents', () => orgView({ only: ['documents'] })]],
   reports: [['Regulatory Return Templates', () => returnsView()]],
+  apps: [['Apps', () => appsAdminView()]],
   sandbox: [['Sandbox', () => sandboxView()]],
   data: [['Import, Backups, Data Dictionary, Extract', () => dataView()]],
 };

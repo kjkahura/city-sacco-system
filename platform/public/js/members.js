@@ -17,6 +17,7 @@ import { memberTasks } from './tasks.js';
 import { entityReports } from './templates.js';
 import { sendEmailDialog, subscriptionsCard } from './email.js';
 import { sendSmsDialog } from './sms.js';
+import { appTabs } from './apps.js';
 
 // --------------------------------------------------------------------------
 // Members
@@ -496,6 +497,7 @@ export async function memberDetail(m0) {
     toast(res.ok ? 'Document added' : res.error, !res.ok);
     if (res.ok) reload();
   });
+  appTabs(isGroup ? 'GROUP_VIEW' : 'CLIENT_VIEW', m.id);
 }
 
 /** A file fetched with the session's headers, as an object URL (for an <img>), or null. */

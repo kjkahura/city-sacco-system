@@ -107,11 +107,12 @@ const KEEP = 2048;
 
 /**
  * Send one request through the guard. Never throws: the outcome is
- * { status, body } (the first 2 KB of the answer) or { error } (a timeout,
+ * { status, body } (the first 2 KB of the answer, or maxBytes; a longer answer
+ * than a maxBytes above 2 KB is { error: 'ANSWER_TOO_LARGE' }) or { error } (a timeout,
  * a refused address, a network or TLS failure). Redirects are answers, not
  * followed.
  */
-function send({ url, method = 'POST', headers = {}, body = '', timeoutMs = 10_000, agent = 'sacco-platform' }) {
+function send({ url, method = 'POST', headers = {}, body = '', timeoutMs = 10_000, agent = 'sacco-platform', maxBytes = KEEP }) {
   return new Promise((resolve) => {
     let u;
     try { u = new URL(url); } catch { resolve({ error: 'INVALID_URL' }); return; }
@@ -127,8 +128,12 @@ function send({ url, method = 'POST', headers = {}, body = '', timeoutMs = 10_00
     }, (res) => {
       const chunks = [];
       let size = 0;
-      res.on('data', (d) => { if (size < KEEP) { chunks.push(d); size += d.length; } });
-      res.on('end', () => finish({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8').slice(0, KEEP) }));
+      res.on('data', (d) => {
+        if (size <= maxBytes) { chunks.push(d); size += d.length; }
+        // A longer answer than the caller reads is cut off, not waited for.
+        if (size > maxBytes && maxBytes > KEEP) { finish({ status: res.statusCode, error: 'ANSWER_TOO_LARGE' }); req.destroy(); }
+      });
+      res.on('end', () => finish({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8').slice(0, maxBytes) }));
       res.on('error', (e) => finish({ status: res.statusCode, error: e.message }));
     });
     req.on('timeout', () => req.destroy(new Error('TIMED_OUT')));

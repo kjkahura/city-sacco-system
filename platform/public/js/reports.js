@@ -6,6 +6,7 @@ import { $, api, day, el, esc, money, navFilter, openFile } from './base.js';
 import { card, pager, table, view, wirePager } from './ui.js';
 import { can } from './access.js';
 import { templatesReport } from './templates.js';
+import { appTabs } from './apps.js';
 
 // --------------------------------------------------------------------------
 // Reports
@@ -81,6 +82,7 @@ export async function reportsView(filter) {
   if ($('#r-csv')) $('#r-csv').addEventListener('click', () => download('csv'));
   if ($('#r-xlsx')) $('#r-xlsx').addEventListener('click', () => download('xlsx'));
   runReport();
+  appTabs('REPORTING_VIEW');
 }
 
 function reportQuery() {

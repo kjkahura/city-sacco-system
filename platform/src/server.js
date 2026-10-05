@@ -29,6 +29,11 @@ app.set('trust proxy', /^\d+$/.test(TRUST || '') ? Number(TRUST) : TRUST === 'tr
 // ---------------------------------------------------------------------------
 // Unauthenticated
 // ---------------------------------------------------------------------------
+const apps = require('./routes/apps');
+const OUTBOUND = require('./lib/outbound');
+// An app's one-time launch page (routes/apps): opened in the console's frame, it posts the signed request to the app.
+app.get('/apps/frame/:tenant/:token', apps.frame);
+
 // The reference platform's health check, at the tenant's address or the platform's.
 app.get('/healthcheck', async (_req, res) => {
   try { await pool.query('SELECT 1'); res.json({ status: 'UP' }); } catch { res.status(503).json({ status: 'DOWN' }); }
@@ -59,10 +64,13 @@ app.get('/health', async (_req, res) => {
 // a stored cross-site payload in a member name has nowhere to execute.
 // ---------------------------------------------------------------------------
 const CONSOLE_DIR = path.join(__dirname, '..', 'public');
+// Apps (routes/apps) show in a sandboxed frame: the launch page here, then the
+// app's own HTTPS page, so frames may be any HTTPS address; forms still post only here.
+const FRAME_SRC = () => `frame-src 'self' https:${OUTBOUND.allowPrivate() ? ' http:' : ''}`;
 app.use('/console', (req, res, next) => {
   res.set('Content-Security-Policy',
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-    + "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    + `connect-src 'self'; ${FRAME_SRC()}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
   res.set('X-Content-Type-Options', 'nosniff');
   res.set('Referrer-Policy', 'same-origin');
   next();
@@ -221,6 +229,7 @@ const sandbox = require('./routes/sandbox');
 tenantApi.post('/sandbox\\:reset', ...sandbox.reset);
 tenantApi.post('/sandbox\\:clone', ...sandbox.clone);
 tenantApi.use('/sandbox', sandbox.router);
+tenantApi.use('/apps', apps.router);
 tenantApi.get('/setup-checklist', ...require('./lib/handlers').run((c) => require('./domain/setupChecklist').checklist(c)));
 
 const savings = require('./routes/savings');

@@ -13,6 +13,7 @@ import { entityReports } from './templates.js';
 import { sendEmailDialog } from './email.js';
 import { sendSmsDialog } from './sms.js';
 import { can } from './access.js';
+import { appTabs } from './apps.js';
 
 // --------------------------------------------------------------------------
 // Loans
@@ -840,4 +841,5 @@ export async function loanDetail(row) {
     toast(res.ok ? 'Done' : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) loanDetail(row);
   }));
+  appTabs('LOAN_ACCOUNT_VIEW', l.id);
 }

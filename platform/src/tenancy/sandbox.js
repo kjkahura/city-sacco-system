@@ -41,7 +41,7 @@ const ident = (s) => `"${String(s).replace(/"/g, '""')}"`;
 // idempotency records belong to production's traffic, not its book.
 const NOT_COPIED = new Set([
   'notification_events', 'notification_messages', 'stream_events', 'stream_cursors', 'stream_sessions', 'stream_subscriptions',
-  'api_idempotency', 'member_credentials', 'member_login_attempts', 'member_sessions', 'database_backups',
+  'api_idempotency', 'app_launches', 'member_credentials', 'member_login_attempts', 'member_sessions', 'database_backups',
 ]);
 
 const shapeOp = (o) => o && ({
@@ -438,6 +438,8 @@ async function quiet(c, schema) {
   await c.query(`UPDATE ${T('notification_channels')} SET enabled = false, secret = NULL, callback_token_hash = NULL, updated_by = 'SANDBOX_CLONE', updated_at = now()`);
   await c.query(`UPDATE ${T('notification_templates')} SET auth_secret = NULL, signing_secret = NULL, consecutive_failures = 0, circuit_open_until = NULL,
     activated = CASE WHEN type = 'WEB_HOOK' THEN false ELSE activated END`);
+  // Apps (domain/apps) stay installed but disabled, without their App Keys or production's API consumers.
+  await c.query(`UPDATE ${T('apps')} SET state = 'DISABLED', app_key = NULL, consumer_id = NULL, consumer_created = false, updated_by = 'SANDBOX_CLONE', updated_at = now()`);
 }
 
 module.exports = { status, request, runPending, SUFFIX };

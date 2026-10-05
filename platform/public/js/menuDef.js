@@ -98,7 +98,6 @@ export const TOP = [
   { key: 'administration', label: 'Administration', open: { key: 'administration', label: 'Administration', view: 'admin' } },
 ];
 
-const SOON = (what) => `${what} is being built. This tab will hold its settings once it is ready.`;
 
 export const ADMIN_TABS = [
   { key: 'general', label: 'General Setup', perms: ['MANAGE_GENERAL_SETUP', 'MANAGE_HOLIDAYS', 'MANAGE_CURRENCIES', 'MANAGE_INDEX_RATES', 'MANAGE_EOD_PROCESSING'] },
@@ -116,8 +115,7 @@ export const ADMIN_TABS = [
   { key: 'events', label: 'Events Streaming', perms: ['CREATE_COMMUNICATION_TEMPLATES', 'EDIT_COMMUNICATION_TEMPLATES', 'MANAGE_GENERAL_SETUP'] },
   { key: 'templates', label: 'Templates', perms: ['CREATE_PRODUCT_DOCUMENT_TEMPLATES', 'EDIT_PRODUCT_DOCUMENT_TEMPLATES', 'CREATE_REPORTS', 'EDIT_REPORTS'] },
   { key: 'reports', label: 'Reports', perms: ['MANAGE_RETURNS'] },
-  { key: 'apps', label: 'Apps', perms: ['MANAGE_GENERAL_SETUP'],
-    placeholder: SOON('Apps: add-ons from other providers, connected with their own API consumer and permissions,') },
+  { key: 'apps', label: 'Apps', perms: ['MANAGE_APPS'] },
   { key: 'sandbox', label: 'Sandbox', admin: true },
   { key: 'data', label: 'Data', perms: ['IMPORT_DATA', 'DOWNLOAD_BACKUPS', 'VIEW_DATA_IMPORTS', 'EXTRACT_DATA'] },
 ];

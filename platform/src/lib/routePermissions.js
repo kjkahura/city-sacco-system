@@ -71,6 +71,11 @@ const RULES = [
   ['GET', '/access-preferences', 'MANAGE_ACCESS_PREFERENCES'], ['PUT', '/access-preferences', 'MANAGE_ACCESS_PREFERENCES'],
   ['PATCH', '/access-preferences', 'MANAGE_ACCESS_PREFERENCES'],
   ['*', '/access-preferences/*', 'MANAGE_ACCESS_PREFERENCES'],
+  // Apps: any staff user sees and opens the apps at a page (domain/apps checks the record); administrators of apps manage them.
+  ['GET', '/apps/extensions', OPEN], ['POST', '/apps/:id/launch', OPEN],
+  ['GET', '/apps', 'MANAGE_APPS'], ['GET', '/apps/:id', 'MANAGE_APPS'], ['POST', '/apps', 'MANAGE_APPS'], ['PATCH', '/apps/:id', 'MANAGE_APPS'],
+  // ':id:reload' compiles like ':id' (any one segment); both need MANAGE_APPS, which is what is meant.
+  ['POST', '/apps/:id:reload', 'MANAGE_APPS'], ['DELETE', '/apps/:id', 'MANAGE_APPS'],
   ['GET', '/consumers', 'VIEW_API_CONSUMERS_AND_KEYS'], ['GET', '/consumers/*', 'VIEW_API_CONSUMERS_AND_KEYS'],
   ['POST', '/consumers', 'CREATE_API_CONSUMERS_AND_KEYS'], ['POST', '/consumers/:id/keys', 'CREATE_API_CONSUMERS_AND_KEYS'],
   ['POST', '/consumers/:id/secret-key', 'CREATE_API_CONSUMERS_AND_KEYS'],
@@ -401,6 +406,7 @@ const CRITICAL = [
   ['PATCH', '/loans/controls'], ['PATCH', '/loans/controls/users/:userId'],
   ['DELETE', '/members/:id'], ['DELETE', '/clients/:id'], ['DELETE', '/groups/:id'], ['POST', '/members/:id/anonymize'],
   ['PATCH', '/client-controls'],
+  ['POST', '/apps'], ['PATCH', '/apps/:id'], ['POST', '/apps/:id:reload'], ['DELETE', '/apps/:id'],
   ['POST', '/sandbox'], ['DELETE', '/sandbox'], ['POST', '/sandbox:reset'], ['POST', '/sandbox:clone'],
 ].map(([m, pth], i) => compile([m, pth, null], i));
 

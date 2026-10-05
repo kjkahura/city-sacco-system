@@ -5,6 +5,7 @@
 import { $, api, esc, money, navFilter, toast } from './base.js';
 import { ask, card, table, view, wireRows } from './ui.js';
 import { depositProductsSection } from './depositProducts.js';
+import { appTabs } from './apps.js';
 
 // --------------------------------------------------------------------------
 // Loan products
@@ -295,6 +296,7 @@ async function productDetail(p0) {
     toast(res.ok ? `Fee ${f.code} saved` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) productDetail(p);
   });
+  appTabs('LOAN_PRODUCT_VIEW', p.id);
 }
 
 const productState = { parts: ['loan', 'deposit'] };

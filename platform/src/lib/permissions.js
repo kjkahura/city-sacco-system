@@ -65,6 +65,7 @@ const GROUPS = [
     P('EDIT_ROLE', 'Edit roles'),
     P('VIEW_ROLE', 'View roles'),
     P('DELETE_ROLE', 'Delete roles'),
+    PF('MANAGE_APPS', 'Install, change and uninstall apps'),
     P('VIEW_API_CONSUMERS_AND_KEYS', 'View API consumers and keys'),
     P('CREATE_API_CONSUMERS_AND_KEYS', 'Create API consumers and keys'),
     P('EDIT_API_CONSUMERS_AND_KEYS', 'Edit API consumers and keys'),

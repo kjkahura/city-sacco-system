@@ -11,6 +11,7 @@ import { can } from './access.js';
 import { entityReports } from './templates.js';
 import { sendEmailDialog } from './email.js';
 import { sendSmsDialog } from './sms.js';
+import { appTabs } from './apps.js';
 
 const CA_ACTIONS = [
   ['APPROVE', 'Approve', ['PENDING_APPROVAL'], 'APPROVE_LINE_OF_CREDIT'], ['REJECT', 'Reject', ['PENDING_APPROVAL'], 'REJECT_LINE_OF_CREDIT'],
@@ -100,6 +101,7 @@ export async function creditArrangementDetail(id, holder = null) {
     toast(res.ok ? `Added ${no}` : res.error, !res.ok);
     if (res.ok) reload();
   });
+  appTabs('LINE_OF_CREDIT_VIEW', ca.id || ca.encodedKey);
 }
 
 // The deposit account actions the console offers (../src/domain/savings ACTIONS decides).
@@ -289,6 +291,7 @@ export async function depositDetail(a, holder = null) {
     if (res.ok) depositDetail(a, holder);
   });
   entityReports('DEPOSIT', b.accountNo);
+  appTabs('DEPOSIT_ACCOUNT_VIEW', a.id);
 }
 
 /** A branch (the reference platform's branch view): what sits in it, its centres and holidays, and its report templates. */
@@ -307,4 +310,5 @@ export async function branchDetail(code) {
     { label: 'Recurring', value: (h) => (h.recurring ? 'yes' : '') }], b.holidays || [], { empty: 'No branch holidays' }))}</div>`;
   $('#back').addEventListener('click', orgView);
   entityReports('BRANCH', b.code);
+  appTabs('BRANCH_VIEW', b.id);
 }

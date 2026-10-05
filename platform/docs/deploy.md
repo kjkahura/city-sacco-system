@@ -164,7 +164,7 @@ The end of day is idempotent per business date, so a retried run does no harm. E
 
 The same job sends emails through each SACCO's own mail server. Cloud Run allows outbound connections on ports 465 and 587, which are the only ones the platform uses for mail; Google Cloud blocks port 25. No new secret is needed: each SACCO's SMTP password is stored sealed with `sacco-secrets-key`.
 
-The job sends SMS through each SACCO's gateway too. Gateways post delivery reports to `/hooks/sms/<tenant>/<token>` on the service. Set `PUBLIC_BASE_URL` (for example `https://app.example.com`) so the address shown to administrators uses the public host.
+The job sends SMS through each SACCO's gateway too. Gateways post delivery reports to `/hooks/sms/<tenant>/<token>` on the service. Set `PUBLIC_BASE_URL` (for example `https://app.example.com`) so the address shown to administrators uses the public host. Apps use it too: the API address in an app's signed request comes from `PUBLIC_BASE_URL` only, and is left out when it is not set.
 
 The job also runs queued sandbox operations (create, reset, clone and delete). A clone of a large SACCO can take longer than a minute; runs that overlap do not start the same operation twice, and `npm run cli sandbox:run` runs them by hand. Sandboxes are left out of the nightly backup and offsite copies.
 

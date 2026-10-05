@@ -6,6 +6,7 @@ import { $, api, esc, money, toast } from './base.js';
 import { ask, card, table, view } from './ui.js';
 import { changeMethod, opt, productsView } from './products.js';
 import { can } from './access.js';
+import { appTabs } from './apps.js';
 
 // --------------------------------------------------------------------------
 // Deposit products
@@ -216,6 +217,7 @@ async function depositProductDetail(p0) {
     toast(res.ok ? `Fee ${res.body.code} added` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) depositProductDetail(p);
   });
+  appTabs('DEPOSIT_PRODUCT_VIEW', p.id);
 }
 
 export async function depositProductsSection() {

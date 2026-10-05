@@ -274,8 +274,8 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForSelector('#org-branches');
     check('Organization has the branches and centres', !(await page.$('#org-details')));
     await page.click('#subnav [data-tab="apps"]');
-    await page.waitForSelector('main .notice');
-    check('Apps says it is being built', /being built/.test(await page.textContent('main .notice')));
+    await page.waitForSelector('#app-add');
+    check('Apps is built: its list and Add app', /No apps installed/.test(await page.textContent('#apps-list')));
     await page.goto(`http://localhost:${PORT}/console/#admin/fields`);
     await page.waitForSelector('#cf-entity');
     check('#admin/fields opens the Fields tab', await page.$eval('#subnav [data-tab="fields"]', (b) => b.classList.contains('active')));
@@ -1239,6 +1239,35 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('#sbx-delete');
     await page.waitForFunction(() => /queued|deleting/i.test(document.getElementById('sbx-status')?.textContent || ''));
     await require('../src/tenancy/sandbox').runPending();
+
+    section('apps');
+    await openAdmin(page, 'apps');
+    await page.waitForSelector('#app-add');
+    check('Administration > Apps says none is installed', /No apps installed/.test(await page.textContent('#apps-list')));
+    await page.click('#app-add');
+    await page.fill('dialog[open] textarea[name=definition]', `<application><id>ui-score</id><name>UI Score</name>
+      <extensionpoint><location>CLIENT_VIEW</location><label>Score</label><url>https://app.example.invalid/client</url></extensionpoint></application>`);
+    await page.fill('dialog[open] input[name=appKey]', 'ui-app-key');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForSelector('#app-state');
+    check('a pasted definition installs, and its page shows where it shows', /UI Score/.test(await page.textContent('main h1'))
+      && /CLIENT_VIEW/.test(await page.textContent('main')), await page.textContent('main h1'));
+    await openMenu(page, 'clients', 'all');
+    await page.waitForSelector('main table tbody tr[data-row]');
+    await page.click('main table tbody tr[data-row]');
+    await page.waitForSelector('.app-card [data-app]');
+    await page.click('.app-card [data-app]');
+    await page.waitForSelector('.app-frame');
+    const appFrame = await page.$eval('.app-frame', (f) => [f.getAttribute('src'), f.getAttribute('sandbox')]);
+    check('a member page has the app\'s tab, which opens it in a sandboxed frame through a launch page', /^\/apps\/frame\/uitest\/[\w-]+$/.test(appFrame[0])
+      && /allow-scripts/.test(appFrame[1]) && !/allow-top-navigation/.test(appFrame[1]), JSON.stringify(appFrame));
+    await openAdmin(page, 'apps');
+    await page.click('#apps-list tbody tr[data-row]');
+    await page.waitForSelector('#app-remove');
+    page.once('dialog', (d) => d.accept());
+    await page.click('#app-remove');
+    await page.waitForFunction(() => /No apps installed/.test(document.getElementById('apps-list')?.textContent || ''));
+    check('an app is uninstalled', true);
 
     section('access administration');
     await openAdmin(page, 'access', 1);

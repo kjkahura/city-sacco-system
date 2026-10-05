@@ -64,7 +64,38 @@ This is for people who connect another system to a SACCO on this platform: a mob
   - Commit cursors with the `X-Stream-Id` the stream gave you.
   - A stream ends after 55 seconds; reconnect and read on from your cursor.
 
-## 6. A first request
+## 6. Apps: showing your application in the back office
+
+- **The definition:** an XML file, as on the reference platform:
+
+  ```xml
+  <application>
+    <id>your-app</id>
+    <name>Your app</name>
+    <provider>Your company</provider>
+    <description>What it does</description>
+    <installURL>https://app.example.com/installed</installURL>
+    <uninstallURL>https://app.example.com/uninstalled</uninstallURL>
+    <extensionpoint>
+      <location>CLIENT_VIEW</location>
+      <label>Credit score</label>
+      <url>https://app.example.com/client</url>
+    </extensionpoint>
+  </application>
+  ```
+
+  The locations are CLIENT_VIEW, GROUP_VIEW, LOAN_ACCOUNT_VIEW, DEPOSIT_ACCOUNT_VIEW, LINE_OF_CREDIT_VIEW, BRANCH_VIEW, CENTRE_VIEW, LOAN_PRODUCT_VIEW, DEPOSIT_PRODUCT_VIEW, USER_VIEW, REPORTING_VIEW and EXTENSION_MENU. Addresses must be HTTPS. No DOCTYPE or entities other than the five standard ones.
+- **The App Key:** agree one (up to 32 characters) with the SACCO. Its administrator enters it in Administration > Apps.
+- **What your page receives:** a form POST with one field, `signed_request`, which is `PART1.PART2`:
+  - PART2 is the base64url of a JSON context: `algorithm` (`HMAC-SHA256`), `appId`, `tenantId`, `location`, `objectType`, `objectId`, `userId`, `userEmail`, `issuedAt` and `expiresAt` (Unix seconds), `nonce` and `apiBaseUrl`;
+  - PART1 is the base64url of the HMAC-SHA256 of PART2 (the text as received) with the App Key.
+
+  Check PART1 in constant time, refuse an expired context, and refuse a nonce you have seen. Only then trust the context.
+- **Install and uninstall:** the same signed form post to `installURL` (with `event: INSTALLED`) and `uninstallURL` (`event: UNINSTALLED`). Answer `2xx` to an install, or it is cancelled.
+- **Calling the API:** with the API key the SACCO gives you for the app's own API consumer, in the `apikey` header, at `apiBaseUrl` (the platform's configured public address; when it is null, ask the SACCO for the address).
+- **Your page in a frame:** it is shown in a sandboxed frame that allows scripts, forms, popups and your own origin, but not navigating the back office. Allow being framed by the platform's address (`Content-Security-Policy: frame-ancestors`). Answer the signed POST at the extension point's own origin: a redirect to another origin is blocked.
+
+## 7. A first request
 
 1. **Get a key:** ask the SACCO's administrator for a sandbox API consumer with a role that may read clients, and its key.
 2. **Check the platform answers:**

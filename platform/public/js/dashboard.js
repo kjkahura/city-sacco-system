@@ -11,6 +11,7 @@ import { can } from './access.js';
 import { TASK_COLUMNS, newTask, taskButtons, wireTasks } from './tasks.js';
 import { TILL_COLUMNS, openTill, telleringCard, wireTills } from './tills.js';
 import { go } from './nav.js';
+import { appTabs } from './apps.js';
 
 // --------------------------------------------------------------------------
 // Dashboard (the reference platform's dashboard widgets)
@@ -73,6 +74,7 @@ export async function dashboardView() {
   $('#dash-till-open')?.addEventListener('click', () => openTill(dashboardView));
   $('#dash-tills')?.addEventListener('click', () => go('tills'));
   $('#dash-activity-types')?.addEventListener('click', chooseActivityTypes);
+  appTabs('EXTENSION_MENU');
 }
 
 /** The activity types the dashboard's Latest Activity shows (kept with the user's profile). */
