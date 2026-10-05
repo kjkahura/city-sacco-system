@@ -25,5 +25,6 @@ The same files are kept in the claude.ai project "CoreBanking Service" under `cl
 | 17 | Console navigation (menus and Administration) | design spec and plan in docs/superpowers, build in the three "Console:" commits | [build log](build-log-console-navigation.md) |
 | 18 | Webhooks | audit in the "Webhooks audit" commit, build in the "Webhooks" commit | [audit](audit-webhooks.md), [build log](build-log-webhooks.md) |
 | 19 | Events Streaming | audit in the "Events Streaming audit" commit, build in the "Events Streaming" commit | [audit](audit-events-streaming.md), [build log](build-log-events-streaming.md) |
+| 20 | Email | audit in the "Email audit" commit, not built yet | [audit](audit-email.md) |
 
 Before section 5, the audit findings were recorded inside the build logs, with no separate audit file.
