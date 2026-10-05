@@ -101,6 +101,31 @@ After the reference platform's Streaming API (`docs/audits/audit-events-streamin
   - a stream ends after `STREAM_MAX_SECONDS` (55 by default, inside the hosting's 60-second request limit) or the shorter `stream_timeout`, and when a sent batch is not committed within `commit_timeout`. It reads the database four times a second, taking one of the tenant's request slots for each read rather than for its whole life, and writes no faster than the client reads. The client reconnects and reads on from its committed cursor, so nothing is lost;
   - delivery is at least once, so a consumer removes duplicates by the event's `eid`.
 
+## Email
+
+After the reference platform's email notifications (`docs/audits/audit-email.md`).
+
+- **Settings (Administration > Email > Settings):**
+  - each SACCO sends through its own mail server or provider: From Name, From Email, Reply-to, SMTP Host, SMTP Port, Transport Encryption (SSL/TLS on 465 or STARTTLS on 587), Username and Password;
+  - the password is sealed like the webhook secrets and never returned;
+  - the SMTP host must resolve to public addresses only, and the connection goes to the address checked; TLS is required with the certificate checked;
+  - a test email reports whether the server connected, signed in and accepted the message, without saving;
+  - email starts switched off; at most 60 emails a minute go out by default (`pacePerMinute`);
+  - template users read the settings; only administrators change and test them.
+- **Templates (Administration > Email > Email Templates):** type `EMAIL` in `/api/templates`, with the webhook's event and conditions, a subject, an HTML body and a recipient:
+  - `CLIENT`: the member, or the group itself;
+  - `CREDIT_OFFICER`: the loan's credit officer, else the holder's;
+  - `GROUP_ROLE`: the group members holding `recipientRole`.
+
+  Placeholder values are escaped for HTML, and a subject stays one line. A plain-text part is made from the HTML. The console's preview is a sandboxed frame.
+- **Subscriptions:** opt-out templates reach members and groups until they unsubscribe; opt-in ones only those subscribed. Staff change them on the member's page (`/api/clients/:id/notification-subscriptions`), and members in the portal's Settings (`/api/portal/notifications`). They do not apply to credit officers or to manual email.
+- **Delivery:** through the webhook dispatcher, as `EMAIL` messages in the communication log with their subject:
+  - no address: `MISSING_EMAIL_RECIPIENT`, with no attempt;
+  - switched off: `EMAIL_SERVICE_NOT_ENABLED`;
+  - a refused sign-in: `INVALID_SMTP_CREDENTIALS`, failed at once;
+  - any other failure: `MESSAGING_EXCEPTION` with the server's answer. A 4xx answer, a timeout or a network error is retried on the webhook schedule; a 5xx answer fails at once.
+- **Manual email:** Send email on member, group, loan and deposit pages, or `POST /api/communications/messages:sendEmail` with `clientKey`, `groupKey`, `loanAccountKey` or `depositAccountKey`, and a `templateKey` or a `subject` and `body`. It goes to the holder's address and needs SEND_MANUAL_EMAIL (managers and administrators); changing a template's text before sending needs EDIT_COMMUNICATION_TEMPLATES.
+
 ## Why schema per tenant
 
 | | Shared schema + RLS | **Schema per tenant** | Database per tenant |

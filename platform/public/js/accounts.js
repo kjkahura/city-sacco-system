@@ -154,7 +154,8 @@ export async function depositDetail(a, holder = null) {
       ${b.inArrearsSince ? `<dt>In arrears since</dt><dd>${day(b.inArrearsSince)}</dd>` : ''}${b.closedOn ? `<dt>Closed</dt><dd>${day(b.closedOn)}</dd>` : ''}</dl>
       <div class="toolbar">${DEP_ACTIONS.filter((x) => x.from.includes(b.status) && can(x.code) && (!x.when || x.when(b, tx.body || [])))
     .map((x) => `<button class="secondary" id="dep-act-${x.action}">${esc(x.label)}</button>`).join('')}
-      ${can('DELETE_SAVINGS_ACCOUNT') && !(tx.body || []).length ? '<button class="secondary" id="dep-delete">Delete account</button>' : ''}</div>`)}
+      ${can('DELETE_SAVINGS_ACCOUNT') && !(tx.body || []).length ? '<button class="secondary" id="dep-delete">Delete account</button>' : ''}
+      ${can('SEND_MANUAL_EMAIL') ? '<button class="secondary" id="dep-email">Send email</button>' : ''}</div>`)}
       ${card('Blocks and holds', `<div id="deposit-blocks">${table([
     { label: 'Kind', value: (x) => (x.creditDebitIndicator ? `hold (${x.creditDebitIndicator})` : 'block') }, { label: 'Reference', value: (x) => esc(x.externalReferenceId) },
     { label: 'Amount', num: true, value: (x) => money(x.amount) }, { label: 'Seized', num: true, value: (x) => (x.seizedAmount === undefined ? '' : money(x.seizedAmount)) },
@@ -167,6 +168,7 @@ export async function depositDetail(a, holder = null) {
     { label: 'Amount', num: true, value: (t) => money(t.amount) },
   ], tx.body || [], { empty: 'No transactions' }))}${activityCard()}`;
   loadActivity('savings', a.id);
+  $('#dep-email')?.addEventListener('click', () => sendEmailDialog({ depositAccountKey: a.id }));
   $('#back').addEventListener('click', () => (holder ? memberDetail(holder) : membersView()));
   const again = () => depositDetail(a, holder);
   const onDep = (sel, fn) => { const x = $(sel); if (x) x.addEventListener('click', fn); };

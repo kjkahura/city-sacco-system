@@ -10,6 +10,8 @@ import { collectionsView } from './collections.js';
 import { opt } from './products.js';
 import { customFieldsCard, wireCustomFields } from './organization.js';
 import { entityReports } from './templates.js';
+import { sendEmailDialog } from './email.js';
+import { can } from './access.js';
 
 // --------------------------------------------------------------------------
 // Loans
@@ -152,7 +154,8 @@ export async function loanDetail(row) {
     ${l.refinance_of && !l.parent_loan_id ? `<p class="notice" id="top-up-quote">Top-up of ${esc(l.refinances_account_no)}: on disbursement this loan settles it and pays the rest to the member.</p>` : ''}
     ${l.notes ? `<p class="hint">${esc(l.notes)}</p>` : ''}
     <div class="toolbar">${actions.map(([a, label]) =>
-    `<button data-action="${a}" class="${['approve', 'disburse', 'repay', 'request-approval'].includes(a) ? '' : 'secondary'}">${label}</button>`).join('')}</div>
+    `<button data-action="${a}" class="${['approve', 'disburse', 'repay', 'request-approval'].includes(a) ? '' : 'secondary'}">${label}</button>`).join('')}
+      ${can('SEND_MANUAL_EMAIL') ? '<button class="secondary" id="loan-email">Send email</button>' : ''}</div>
     <div class="grid">
       ${card('Balances', `<dl class="kv">
         <dt>Principal</dt><dd>${money(l.principal)}</dd>
@@ -405,6 +408,7 @@ export async function loanDetail(row) {
     toast(res.ok ? 'Document deleted' : res.error, !res.ok);
     if (res.ok) reload();
   }));
+  $('#loan-email')?.addEventListener('click', () => sendEmailDialog({ loanAccountKey: l.id }));
   view().querySelectorAll('[data-action]').forEach((btn) => btn.addEventListener('click', async () => {
     const a = btn.dataset.action;
     let res;

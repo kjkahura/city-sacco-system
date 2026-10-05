@@ -151,6 +151,12 @@ const RULES = [
   ['POST', '/communications/messages:resendAsyncByKeys', 'RESEND_FAILED_MESSAGES'], ['POST', '/communications/messages:resendAsyncByDate', 'RESEND_FAILED_MESSAGES'],
   ['POST', '/notifications/messages/search', 'VIEW_COMMUNICATION_HISTORY'], ['POST', '/notifications/messages', 'RESEND_FAILED_MESSAGES'],
   ['GET', '/notificationsettings/webhook', ADMIN], ['PUT', '/notificationsettings/webhook', ADMIN],
+  // Email: the settings are read by those who see the templates and changed and tested by an administrator.
+  ['GET', '/notificationsettings/email', TEMPLATES_VIEW], ['PUT', '/notificationsettings/email', ADMIN],
+  ['POST', '/notificationsettings/email:test', ADMIN], ['POST', '/communications/messages:sendEmail', 'SEND_MANUAL_EMAIL'],
+  ['GET', '/clients/:id/notification-subscriptions', V_MEMBER], ['PUT', '/clients/:id/notification-subscriptions/:templateId', 'EDIT_CLIENT'],
+  ['GET', '/groups/:id/notification-subscriptions', V_MEMBER], ['PUT', '/groups/:id/notification-subscriptions/:templateId', 'EDIT_GROUP'],
+  ['GET', '/communications/email-templates', 'SEND_MANUAL_EMAIL'],
   // Events streaming: API consumers (and administrators) that read streams. The list is also
   // shown under Administration > Events Streaming to those who see the templates.
   ['POST', '/v1/subscriptions', 'CONSUME_EVENT_STREAMS'], ['GET', '/v1/subscriptions', ['CONSUME_EVENT_STREAMS', ...TEMPLATES_VIEW]],

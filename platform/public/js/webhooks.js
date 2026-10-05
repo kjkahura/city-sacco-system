@@ -156,11 +156,12 @@ async function webhookEditor(t) {
 // The communication log
 // --------------------------------------------------------------------------
 
-const logState = { offset: 0, limit: 25, state: '', event: '', from: '', to: '' };
+const logState = { offset: 0, limit: 25, type: '', state: '', event: '', from: '', to: '' };
 
 export async function messagesView() {
   const s = logState;
   const criteria = [];
+  if (s.type) criteria.push({ field: 'type', operator: 'EQUALS', value: s.type });
   if (s.state) criteria.push({ field: 'state', operator: 'EQUALS', value: s.state });
   if (s.event) criteria.push({ field: 'event', operator: 'EQUALS', value: s.event });
   if (s.from) criteria.push({ field: 'creationDate', operator: 'AFTER_INCLUSIVE', value: s.from });
@@ -170,6 +171,7 @@ export async function messagesView() {
   const resend = can('RESEND_FAILED_MESSAGES');
   view().innerHTML = `
     <div class="toolbar"><h1>Communication Log</h1>
+      <label>Type<select id="msg-type">${[['', 'Any'], ['WEB_HOOK', 'Webhook'], ['EMAIL', 'Email']].map(([v, l]) => `<option value="${v}" ${v === s.type ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label>State<select id="msg-state">${['', 'QUEUED', 'WAITING', 'SENT', 'FAILED'].map((v) => `<option value="${v}" ${v === s.state ? 'selected' : ''}>${v || 'Any'}</option>`).join('')}</select></label>
       <label>Event<input id="msg-event" value="${esc(s.event)}" placeholder="e.g. SAVINGS_DEPOSIT"></label>
       <label>From<input id="msg-from" type="date" value="${esc(s.from)}"></label>
@@ -178,8 +180,9 @@ export async function messagesView() {
     <div id="msg-list">${table([
     ...(resend ? [{ label: '', html: true, value: (m) => (m.state === 'FAILED' ? `<input type="checkbox" data-pick="${esc(m.encodedKey)}" aria-label="select">` : '') }] : []),
     { label: 'Created', value: (m) => String(m.creationDate || '').replace('T', ' ').slice(0, 19) },
+    { label: 'Type', value: (m) => (m.type === 'EMAIL' ? 'email' : 'webhook') },
     { label: 'Event', key: 'event' }, { label: 'State', key: 'state' }, { label: 'Retries', num: true, key: 'numRetries' },
-    { label: 'Destination', key: 'destination' }, { label: 'Reason', value: (m) => m.failureReason || m.waitingReason || '' },
+    { label: 'Destination', key: 'destination' }, { label: 'Subject', value: (m) => m.subject || '' }, { label: 'Reason', value: (m) => m.failureReason || m.waitingReason || '' },
     { label: '', value: (m) => (m.test ? 'test' : '') },
   ], r.body, { onRow: true, empty: 'No messages match' })}</div>
     ${pager(s, r.total)}`;
@@ -196,7 +199,7 @@ export async function messagesView() {
   });
   wirePager(s, messagesView);
   const on = (id, key) => $(id).addEventListener('change', (e) => { s[key] = e.target.value.trim(); s.offset = 0; messagesView(); });
-  on('#msg-state', 'state'); on('#msg-event', 'event'); on('#msg-from', 'from'); on('#msg-to', 'to');
+  on('#msg-type', 'type'); on('#msg-state', 'state'); on('#msg-event', 'event'); on('#msg-from', 'from'); on('#msg-to', 'to');
   $('#msg-resend')?.addEventListener('click', async () => {
     const keys = [...view().querySelectorAll('[data-pick]:checked')].map((x) => x.dataset.pick);
     if (!keys.length) { toast('Select failed messages first', true); return; }

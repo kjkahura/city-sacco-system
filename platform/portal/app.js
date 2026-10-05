@@ -530,4 +530,26 @@ function loadSettings() {
   $('settings-member-name').textContent = `${currentMember.firstName} ${currentMember.lastName} (${currentMember.memberNo})`;
   $('settings-member-phone').textContent = currentMember.phone || '';
   $('settings-member-email').textContent = currentMember.email || '';
+  loadNotifications();
+}
+
+// The member's own email subscriptions: one checkbox per email the SACCO sends.
+async function loadNotifications() {
+  const box = $('settings-notifications');
+  const status = $('settings-notifications-status');
+  status.textContent = '';
+  let list = [];
+  try { list = await api.getNotifications(); } catch (e) { box.textContent = friendly(e.code || e.message); return; }
+  if (!list.length) { box.innerHTML = '<p class="hint">The SACCO sends no email notifications yet.</p>'; return; }
+  box.innerHTML = list.map((n) => `<label class="check-row"><input type="checkbox" data-tpl="${esc(n.templateKey)}" ${n.subscribed ? 'checked' : ''}>
+    ${esc(n.name)}</label>`).join('');
+  box.querySelectorAll('[data-tpl]').forEach((cb) => cb.addEventListener('change', async () => {
+    try {
+      await api.setNotification(cb.dataset.tpl, cb.checked);
+      status.textContent = 'Saved.';
+    } catch (e) {
+      cb.checked = !cb.checked;
+      status.textContent = friendly(e.code || e.message);
+    }
+  }));
 }

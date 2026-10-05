@@ -189,6 +189,13 @@ class ApiClient {
   async getBeneficiaries() { return (await this.get('/beneficiaries')).data; }
   async addBeneficiary(data) { return (await this.post('/beneficiaries', data)).data; }
   async deleteBeneficiary(id) { return (await this.delete(`/beneficiaries/${encodeURIComponent(id)}`)).data; }
+
+  // --- email notifications ------------------------------------------------
+
+  async getNotifications() { return (await this.get('/notifications', { showLoader: false })).data; }
+  async setNotification(templateId, subscribed) {
+    return (await this.request(`/notifications/${encodeURIComponent(templateId)}`, { method: 'PUT', body: { subscribed }, showLoader: false })).data;
+  }
 }
 
 const api = new ApiClient();

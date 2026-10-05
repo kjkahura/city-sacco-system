@@ -22,6 +22,7 @@ function shape(m, { full = true } = {}) {
     groupKey: m.group_id, loanAccountKey: m.loan_id, depositAccountKey: m.savings_account_id,
     waitingReason: m.state === 'WAITING' ? m.waiting_reason : null, responseStatus: m.response_status ?? null,
     nextAttemptDate: ['QUEUED', 'WAITING'].includes(m.state) ? iso(m.next_attempt_at) : null, test: m.test,
+    ...(m.type === 'EMAIL' ? { subject: m.subject ?? null, manual: Boolean(m.manual) } : {}),
   };
   if (full) out.body = m.body ?? null;
   return out;
@@ -63,6 +64,17 @@ async function get(c, key) {
   const { rows: [m] } = await c.query('SELECT * FROM notification_messages WHERE id = $1', [key]);
   if (!m) throw err('MESSAGE_NOT_FOUND', 404);
   return m;
+}
+
+/** An anonymized member's messages keep their outcome, not their address or content (and so cannot be resent). */
+async function forgetMember(c, memberId) {
+  const { rowCount } = await c.query(
+    `UPDATE notification_messages SET destination = NULL, subject = NULL, body = NULL, body_cleared_at = now(),
+       state = CASE WHEN state IN ('QUEUED', 'WAITING') THEN 'FAILED' ELSE state END,
+       failure_reason = CASE WHEN state IN ('QUEUED', 'WAITING') THEN 'UNDEFINED_DESTINATION' ELSE failure_reason END,
+       waiting_reason = NULL
+     WHERE member_id = $1 OR group_id = $1`, [memberId]);
+  return rowCount;
 }
 
 /** Put failed messages back in the queue with a new idempotency key. Returns their keys. */
@@ -110,4 +122,4 @@ async function setSettings(c, body, { actor }) {
   return { state };
 }
 
-module.exports = { shape, search, fromV1, get, resend, resendByDate, settings, setSettings };
+module.exports = { shape, search, fromV1, get, resend, resendByDate, settings, setSettings, forgetMember };

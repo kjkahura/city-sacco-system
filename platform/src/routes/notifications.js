@@ -81,7 +81,35 @@ const settings = express.Router();
 settings.get('/webhook', ...H.run((c) => MSG.settings(c)));
 settings.put('/webhook', ...H.run((c, req, _res, { actor }) => MSG.setSettings(c, req.body, { actor }), { write: true }));
 
+// --- email settings, the test, manual email, subscriptions ----------------------------
+
+const CH = require('../domain/notifications/channels');
+settings.get('/email', ...H.run((c) => CH.get(c, 'EMAIL')));
+settings.put('/email', ...H.run((c, req, _res, { actor }) => CH.save(c, 'EMAIL', req.body, { actor }), { write: true }));
+// Mounted at /api/notificationsettings/email:test (a colon action on the tenant API, as the message actions).
+const emailTest = H.run((c, req) => CH.test(c, 'EMAIL', { to: req.body?.to, settings: req.body?.settings || {} }));
+actions.sendEmail = H.plain(async (req) => require('../domain/notifications/manual').sendEmail(req.tenant.schema_name, req.body || {}, H.ctxOf(req)), 201);
+
+const SUBS = require('../domain/notifications/subscriptions');
+const subscriptions = express.Router({ mergeParams: true });
+// /clients/:id for individuals, /groups/:id for groups.
+async function holderOf(c, req) {
+  const group = req.baseUrl.includes('/groups/');
+  const { rows: [m] } = await c.query('SELECT id, holder_type FROM members WHERE id::text = $1', [req.params.id]);
+  if (!m || (m.holder_type === 'GROUP') !== group) throw Object.assign(new Error(group ? 'GROUP_NOT_FOUND' : 'CLIENT_NOT_FOUND'), { status: 404 });
+  return m;
+}
+subscriptions.get('/', ...H.run(async (c, req) => SUBS.list(c, (await holderOf(c, req)).id)));
+subscriptions.put('/:templateId', ...H.run(async (c, req, _res, { actor }) => SUBS.set(c, (await holderOf(c, req)).id, req.params.templateId, req.body?.subscribed, { actor }), { write: true }));
+
+// 10. The email templates a user who sends manual email may pick (not the webhooks, with their addresses).
+const emailTemplates = H.run(async (c) => (await c.query(
+  "SELECT id, name, subject, body FROM notification_templates WHERE type = 'EMAIL' AND activated ORDER BY lower(name)")).rows);
+
 module.exports.messages = messages;
 module.exports.actions = actions;
 module.exports.v1 = v1;
 module.exports.settings = settings;
+module.exports.emailTest = emailTest;
+module.exports.subscriptions = subscriptions;
+module.exports.emailTemplates = emailTemplates;

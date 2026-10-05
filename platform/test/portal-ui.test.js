@@ -167,6 +167,18 @@ const T = (fn) => withTenant(SCHEMA, fn);
     check('a beneficiary who is a member is marked as one',
       /Member of this SACCO/.test(await page.textContent('#beneficiaries-list')));
 
+    section('email subscriptions');
+    await T((c) => c.query(`INSERT INTO notification_templates (name, type, target, event, body, subject, recipient, content_type, signing_enabled)
+      VALUES ('Deposit receipts', 'EMAIL', 'SAVINGS', 'SAVINGS_DEPOSIT', '<p>x</p>', 'Deposit', 'CLIENT', 'HTML', false)`));
+    await page.click('.nav-item[data-view="settings"]');
+    await page.waitForSelector('#settings-notifications [data-tpl]');
+    check('the settings list the email notifications, subscribed by default', /Deposit receipts/.test(await page.textContent('#settings-notifications'))
+      && await page.isChecked('#settings-notifications [data-tpl]'));
+    await page.click('#settings-notifications [data-tpl]');
+    await page.waitForFunction(() => /saved/i.test(document.getElementById('settings-notifications-status')?.textContent || ''));
+    const subRow = await T(async (c) => (await c.query('SELECT subscribed, changed_by FROM notification_subscriptions')).rows[0]);
+    check('the member unsubscribes themselves', subRow && subRow.subscribed === false && /^portal:/.test(subRow.changed_by), JSON.stringify(subRow));
+
     section('sign-out');
     await page.click('#logout-btn');
     await page.waitForSelector('#login-screen.active');

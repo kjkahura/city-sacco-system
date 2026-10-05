@@ -9,6 +9,7 @@ const IDT = require('./idTemplates');
 const DUP = require('./duplicates');
 const B = require('./branches');
 const { recordAudit } = require('../lib/auditLog');
+const MESSAGES = require('./notifications/messages');
 const { err } = acct;
 
 /**
@@ -642,6 +643,8 @@ async function anonymize(c, ref, { user = null } = {}) {
   await c.query('DELETE FROM member_media WHERE member_id = $1', [m.id]);
   await removePortal(c, m.id);
   await c.query('UPDATE member_state_changes SET reason = NULL WHERE member_id = $1', [m.id]);
+  // The communication log keeps that messages were sent, not to which address or what they said.
+  await MESSAGES.forgetMember(c, m.id);
   await redactAudit(c, m);
   await audit(c, actor, 'MEMBER_ANONYMIZED', m.id, null, { memberNo: m.member_no });
   return find(c, m.id);

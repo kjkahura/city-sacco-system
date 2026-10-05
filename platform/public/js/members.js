@@ -15,6 +15,7 @@ import { showDialog } from './users.js';
 import { can } from './access.js';
 import { memberTasks } from './tasks.js';
 import { entityReports } from './templates.js';
+import { sendEmailDialog, subscriptionsCard } from './email.js';
 
 // --------------------------------------------------------------------------
 // Members
@@ -255,6 +256,7 @@ export async function memberDetail(m0) {
       ${editable && can(P.assoc) ? '<button class="secondary" id="m-assoc">Change association</button>' : ''}
       ${actions.map(([a, label]) => `<button class="secondary" data-state-action="${a}">${esc(label)}</button>`).join('')}
       ${!isGroup ? '<button class="secondary" id="m-history">State history</button>' : ''}
+      ${can('SEND_MANUAL_EMAIL') && m.email && !m.anonymized_at ? '<button class="secondary" id="m-email">Send email</button>' : ''}
       ${!isGroup && m.status === 'EXITED' && !m.anonymized_at && can('ANONYMIZE_CLIENT') ? '<button class="secondary" id="m-anon">Anonymize</button>' : ''}
       ${can(P.del) ? '<button class="secondary" id="m-delete">Delete</button>' : ''}
     </div>
@@ -326,6 +328,7 @@ export async function memberDetail(m0) {
     { label: 'How', value: (x) => String(x.closedAs).toLowerCase().replace(/_/g, ' ') },
     { label: 'On time', num: true, value: (x) => (x.onTimeRate === null ? '' : `${x.onTimeRate}%`) },
   ], h.closedLoans || [], { empty: 'No closed loans' })}`)}</div>` : ''}
+    <div id="member-subs"></div>
     ${isGroup ? '' : `<div id="identifications">${card('Identification documents', `${table([
     { label: 'Type', key: 'id_type' }, { label: 'Number', key: 'document_id' }, { label: 'Issued by', key: 'issuing_authority' },
     { label: 'Valid until', html: true, value: (x) => `${day(x.valid_until)}${x.expired ? ' <span class="badge bad" data-expired>expired</span>' : x.expiresInDays !== null && x.expiresInDays <= 30 ? ` <span class="badge">in ${x.expiresInDays} days</span>` : ''}` },
@@ -383,6 +386,8 @@ export async function memberDetail(m0) {
     toast(res.ok ? `Now ${res.body.status.replace(/_/g, ' ').toLowerCase()}` : res.error, !res.ok);
     if (res.ok) reload();
   }));
+  on('#m-email', () => sendEmailDialog(isGroup ? { groupKey: m.id } : { clientKey: m.id }));
+  subscriptionsCard($('#member-subs'), m.id, { isGroup });
   on('#m-history', async () => {
     const r = await api('GET', `/api/members/${m.id}/state-history`);
     showDialog(`State history of ${m.member_no}`, table([

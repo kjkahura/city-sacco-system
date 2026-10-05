@@ -37,3 +37,6 @@ temp/
 
 # Qona-MBS server (local dev only: env, dev db, lockfile)
 Qona-MBS/server/
+
+# The test-only TLS certificate and key for the SMTP servers in test/email.test.js
+!platform/test/fixtures/smtp-test-*.pem

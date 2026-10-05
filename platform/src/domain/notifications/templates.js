@@ -8,8 +8,10 @@ const R = require('./render');
 const S = require('./secrets');
 
 /**
- * Webhook templates (the reference platform's templates API): what event,
- * under which conditions, sent where and how, with what body.
+ * Templates (the reference platform's templates API): what event, under
+ * which conditions, sent where and how, with what body. A template is a
+ * webhook (WEB_HOOK), a streaming template (EVENT_STREAM, ../streaming) or
+ * an email (EMAIL: a subject, a recipient and an HTML body).
  *
  * The basic authentication password and the signing secret are stored
  * sealed (./secrets) and never returned; the signing secret is shown once,
@@ -20,10 +22,17 @@ const REQUEST_TYPES = ['POST', 'PUT', 'PATCH'];
 const CONTENT_TYPES = ['PLAIN_TEXT', 'JSON', 'XML'];
 const OPERATORS = ['EQUALS', 'DIFFERENT_THAN', 'MORE_THAN', 'LESS_THAN', 'BETWEEN', 'IN', 'STARTS_WITH', 'EMPTY', 'NOT_EMPTY'];
 const iso = (v) => (v instanceof Date ? v.toISOString() : v || null);
+const TYPES = ['WEB_HOOK', 'EVENT_STREAM', 'EMAIL'];
+const RECIPIENTS = ['CLIENT', 'CREDIT_OFFICER', 'GROUP_ROLE'];
+// An email goes to someone the event's member, group or account leads to.
+const PERSON_TARGETS = ['CLIENT', 'GROUP', 'LOANS', 'SAVINGS'];
+const AUDIT = { WEB_HOOK: 'WEBHOOK', EVENT_STREAM: 'STREAM_TEMPLATE', EMAIL: 'EMAIL_TEMPLATE' };
+const auditName = (type, what) => `${AUDIT[type] || 'TEMPLATE'}_${what}`;
 
 function shape(t) {
   return {
-    id: t.id, name: t.name, type: t.type, ...(t.type === 'EVENT_STREAM' ? { topic: t.topic } : {}), target: t.target, event: t.event, body: t.body, activated: t.activated,
+    id: t.id, name: t.name, type: t.type, ...(t.type === 'EVENT_STREAM' ? { topic: t.topic } : {}),
+    ...(t.type === 'EMAIL' ? { subject: t.subject, recipient: t.recipient, recipientRole: t.recipient_role || null } : {}), target: t.target, event: t.event, body: t.body, activated: t.activated,
     trigger: t.trigger, triggerDays: t.trigger_days, subscriptionOption: t.subscription_option,
     filtersLinkingOperator: t.filters_linking_operator, filterConstraints: t.filter_constraints,
     url: t.url, requestType: t.request_type, contentType: t.content_type,
@@ -81,9 +90,11 @@ async function normalise(c, b, { current = null } = {}) {
   const { rows: dup } = await c.query('SELECT 1 FROM notification_templates WHERE lower(name) = lower($1) AND id IS DISTINCT FROM $2::uuid', [name, current?.id || null]);
   if (dup.length) throw err(`NAME_ALREADY_USED: ${name}`);
   const type = String(b.type || current?.type || 'WEB_HOOK').toUpperCase();
-  if (!['WEB_HOOK', 'EVENT_STREAM'].includes(type)) throw err('TYPE_IS_WEB_HOOK_OR_EVENT_STREAM');
+  if (!TYPES.includes(type)) throw err(`TYPE_IS_ONE_OF: ${TYPES.join(', ')}`);
   if (current && type !== current.type) throw err('A_TEMPLATE_KEEPS_ITS_TYPE');
-  const stream = type === 'EVENT_STREAM';
+  const email = type === 'EMAIL';
+  // Streaming templates and emails have no address, authorization, headers or signature.
+  const stream = type === 'EVENT_STREAM' || email;
   const event = String(b.event || '').toUpperCase();
   if (C.NOT_SUPPORTED.includes(event)) throw err(`EVENT_NOT_SUPPORTED: ${event} has no source on this platform`);
   const targets = C.targetsOf(event);
@@ -91,10 +102,11 @@ async function normalise(c, b, { current = null } = {}) {
   const target = String(b.target || targets[0]).toUpperCase();
   if (!C.TARGETS.includes(target)) throw err(`UNKNOWN_TARGET: ${target}`);
   if (!targets.includes(target)) throw err(`EVENT_NOT_FOR_TARGET: ${event} is for ${targets.join(' or ')}`);
+  if (email && !PERSON_TARGETS.includes(target)) throw err(`EMAIL_TARGET_MUST_BE_ONE_OF: ${PERSON_TARGETS.join(', ')}; ${event} has no member to write to`);
   const requestType = String(b.requestType || 'POST').toUpperCase();
   if (!REQUEST_TYPES.includes(requestType)) throw err(`INVALID_REQUEST_TYPE: ${requestType}; POST, PUT or PATCH`);
-  const contentType = String(b.contentType || 'JSON').toUpperCase();
-  if (!CONTENT_TYPES.includes(contentType)) throw err(`INVALID_CONTENT_TYPE: ${contentType}; ${CONTENT_TYPES.join(', ')}`);
+  const contentType = email ? 'HTML' : String(b.contentType || 'JSON').toUpperCase();
+  if (!email && !CONTENT_TYPES.includes(contentType)) throw err(`INVALID_CONTENT_TYPE: ${contentType}; ${CONTENT_TYPES.join(', ')}`);
   // A streaming template is read by subscribers: it has no address, authorization or signature.
   let url = null;
   if (!stream) {
@@ -107,10 +119,29 @@ async function normalise(c, b, { current = null } = {}) {
   if (!body.trim()) throw err('BODY_REQUIRED');
   if (Buffer.byteLength(body) > 65536) throw err('MAX_MESSAGE_SIZE_LIMIT_EXCEEDED: a body is at most 64 KB');
   const custom = await customFieldIds(c);
-  const unknown = R.namesIn(body).filter((n) => !(n in C.PLACEHOLDERS) && !custom.has(n));
+  let subject = null;
+  let recipient = null;
+  let recipientRole = null;
+  if (email) {
+    subject = String(b.subject ?? '').trim();
+    if (!subject) throw err('SUBJECT_REQUIRED');
+    if (subject.length > 255) throw err('SUBJECT_IS_AT_MOST_255_CHARACTERS');
+    if (/[\r\n]/.test(subject)) throw err('SUBJECT_IS_ONE_LINE');
+    recipient = String(b.recipient || 'CLIENT').toUpperCase();
+    if (!RECIPIENTS.includes(recipient)) throw err(`RECIPIENT_IS_ONE_OF: ${RECIPIENTS.join(', ')}`);
+    if (recipient === 'GROUP_ROLE') {
+      if (target === 'CLIENT') throw err('A_GROUP_ROLE_RECIPIENT_IS_FOR_GROUPS_AND_THEIR_ACCOUNTS');
+      recipientRole = String(b.recipientRole || '').trim();
+      if (!recipientRole) throw err('RECIPIENT_ROLE_REQUIRED: the group role whose holders get the email');
+      const { rows: role } = await c.query('SELECT 1 FROM group_role_names WHERE id = $1', [recipientRole]);
+      if (!role.length) throw err(`UNKNOWN_RECIPIENT_ROLE: ${recipientRole}`);
+    }
+  }
+  if (email) R.assertHtmlPlaceholders(body);
+  const unknown = R.namesIn(`${subject || ''} ${body}`).filter((n) => !(n in C.PLACEHOLDERS) && !custom.has(n));
   if (unknown.length) throw err(`UNKNOWN_PLACEHOLDER: ${unknown.join(', ')}`);
   const sample = Object.fromEntries([...custom].map((k) => [k, 'sample']));
-  R.assertBody(R.fill(body, { ...sample, ...C.PLACEHOLDERS }, contentType), contentType);
+  if (!email) R.assertBody(R.fill(body, { ...sample, ...C.PLACEHOLDERS }, contentType), contentType);
   const auth = stream ? {} : b.authorization || {};
   const authType = String(auth.type || 'NONE').toUpperCase();
   if (!['NONE', 'BASIC'].includes(authType)) throw err('AUTHORIZATION_IS_NONE_OR_BASIC');
@@ -127,7 +158,7 @@ async function normalise(c, b, { current = null } = {}) {
   const link = String(b.filtersLinkingOperator || 'MATCH_ALL').toUpperCase();
   if (!['MATCH_ALL', 'MATCH_ANY'].includes(link)) throw err('FILTERS_LINKING_OPERATOR_IS_MATCH_ALL_OR_MATCH_ANY');
   return {
-    name, type, target, event, body, activated: b.activated === undefined ? true : Boolean(b.activated), trigger, triggerDays,
+    name, type, target, event, body, subject, recipient, recipientRole, activated: b.activated === undefined ? true : Boolean(b.activated), trigger, triggerDays,
     subscriptionOption: sub, filtersLinkingOperator: link, filterConstraints: constraintsOf(b.filterConstraints),
     url, requestType, contentType, authType, username, password, headers: stream ? [] : headersOf(b.headers),
     signingEnabled: stream ? false : b.signingEnabled === undefined ? true : Boolean(b.signingEnabled),
@@ -164,12 +195,12 @@ async function create(c, body, { actor }) {
   const { rows: [t] } = await c.query(
     `INSERT INTO notification_templates (name, type, target, event, body, activated, trigger, trigger_days, subscription_option,
        filters_linking_operator, filter_constraints, url, request_type, content_type, auth_type, auth_username, auth_secret, headers,
-       signing_enabled, signing_secret, created_by, topic)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
+       signing_enabled, signing_secret, created_by, topic, subject, recipient, recipient_role)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING *`,
     [v.name, v.type, v.target, v.event, v.body, v.activated, v.trigger, v.triggerDays, v.subscriptionOption, v.filtersLinkingOperator,
       JSON.stringify(v.filterConstraints), v.url, v.requestType, v.contentType, v.authType, v.username,
-      v.authType === 'BASIC' ? S.seal(v.password) : null, JSON.stringify(v.headers), v.signingEnabled, S.seal(secret), actor, topic]);
-  await recordAudit(c, { actor, action: v.type === 'EVENT_STREAM' ? 'STREAM_TEMPLATE_CREATED' : 'WEBHOOK_CREATED', entity: 'notification_template', entityId: t.id, after: JSON.stringify(shape(t)) });
+      v.authType === 'BASIC' ? S.seal(v.password) : null, JSON.stringify(v.headers), v.signingEnabled, S.seal(secret), actor, topic, v.subject, v.recipient, v.recipientRole]);
+  await recordAudit(c, { actor, action: auditName(v.type, 'CREATED'), entity: 'notification_template', entityId: t.id, after: JSON.stringify(shape(t)) });
   return { ...shape(t), ...(secret ? { signingSecret: secret } : {}) };
 }
 
@@ -177,7 +208,7 @@ async function create(c, body, { actor }) {
 function applyPatch(current, ops) {
   if (!Array.isArray(ops)) throw err('A_JSON_PATCH_IS_A_LIST_OF_OPERATIONS');
   const out = JSON.parse(JSON.stringify(current));
-  const editable = ['name', 'target', 'event', 'body', 'activated', 'trigger', 'triggerDays', 'subscriptionOption', 'filtersLinkingOperator',
+  const editable = ['name', 'target', 'event', 'body', 'subject', 'recipient', 'recipientRole', 'activated', 'trigger', 'triggerDays', 'subscriptionOption', 'filtersLinkingOperator',
     'filterConstraints', 'url', 'requestType', 'contentType', 'authorization', 'headers', 'signingEnabled'];
   for (const o of ops) {
     const op = String(o?.op || '').toUpperCase();
@@ -214,25 +245,25 @@ async function patch(c, id, ops, { actor }) {
   const { rows: [after] } = await c.query(
     `UPDATE notification_templates SET name=$2, target=$3, event=$4, body=$5, activated=$6, trigger=$7, trigger_days=$8, subscription_option=$9,
        filters_linking_operator=$10, filter_constraints=$11, url=$12, request_type=$13, content_type=$14, auth_type=$15, auth_username=$16,
-       auth_secret=$17, headers=$18, signing_enabled=$19, signing_secret=$20, updated_at=now(),
+       auth_secret=$17, headers=$18, signing_enabled=$19, signing_secret=$20, subject=$21, recipient=$22, recipient_role=$23, updated_at=now(),
        consecutive_failures = CASE WHEN url = $12 THEN consecutive_failures ELSE 0 END,
        circuit_open_until = CASE WHEN url = $12 THEN circuit_open_until END
      WHERE id=$1 RETURNING *`,
     [t.id, v.name, v.target, v.event, v.body, v.activated, v.trigger, v.triggerDays, v.subscriptionOption, v.filtersLinkingOperator,
       JSON.stringify(v.filterConstraints), v.url, v.requestType, v.contentType, v.authType, v.username, authSecret, JSON.stringify(v.headers),
-      v.signingEnabled, signingSecret]);
+      v.signingEnabled, signingSecret, v.subject, v.recipient, v.recipientRole]);
   // Queued and waiting messages follow the webhook to its new address.
-  if (after.url !== t.url) {
+  if (t.type === 'WEB_HOOK' && after.url !== t.url) {
     await c.query(`UPDATE notification_messages SET destination = $2 WHERE template_id = $1 AND state IN ('QUEUED', 'WAITING')`, [t.id, after.url]);
   }
-  await recordAudit(c, { actor, action: t.type === 'EVENT_STREAM' ? 'STREAM_TEMPLATE_EDITED' : 'WEBHOOK_EDITED', entity: 'notification_template', entityId: t.id, before: JSON.stringify(before), after: JSON.stringify(shape(after)) });
+  await recordAudit(c, { actor, action: auditName(t.type, 'EDITED'), entity: 'notification_template', entityId: t.id, before: JSON.stringify(before), after: JSON.stringify(shape(after)) });
   return { ...shape(after), ...(shown ? { signingSecret: shown } : {}) };
 }
 
 async function remove(c, id, { actor }) {
   const t = await row(c, id);
   await c.query('DELETE FROM notification_templates WHERE id = $1', [t.id]);
-  await recordAudit(c, { actor, action: t.type === 'EVENT_STREAM' ? 'STREAM_TEMPLATE_DELETED' : 'WEBHOOK_DELETED', entity: 'notification_template', entityId: t.id, before: JSON.stringify(shape(t)) });
+  await recordAudit(c, { actor, action: auditName(t.type, 'DELETED'), entity: 'notification_template', entityId: t.id, before: JSON.stringify(shape(t)) });
 }
 
 async function rotateSecret(c, id, { actor }) {

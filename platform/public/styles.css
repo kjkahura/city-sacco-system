@@ -197,3 +197,6 @@ table.grouped-editor td input, table.grouped-editor td select { width: 100%; min
 pre.secret { font-size: 13px; padding: 8px; background: var(--bg); border: 1px solid var(--line); overflow-wrap: anywhere; white-space: pre-wrap; }
 label.check { display: flex; align-items: center; gap: 8px; }
 label.check input[type=checkbox] { width: auto; margin: 0; }
+
+/* Administration > Email: the sandboxed preview of a template */
+.email-preview { width: 100%; min-height: 320px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; }

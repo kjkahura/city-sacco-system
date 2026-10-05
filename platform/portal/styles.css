@@ -843,3 +843,7 @@ html, body {
 .status-badge.posted { background: rgba(34, 197, 94, 0.15); color: var(--success); }
 .status-badge.reversed { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
 .account-card { cursor: pointer; }
+
+/* Email notifications in Settings */
+.check-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0; }
+.settings-card .hint { color: #6b7280; font-size: 0.875rem; }

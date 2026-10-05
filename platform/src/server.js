@@ -180,6 +180,9 @@ tenantApi.post('/deposits\\:search', ...require('./routes/deposits').search);
 const txSearch = require('./routes/transactionSearch');
 tenantApi.post('/loans/transactions\\:search', ...txSearch.loans);
 tenantApi.post('/deposits/transactions\\:search', ...txSearch.deposits);
+// A member's or group's email subscriptions (domain/notifications/subscriptions).
+tenantApi.use('/clients/:id/notification-subscriptions', require('./routes/notifications').subscriptions);
+tenantApi.use('/groups/:id/notification-subscriptions', require('./routes/notifications').subscriptions);
 tenantApi.use('/clients', clientRoutes.clients);
 tenantApi.use('/groups', clientRoutes.groups);
 tenantApi.use('/client-types', clientRoutes.types);
@@ -192,11 +195,13 @@ tenantApi.use('/deposits', require('./routes/deposits').router);
 const notifications = require('./routes/notifications');
 tenantApi.use('/templates', notifications.templates);
 // The colon actions sit beside the collection, as the other searches do.
-for (const a of ['search', 'searchSorted', 'resend', 'resendAsyncByKeys', 'resendAsyncByDate']) {
+for (const a of ['search', 'searchSorted', 'resend', 'resendAsyncByKeys', 'resendAsyncByDate', 'sendEmail']) {
   tenantApi.post(`/communications/messages\\:${a}`, ...notifications.actions[a]);
 }
+tenantApi.get('/communications/email-templates', ...notifications.emailTemplates);
 tenantApi.use('/communications/messages', notifications.messages);
 tenantApi.use('/notifications/messages', notifications.v1);
+tenantApi.post('/notificationsettings/email\\:test', ...notifications.emailTest);
 tenantApi.use('/notificationsettings', notifications.settings);
 
 const savings = require('./routes/savings');

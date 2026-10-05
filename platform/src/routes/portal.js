@@ -281,4 +281,11 @@ router.delete('/beneficiaries/:id', requireMember(), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// The member's email subscriptions (domain/notifications/subscriptions): the active templates that
+// write to them, and their choice for each.
+const SUBS = require('../domain/notifications/subscriptions');
+router.get('/notifications', ...read((c, req) => SUBS.list(c, req.member.id, { activeOnly: true })));
+router.put('/notifications/:templateId', ...json((c, req) => SUBS.set(c, req.member.id, req.params.templateId, req.body?.subscribed,
+  { actor: `portal:${req.member.memberNo}`, activeOnly: true }), { write: true, guard: requireMember() }));
+
 module.exports = router;

@@ -23,6 +23,7 @@ import { returnsView } from './finance.js';
 import { dataView } from './data.js';
 import { messagesView, webhooksView } from './webhooks.js';
 import { streamTemplatesView, subscriptionsView } from './streaming.js';
+import { emailSettingsView, emailTemplatesView } from './email.js';
 
 const GENERAL = ['details', 'branding', 'eod', 'holidays', 'channels', 'idTemplates', 'rates', 'currencies'];
 
@@ -38,6 +39,7 @@ const PARTS = {
   views: [['Custom Views and Menu Items', () => viewsView()]],
   webhooks: [['Webhooks', () => webhooksView()], ['Communication Log', () => messagesView()]],
   events: [['Streaming Templates', () => streamTemplatesView()], ['Subscriptions', () => subscriptionsView()]],
+  email: [['Email Templates', () => emailTemplatesView()], ['Settings', () => emailSettingsView()]],
   templates: [['Report Templates', () => reportsView({ which: 'templates' })], ['Product Documents', () => orgView({ only: ['documents'] })]],
   reports: [['Regulatory Return Templates', () => returnsView()]],
   data: [['Import, Backups, Data Dictionary, Extract', () => dataView()]],

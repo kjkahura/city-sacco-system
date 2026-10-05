@@ -8,6 +8,8 @@ const C = require('./catalog');
 const R = require('./render');
 const S = require('./secrets');
 const CTX = require('./context');
+const CH = require('./channels');
+const SUBS = require('./subscriptions');
 const requestContext = require('../../lib/requestContext');
 
 /**
@@ -26,6 +28,12 @@ const requestContext = require('../../lib/requestContext');
  * after the first try (9 retries), then FAILED; a failed message can be
  * resent. After 20 failures in a row a template's circuit opens: its
  * messages wait, one is tried every 10 minutes, and a success closes it.
+ *
+ * Emails (EMAIL templates) go to the recipients the template names, if they
+ * are subscribed, through the SACCO's own mail server (./channels). A
+ * temporary refusal follows the same retries; a permanent one (a refused
+ * sign-in, a 5xx answer) fails at once. A channel sends at most its pace a
+ * minute; the rest wait for the next pass.
  */
 
 const RETRY_MINUTES = [1, 5, 15, 60, 180, 360, 720, 1080, 1440];
@@ -104,6 +112,66 @@ async function publish(c, t, e, values) {
     [t.topic, e.event, e.target || t.target, t.name, CONTENT_TYPES[t.content_type] || CONTENT_TYPES.JSON, body, e.branch_id || null]);
 }
 
+// --- emails -------------------------------------------------------------------------
+
+/** Who an email template writes to for an event: [{ address, memberId }]; memberId is null for staff. */
+async function recipientsOf(c, t, e) {
+  if (!e.member_id) return [];
+  const { rows: [holder] } = await c.query('SELECT id, holder_type, email, credit_officer, status FROM members WHERE id = $1', [e.member_id]);
+  if (!holder) return [];
+  if (t.recipient === 'CREDIT_OFFICER') {
+    const loan = e.loan_id ? (await c.query('SELECT credit_officer FROM loan_accounts WHERE id = $1', [e.loan_id])).rows[0] : null;
+    const officer = loan?.credit_officer || holder.credit_officer || null;
+    // A suspended user gets nothing.
+    if (officer) {
+      const { rows: [u] } = await c.query(
+        `SELECT u.status FROM platform.users u JOIN platform.tenants tn ON tn.id = u.tenant_id
+          WHERE tn.schema_name = current_schema() AND lower(u.email) = lower($1)`, [officer]);
+      if (u && u.status !== 'ACTIVE') return [];
+    }
+    return [{ address: officer, memberId: null }];
+  }
+  // Rejected and exited members are no longer written to by events.
+  const gone = (s) => ['EXITED', 'REJECTED'].includes(s);
+  if (t.recipient === 'GROUP_ROLE') {
+    if (holder.holder_type !== 'GROUP') return [];
+    const { rows } = await c.query(
+      `SELECT m.id, m.email, m.status FROM group_member_roles r JOIN members m ON m.id = r.member_id
+        WHERE r.group_id = $1 AND r.role_name_id = $2 ORDER BY m.member_no`, [holder.id, t.recipient_role]);
+    return rows.filter((r) => !gone(r.status)).map((r) => ({ address: r.email, memberId: r.id }));
+  }
+  if (gone(holder.status)) return [];
+  return [{ address: holder.email, memberId: holder.id }];
+}
+
+/** One email message, queued, or failed at once when there is no address or the body is too large. */
+async function queueEmail(c, { t = null, e, to, recipientId = null, subject, html, manual = false, actor = null }) {
+  let failure = null;
+  if (!to) failure = ['MISSING_EMAIL_RECIPIENT', 'The recipient has no email address'];
+  else if (Buffer.byteLength(html) > MAX_BODY) failure = ['MAX_MESSAGE_SIZE_LIMIT_EXCEEDED', `${Buffer.byteLength(html)} bytes`];
+  const { rows: [holder] } = e.member_id ? await c.query('SELECT holder_type FROM members WHERE id = $1', [e.member_id]) : { rows: [] };
+  const group = holder?.holder_type === 'GROUP' ? e.member_id : null;
+  const { rows: [m] } = await c.query(
+    `INSERT INTO notification_messages (template_id, event_id, type, event, state, failure_reason, failure_cause, destination, content_type,
+       subject, body, member_id, group_id, loan_id, savings_account_id, branch_id, manual, created_by)
+     VALUES ($1,$2,'EMAIL',$3,$4,$5,$6,$7,'HTML',$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+    [t?.id || null, e.id || null, e.event, failure ? 'FAILED' : 'QUEUED', failure?.[0] || null, failure?.[1] || null, to || null,
+      subject, html, recipientId || (group ? null : e.member_id || null), group, e.loan_id || null, e.savings_account_id || null,
+      e.branch_id || null, manual, actor]);
+  return m;
+}
+
+/** An email template's messages for an event: one per subscribed recipient. */
+async function queueEmails(c, t, e, values) {
+  let n = 0;
+  for (const r of await recipientsOf(c, t, e)) {
+    if (r.memberId && !(await SUBS.subscribed(c, t, r.memberId))) continue;
+    await queueEmail(c, { t, e, to: r.address, recipientId: r.memberId, subject: R.subject(t.subject || '', values), html: R.fill(t.body, values, 'HTML') });
+    n += 1;
+  }
+  return n;
+}
+
 function wants(t, e) {
   // Only an event with more than one target (ACCOUNT_IN_ARREARS: loans or deposits) is matched on the target too.
   const targets = C.targetsOf(e.event) || [];
@@ -122,9 +190,9 @@ async function processEvents(c, limit = 500) {
       const values = await CTX.build(c, e);
       for (const t of matching) {
         if (!meets(t, values)) continue;
-        if (t.type === 'EVENT_STREAM') await publish(c, t, e, values);
-        else await queueFor(c, t, e, values);
-        queued += 1;
+        if (t.type === 'EVENT_STREAM') { await publish(c, t, e, values); queued += 1; }
+        else if (t.type === 'EMAIL') queued += await queueEmails(c, t, e, values);
+        else { await queueFor(c, t, e, values); queued += 1; }
       }
     }
     await c.query('UPDATE notification_events SET processed_at = now() WHERE id = $1', [e.id]);
@@ -165,12 +233,19 @@ async function claimNext(c, onlyIds = null) {
        FROM notification_templates t
       WHERE m.template_id = t.id AND m.state = 'QUEUED' AND t.circuit_open_until > now()`);
   const { rows: [m] } = await c.query(
-    `WITH due AS (
+    `WITH paced AS (
+       -- A channel's pace: once pace_per_minute of its messages were sent (or are being sent) in the last minute, the rest wait.
+       SELECT ch.channel FROM notification_channels ch
+        WHERE (SELECT count(*) FROM notification_messages x
+                WHERE x.type = ch.channel AND (x.sent_at > now() - interval '1 minute' OR (x.state = 'WAITING' AND x.waiting_reason = 'SENDING' AND x.next_attempt_at > now()))) >= ch.pace_per_minute
+     ),
+     due AS (
        SELECT m.id, m.next_attempt_at, m.created_at, t.circuit_open_until,
               row_number() OVER (PARTITION BY m.template_id ORDER BY m.created_at, m.id) AS n
          FROM notification_messages m LEFT JOIN notification_templates t ON t.id = m.template_id
         WHERE (m.state = 'QUEUED' OR (m.state = 'WAITING' AND m.waiting_reason IN ('READY_TO_BE_SENT', 'WAIT_FOR_CLOSE_CIRCUIT', 'SENDING')))
           AND (($1::uuid[] IS NOT NULL AND m.id = ANY($1::uuid[])) OR ($1::uuid[] IS NULL AND m.next_attempt_at <= now()))
+          AND m.type NOT IN (SELECT channel FROM paced)
      )
      SELECT m.* FROM notification_messages m JOIN due ON due.id = m.id
       WHERE due.circuit_open_until IS NULL OR (due.circuit_open_until <= now() AND due.n = 1)
@@ -191,17 +266,25 @@ function failureOf(out) {
   return ['INVALID_HTTP_RESPONSE', `HTTP ${out.status}: ${String(out.body || '').slice(0, 500)}`];
 }
 
+/** A webhook's answer as an outcome: { ok, status, reason, cause, permanent }. */
+function webhookOutcome(out) {
+  if (!out.error && out.status >= 200 && out.status < 300) return { ok: true, status: out.status };
+  const [reason, cause] = failureOf(out);
+  return { ok: false, status: out.status || null, reason, cause, permanent: false };
+}
+
 async function record(c, m, out) {
   // Only the holder of the lease records an outcome: a message whose lease ran out was given to another pass.
   const { rows: [held] } = await c.query(
     "SELECT 1 FROM notification_messages WHERE id = $1 AND waiting_reason = 'SENDING' AND next_attempt_at = $2 FOR UPDATE", [m.id, m.next_attempt_at]);
   if (!held) return 'LEASE_LOST';
-  const ok = !out.error && out.status >= 200 && out.status < 300;
-  if (ok) {
+  const webhook = m.type === 'WEB_HOOK';
+  if (out.ok) {
     await c.query(
       `UPDATE notification_messages SET state = 'SENT', waiting_reason = NULL, sent_at = now(), response_status = $2,
-         first_attempt_at = COALESCE(first_attempt_at, now()), failure_reason = NULL, failure_cause = NULL WHERE id = $1`, [m.id, out.status]);
-    if (m.template_id) {
+         first_attempt_at = COALESCE(first_attempt_at, now()), failure_reason = NULL, failure_cause = NULL WHERE id = $1`, [m.id, out.status || null]);
+    if (m.template_id && !webhook) await c.query('UPDATE notification_templates SET last_sent_at = now() WHERE id = $1', [m.template_id]);
+    if (m.template_id && webhook) {
       await c.query(`UPDATE notification_templates SET last_sent_at = now(), consecutive_failures = 0, circuit_open_until = NULL WHERE id = $1`, [m.template_id]);
       // The circuit closed: what waited for it is sent from the next pass.
       await c.query(`UPDATE notification_messages SET state = 'QUEUED', waiting_reason = NULL
@@ -209,16 +292,17 @@ async function record(c, m, out) {
     }
     return 'SENT';
   }
-  const [reason, cause] = failureOf(out);
+  const { reason, cause } = out;
   const retries = m.num_retries + 1;
   const first = m.first_attempt_at ? new Date(m.first_attempt_at) : new Date();
-  const final = retries > RETRY_MINUTES.length || m.test;
+  const final = retries > RETRY_MINUTES.length || m.test || out.permanent;
   const next = final ? null : new Date(first.getTime() + RETRY_MINUTES[retries - 1] * 60_000);
   await c.query(
     `UPDATE notification_messages SET state = $2, waiting_reason = NULL, num_retries = $3, failure_reason = $4, failure_cause = $5,
        response_status = $6, first_attempt_at = $7, next_attempt_at = COALESCE($8, next_attempt_at) WHERE id = $1`,
     [m.id, final ? 'FAILED' : 'QUEUED', retries, reason, cause, out.status || null, first, next]);
-  if (m.template_id && !m.test) {
+  // The circuit breaker is a webhook's: an endpoint that keeps failing.
+  if (m.template_id && !m.test && webhook) {
     await c.query(
       `UPDATE notification_templates SET consecutive_failures = consecutive_failures + 1,
          circuit_open_until = CASE WHEN consecutive_failures + 1 >= $2 THEN now() + make_interval(mins => $3) ELSE circuit_open_until END
@@ -227,7 +311,27 @@ async function record(c, m, out) {
   return final ? 'FAILED' : 'QUEUED';
 }
 
+/** An email, sent through the SACCO's mail server; the switch off fails it with the reason. */
+async function sendEmail(schema, m) {
+  const ready = await withTenant(schema, (c) => CH.ready(c, 'EMAIL'));
+  let out;
+  if (!ready) out = { ok: false, reason: 'EMAIL_SERVICE_NOT_ENABLED', cause: 'Email is switched off or not set up for this SACCO', permanent: true };
+  else {
+    // Whatever goes wrong here is recorded on the message, so one bad message cannot stop the queue.
+    try {
+      out = await ready.module.send(ready.settings, ready.secret, {
+        to: m.destination, subject: m.subject || '', html: m.body || '', text: R.textOf(m.body || ''), id: m.idempotency_key,
+      });
+    } catch (e) {
+      out = { ok: false, reason: 'MESSAGING_EXCEPTION', cause: String(e.message || e).slice(0, 500), permanent: true };
+    }
+  }
+  const state = await withTenant(schema, (c) => record(c, m, out));
+  return { id: m.id, state, error: out.ok ? null : `${out.reason}: ${out.cause}` };
+}
+
 async function sendOne(schema, m) {
+  if (m.type === 'EMAIL') return sendEmail(schema, m);
   const ctx = await withTenant(schema, async (c) => {
     const { rows: [t] } = m.template_id ? await c.query('SELECT * FROM notification_templates WHERE id = $1', [m.template_id]) : { rows: [] };
     const { rows: [s] } = await c.query('SELECT webhook_state FROM notification_settings WHERE id');
@@ -252,7 +356,7 @@ async function sendOne(schema, m) {
   } catch (e) {
     out = { error: /MUST_BE_PUBLIC|PRIVATE/.test(e.message) ? `EPRIVATE ${e.message}` : e.message };
   }
-  const state = await withTenant(schema, (c) => record(c, m, out));
+  const state = await withTenant(schema, (c) => record(c, m, webhookOutcome(out)));
   return { id: m.id, state, status: out.status || null, error: out.error || null };
 }
 
@@ -286,8 +390,9 @@ async function reminders(c) {
         data: { installmentNumber: r.number } };
       const values = await CTX.build(c, e);
       if (!meets(t, values)) continue;
-      await queueFor(c, t, e, values);
-      n += 1;
+      if (t.type === 'EMAIL') n += await queueEmails(c, t, e, values);
+      else if (t.type === 'EVENT_STREAM') { await publish(c, t, e, values); n += 1; }
+      else { await queueFor(c, t, e, values); n += 1; }
     }
   }
   return n;
@@ -389,4 +494,4 @@ async function testTemplate(schema, id, { actor }) {
   return withTenant(schema, async (c) => (await c.query('SELECT * FROM notification_messages WHERE id = $1', [m.id])).rows[0]);
 }
 
-module.exports = { runTenant, runAll, afterRequest, forget, testTemplate, meets, publish, RETRY_MINUTES };
+module.exports = { runTenant, runAll, afterRequest, forget, testTemplate, meets, publish, queueEmail, sendDue, RETRY_MINUTES };
