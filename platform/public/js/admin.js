@@ -25,12 +25,14 @@ import { messagesView, webhooksView } from './webhooks.js';
 import { streamTemplatesView, subscriptionsView } from './streaming.js';
 import { emailSettingsView, emailTemplatesView } from './email.js';
 import { smsSettingsView, smsTemplatesView } from './sms.js';
+import { gettingStartedView, sandboxView } from './sandbox.js';
 
 const GENERAL = ['details', 'branding', 'eod', 'holidays', 'channels', 'idTemplates', 'rates', 'currencies'];
 
 // Each tab's screens: [label, render].
 const PARTS = {
   general: [['General Setup', () => orgView({ only: GENERAL })]],
+  start: [['Getting Started', () => gettingStartedView()]],
   clients: [['Client Setup', () => orgView({ only: ['clients'] })]],
   accounting: [['Accounting Setup', () => accountingView({ only: ['rules', 'closures'] })]],
   organization: [['Branches and Centres', () => orgView({ only: ['branches'] })]],
@@ -44,6 +46,7 @@ const PARTS = {
   sms: [['SMS Templates', () => smsTemplatesView()], ['Settings', () => smsSettingsView()]],
   templates: [['Report Templates', () => reportsView({ which: 'templates' })], ['Product Documents', () => orgView({ only: ['documents'] })]],
   reports: [['Regulatory Return Templates', () => returnsView()]],
+  sandbox: [['Sandbox', () => sandboxView()]],
   data: [['Import, Backups, Data Dictionary, Extract', () => dataView()]],
 };
 

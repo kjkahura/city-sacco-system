@@ -45,6 +45,8 @@ async function backupTenant(slug, { dir = DIR } = {}) {
   if (!rows.length) throw Object.assign(new Error('TENANT_NOT_FOUND'), { status: 404 });
   const t = rows[0];
   assertSchemaName(t.schema_name);
+  // Sandboxes are not backed up (they hold no live data).
+  if (t.environment === 'SANDBOX') throw Object.assign(new Error(`A_SANDBOX_IS_NOT_BACKED_UP: ${slug}`), { status: 409 });
 
   fs.mkdirSync(path.join(dir, slug), { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -119,9 +121,14 @@ async function backupTenant(slug, { dir = DIR } = {}) {
   }
 }
 
+/** The tenants the nightly backup takes: active production tenants. A sandbox is not backed up (the reference platform). */
+async function backupTargets() {
+  const { rows } = await pool.query("SELECT slug FROM platform.tenants WHERE status = 'ACTIVE' AND environment = 'PRODUCTION' ORDER BY slug");
+  return rows.map((r) => r.slug);
+}
+
 async function backupAll({ dir = DIR, concurrency = 2 } = {}) {
-  const { rows } = await pool.query(
-    "SELECT slug FROM platform.tenants WHERE status = 'ACTIVE' ORDER BY slug");
+  const rows = (await backupTargets()).map((slug) => ({ slug }));
   const results = [];
   for (let i = 0; i < rows.length; i += concurrency) {
     const batch = rows.slice(i, i + concurrency);
@@ -295,5 +302,4 @@ function keyReport({ dir = DIR } = {}) {
 
 module.exports = {
   backupTenant, backupAll, restoreTenant, prune, verifyLatest,
-  rekeyAll, keyReport, DIR, crypt, offsite,
-};
+  rekeyAll, keyReport, DIR, crypt, offsite, backupTargets };

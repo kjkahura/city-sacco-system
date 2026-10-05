@@ -29,6 +29,10 @@ app.set('trust proxy', /^\d+$/.test(TRUST || '') ? Number(TRUST) : TRUST === 'tr
 // ---------------------------------------------------------------------------
 // Unauthenticated
 // ---------------------------------------------------------------------------
+// The reference platform's health check, at the tenant's address or the platform's.
+app.get('/healthcheck', async (_req, res) => {
+  try { await pool.query('SELECT 1'); res.json({ status: 'UP' }); } catch { res.status(503).json({ status: 'DOWN' }); }
+});
 app.get('/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1');
@@ -95,6 +99,10 @@ admin.post('/tenants', async (req, res, next) => {
   try { res.status(201).json(await provision.provisionTenant(req.body || {})); } catch (e) { next(e); }
 });
 admin.get('/migrations/drift', wrap(() => drift()));
+// A tenant's sandbox, for platform administrators: { kind: CREATE | RESET | CLONE | DELETE, anonymize, adminEmail }.
+admin.get('/tenants/:slug/sandbox', wrap((req) => require('./tenancy/sandbox').status(req.params.slug)));
+admin.post('/tenants/:slug/sandbox', wrap((req) => require('./tenancy/sandbox').request(req.params.slug, String(req.body?.kind || '').toUpperCase(),
+  { actor: req.auth?.email, adminEmail: req.body?.adminEmail, anonymize: req.body?.anonymize === undefined ? true : req.body.anonymize })));
 admin.get('/limits', wrap(() => stats()));
 
 admin.post('/eod/run', wrap((req) => eod.runAll(req.body || {})));
@@ -117,6 +125,8 @@ const tenantApi = express.Router();
 // The reference platform's null handling, on request (./lib/apiStandards).
 tenantApi.use(nullHandling());
 tenantApi.use(resolveTenant({ required: true }));
+// Which environment answered: PRODUCTION, or SANDBOX for a SACCO's sandbox (tenancy/sandbox).
+tenantApi.use((req, res, next) => { res.set('X-Environment', req.tenant?.environment || 'PRODUCTION'); next(); });
 tenantApi.use(auditTrail.recorder());
 // After a request that changed something, deliver the webhooks it raised (domain/notifications/dispatch).
 tenantApi.use((req, res, next) => {
@@ -206,6 +216,12 @@ tenantApi.post('/notificationsettings/email\\:test', ...notifications.emailTest)
 tenantApi.post('/notificationsettings/sms\\:test', ...notifications.smsTest);
 tenantApi.post('/notificationsettings/sms\\:callbackToken', ...notifications.smsCallbackToken);
 tenantApi.use('/notificationsettings', notifications.settings);
+// The SACCO's sandbox (tenancy/sandbox) and Getting Started.
+const sandbox = require('./routes/sandbox');
+tenantApi.post('/sandbox\\:reset', ...sandbox.reset);
+tenantApi.post('/sandbox\\:clone', ...sandbox.clone);
+tenantApi.use('/sandbox', sandbox.router);
+tenantApi.get('/setup-checklist', ...require('./lib/handlers').run((c) => require('./domain/setupChecklist').checklist(c)));
 
 const savings = require('./routes/savings');
 tenantApi.use('/savings', savings);

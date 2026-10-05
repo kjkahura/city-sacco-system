@@ -102,6 +102,7 @@ const SOON = (what) => `${what} is being built. This tab will hold its settings 
 
 export const ADMIN_TABS = [
   { key: 'general', label: 'General Setup', perms: ['MANAGE_GENERAL_SETUP', 'MANAGE_HOLIDAYS', 'MANAGE_CURRENCIES', 'MANAGE_INDEX_RATES', 'MANAGE_EOD_PROCESSING'] },
+  { key: 'start', label: 'Getting Started', perms: ['MANAGE_GENERAL_SETUP'] },
   { key: 'clients', label: 'Client Setup', perms: ['MANAGE_GENERAL_SETUP'] },
   { key: 'accounting', label: 'Accounting Setup', perms: ['MANAGE_INTERBRANCH_GLACCOUNT_RULES', 'MAKE_ACCOUNTING_CLOSURE', 'CREATE_ACCOUNTING_RATES'] },
   { key: 'organization', label: 'Organization', perms: ['EDIT_BRANCH', 'MANAGE_GENERAL_SETUP'] },
@@ -117,6 +118,7 @@ export const ADMIN_TABS = [
   { key: 'reports', label: 'Reports', perms: ['MANAGE_RETURNS'] },
   { key: 'apps', label: 'Apps', perms: ['MANAGE_GENERAL_SETUP'],
     placeholder: SOON('Apps: add-ons from other providers, connected with their own API consumer and permissions,') },
+  { key: 'sandbox', label: 'Sandbox', admin: true },
   { key: 'data', label: 'Data', perms: ['IMPORT_DATA', 'DOWNLOAD_BACKUPS', 'VIEW_DATA_IMPORTS', 'EXTRACT_DATA'] },
 ];
 
@@ -147,7 +149,8 @@ export function visibleMenus(can) {
   return out;
 }
 
-export const visibleTabs = (can) => ADMIN_TABS.filter((t) => allowed(can, t.perms));
+// A tab marked admin is for the SACCO's administrators only (can() with no permission is true for them alone).
+export const visibleTabs = (can) => ADMIN_TABS.filter((t) => (t.admin ? can() : allowed(can, t.perms)));
 export const visibleRight = (can) => RIGHT.filter((e) => allowed(can, e.perms));
 
 const HASH_KEYS = ['state', 'type', 'tab', 'which', 'only'];

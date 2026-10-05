@@ -157,6 +157,9 @@ const RULES = [
   ['GET', '/clients/:id/notification-subscriptions', V_MEMBER], ['PUT', '/clients/:id/notification-subscriptions/:templateId', 'EDIT_CLIENT'],
   ['GET', '/groups/:id/notification-subscriptions', V_MEMBER], ['PUT', '/groups/:id/notification-subscriptions/:templateId', 'EDIT_GROUP'],
   ['GET', '/communications/email-templates', 'SEND_MANUAL_EMAIL'],
+  // The sandbox (the reference platform keeps it to administrators) and Getting Started.
+  ['GET', '/sandbox', ADMIN], ['POST', '/sandbox', ADMIN], ['DELETE', '/sandbox', ADMIN], ['POST', '/sandbox:reset', ADMIN], ['POST', '/sandbox:clone', ADMIN],
+  ['GET', '/setup-checklist', 'MANAGE_GENERAL_SETUP'],
   // SMS: as email, with the providers' fields and the delivery report address.
   ['GET', '/notificationsettings/sms', TEMPLATES_VIEW], ['GET', '/notificationsettings/sms/providers', TEMPLATES_VIEW],
   ['PUT', '/notificationsettings/sms', ADMIN], ['POST', '/notificationsettings/sms:test', ADMIN], ['POST', '/notificationsettings/sms:callbackToken', ADMIN],
@@ -398,6 +401,7 @@ const CRITICAL = [
   ['PATCH', '/loans/controls'], ['PATCH', '/loans/controls/users/:userId'],
   ['DELETE', '/members/:id'], ['DELETE', '/clients/:id'], ['DELETE', '/groups/:id'], ['POST', '/members/:id/anonymize'],
   ['PATCH', '/client-controls'],
+  ['POST', '/sandbox'], ['DELETE', '/sandbox'], ['POST', '/sandbox:reset'], ['POST', '/sandbox:clone'],
 ].map(([m, pth], i) => compile([m, pth, null], i));
 
 function isCritical(method, path) {

@@ -54,6 +54,23 @@ class ApiClient {
     return h;
   }
 
+  /** The "Sandbox Environment" bar, shown while the portal talks to a sandbox (the X-Environment header). */
+  markEnvironment(env) {
+    if (!env) return;
+    let bar = document.getElementById('env-banner');
+    if (!bar) {
+      if (env !== 'SANDBOX') return;
+      bar = document.createElement('div');
+      bar.id = 'env-banner';
+      bar.className = 'env-banner';
+      bar.setAttribute('role', 'status');
+      bar.textContent = 'Sandbox Environment';
+      document.body.appendChild(bar);
+    }
+    bar.hidden = env !== 'SANDBOX';
+    document.body.classList.toggle('sandbox', env === 'SANDBOX');
+  }
+
   showLoading(show) {
     const spinner = document.getElementById('loading-spinner');
     if (spinner) spinner.hidden = !show;
@@ -92,6 +109,7 @@ class ApiClient {
       });
       let data = null;
       try { data = await response.json(); } catch { /* no body */ }
+      this.markEnvironment(response.headers.get('x-environment'));
 
       if (response.status === 401 && retry && this.refresh && !endpoint.startsWith('/auth/')) {
         if (await this.refreshSession()) {

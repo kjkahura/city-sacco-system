@@ -166,6 +166,8 @@ The same job sends emails through each SACCO's own mail server. Cloud Run allows
 
 The job sends SMS through each SACCO's gateway too. Gateways post delivery reports to `/hooks/sms/<tenant>/<token>` on the service. Set `PUBLIC_BASE_URL` (for example `https://app.example.com`) so the address shown to administrators uses the public host.
 
+The job also runs queued sandbox operations (create, reset, clone and delete). A clone of a large SACCO can take longer than a minute; runs that overlap do not start the same operation twice, and `npm run cli sandbox:run` runs them by hand. Sandboxes are left out of the nightly backup and offsite copies.
+
 The same job publishes events to the streaming templates' topics, so a stream reader sees an event within about a minute of the change, or at once when the request's own pass runs. Event streams are long requests: each ends after 55 seconds (`STREAM_MAX_SECONDS`), inside the service's 60-second timeout and Firebase Hosting's limit, and the reader reconnects from its cursor. To allow longer streams, raise the Cloud Run timeout and `STREAM_MAX_SECONDS` together, and have readers use the `run.app` address. A stream does not hold one of the tenant's request slots while it waits, but it does hold a connection on the instance.
 
 ## 7. The custom domain on Cloudflare (when you have one)

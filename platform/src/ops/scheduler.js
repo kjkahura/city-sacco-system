@@ -114,6 +114,8 @@ function start({ intervalMs = 15 * 60_000, log = console.log } = {}) {
   notifyTimer = setInterval(() => {
     withGlobalLock('notifications', () => require('../domain/notifications/dispatch').runAll({}))
       .catch((e) => log('[scheduler] notifications error', e.message));
+    // Queued sandbox operations (tenancy/sandbox), also those whose request's own run never started.
+    require('../tenancy/sandbox').runPending().catch((e) => log('[scheduler] sandbox error', e.message));
   }, 60_000);
   notifyTimer.unref();
   return timer;

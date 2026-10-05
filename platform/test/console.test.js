@@ -18,6 +18,7 @@
 // Webhooks sent from the console checks go nowhere reachable; keep their wait short and do not send after requests.
 process.env.NOTIFY_TIMEOUT_MS = '1500';
 process.env.NOTIFY_AFTER_REQUEST = 'off';
+process.env.SANDBOX_AFTER_REQUEST = 'off';
 
 let playwright;
 try {
@@ -144,7 +145,7 @@ const T = (fn) => withTenant(SCHEMA, fn);
       };
     });
     check('13 top menus', md.top.length === 13 && md.full === 13, md.top.join());
-    check('16 Administration tabs', md.tabs === 16);
+    check('18 Administration tabs', md.tabs === 18);
     check('a user with no permissions still has the Dashboard', md.hidden.includes('dashboard') && !md.hidden.includes('loanTransactions'), md.hidden.join());
     check('a filter round-trips through the hash', md.hash === '#loans/IN_ARREARS' && md.back.view === 'loans' && md.back.filter.state === 'IN_ARREARS', JSON.stringify(md.back));
     check('a bad hash opens the dashboard', md.bad.view === 'dashboard' && md.badValue.view === 'dashboard', JSON.stringify([md.bad, md.badValue]));
@@ -256,8 +257,8 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.click('#nav [data-entry="right.admin"]');
     await page.waitForSelector('#subnav [data-tab]');
     await page.waitForFunction(() => location.hash === '#admin/general', null, { timeout: 5000 }).catch(() => {});
-    check('the cog opens Administration at General Setup, with its 16 tabs', await page.evaluate(() => location.hash) === '#admin/general'
-      && (await page.$$('#subnav [data-tab]')).length === 16, await page.evaluate(() => location.hash));
+    check('the cog opens Administration at General Setup, with its 18 tabs', await page.evaluate(() => location.hash) === '#admin/general'
+      && (await page.$$('#subnav [data-tab]')).length === 18, await page.evaluate(() => location.hash));
     await openMenu(page, 'administration');
     await page.waitForFunction(() => location.hash === '#admin/general', null, { timeout: 5000 }).catch(() => {});
     check('so does the Administration menu', await page.evaluate(() => location.hash) === '#admin/general', await page.evaluate(() => location.hash));
@@ -1208,6 +1209,36 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.waitForSelector('#sms-send-result');
     check('Send SMS from the member page shows the outcome', /SMS|FAILED|SENT|QUEUED|SMS_SERVICE_NOT_ENABLED/.test(await page.textContent('#sms-send-result')), await page.textContent('#sms-send-result'));
     await page.click('#dlg-close');
+
+    section('getting started and sandbox');
+    await openAdmin(page, 'start');
+    await page.waitForSelector('#gs-steps');
+    const gsText = await page.textContent('#gs-steps');
+    check('Getting Started lists the setup steps with their state and a link to each', /Branches/.test(gsText) && /done/i.test(gsText)
+      && (await page.$$('#gs-steps [data-screen]')).length >= 10, gsText.slice(0, 200));
+    check('a production session shows no sandbox bar', !(await page.isVisible('#env-banner')));
+    await page.click('#gs-steps [data-screen="members"]');
+    await page.waitForFunction(() => location.hash === '#members');
+    check('a step\'s link opens its page', true);
+    await openAdmin(page, 'sandbox');
+    await page.waitForSelector('#sbx-status');
+    check('the Sandbox tab says there is none yet', /no sandbox/i.test(await page.textContent('#sbx-status')));
+    page.once('dialog', (d) => d.accept());
+    await page.click('#sbx-create');
+    await page.waitForSelector('#sbx-password');
+    check('creating one shows the administrator\'s temporary password once', (await page.textContent('#sbx-password')).trim().length >= 16);
+    await page.click('#dlg-close');
+    await require('../src/tenancy/sandbox').runPending();
+    await openAdmin(page, 'sandbox');
+    await page.waitForFunction(() => /ready/i.test(document.getElementById('sbx-status')?.textContent || ''));
+    check('once run, the sandbox is ready, with its name and the last operation', /uitest_sbx/.test(await page.textContent('#sbx-status')));
+    await page.evaluate(async () => (await import('/console/js/base.js')).markEnvironment('SANDBOX'));
+    check('in a sandbox, every page carries the Sandbox Environment bar', await page.isVisible('#env-banner') && /Sandbox Environment/.test(await page.textContent('#env-banner')));
+    await page.evaluate(async () => (await import('/console/js/base.js')).markEnvironment('PRODUCTION'));
+    page.once('dialog', (d) => d.accept());
+    await page.click('#sbx-delete');
+    await page.waitForFunction(() => /queued|deleting/i.test(document.getElementById('sbx-status')?.textContent || ''));
+    await require('../src/tenancy/sandbox').runPending();
 
     section('access administration');
     await openAdmin(page, 'access', 1);

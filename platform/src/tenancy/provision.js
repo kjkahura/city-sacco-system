@@ -86,6 +86,46 @@ const SEED_CHANNELS = [
   ['transfer', 'Deposit account transfer', 'INTERNAL', '290-210'],
 ];
 
+/** The seeds a new book starts with: the chart of accounts, channels, and one savings, loan and share product. */
+async function seedTenantSchema(schemaName) {
+  await withTenant(schemaName, async (c) => {
+    for (const [code, gname, type, regClass] of SEED_GL) {
+      await c.query(
+        `INSERT INTO gl_accounts (code, name, type, regulatory_class)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT (code) DO UPDATE SET regulatory_class = EXCLUDED.regulatory_class`,
+        [code, gname, type, regClass]
+      );
+    }
+    for (const [k, [id, cname, ctype, gl]] of SEED_CHANNELS.entries()) {
+      await c.query(
+        'INSERT INTO transaction_channels (id, name, channel_type, gl_account_code, sort_order) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING',
+        [id, cname, ctype, gl, k + 1]
+      );
+    }
+    // Cash is the predefined channel: it can be renamed, not deleted or deactivated (the reference platform).
+    await c.query("UPDATE transaction_channels SET is_default = true WHERE id = 'cash'");
+    await c.query(
+      `INSERT INTO savings_products (id, name, annual_rate, gl_liability, gl_interest_exp, gl_fee_inc)
+       VALUES ('SAV01','Ordinary Savings',4.000,'200-100','500-100','400-200') ON CONFLICT DO NOTHING`
+    );
+    await c.query(
+      `INSERT INTO loan_products (id, name, method, monthly_rate, max_term, processing_fee, gl_portfolio, gl_interest_inc, gl_fee_inc)
+       VALUES ('NL01','Normal Loan','FLAT',1.000,60,1000,'100-100','400-100','400-200') ON CONFLICT DO NOTHING`
+    );
+    await c.query(
+      `INSERT INTO share_products (id, name, unit_price, min_units, gl_equity)
+       VALUES ('SHR01','Ordinary Shares',100,10,'300-100') ON CONFLICT DO NOTHING`
+    );
+    // The control accounts the seeded products post to take no manual
+    // journal entries, as migration 041 sets for existing tenants.
+    await c.query(
+      `UPDATE gl_accounts SET allow_manual_entries = false
+        WHERE code IN (SELECT gl_portfolio FROM loan_products UNION SELECT gl_liability FROM savings_products
+                       UNION SELECT gl_od_portfolio FROM savings_products WHERE gl_od_portfolio IS NOT NULL)`);
+  });
+}
+
 /**
  * Create a tenant: register it, build its schema, migrate it, seed the
  * chart of accounts and channels, and create the first admin.
@@ -99,6 +139,8 @@ async function provisionTenant({
   mfaRequiredRoles = null,   // null keeps the secure default (TENANT_ADMIN)
   adminEmail, adminPassword, adminName,
 }) {
+  // `<slug>_sbx` is the name of a SACCO's sandbox (tenancy/sandbox).
+  if (/_sbx$/.test(String(slug))) throw Object.assign(new Error(`SLUG_RESERVED: names ending in _sbx are for sandboxes`), { status: 400 });
   const schemaName = toSchemaName(slug);
   if (!adminEmail || !adminPassword) {
     throw new TenantError('adminEmail and adminPassword are required', 400);
@@ -133,42 +175,7 @@ async function provisionTenant({
   try {
     await migrateTenant(schemaName);
 
-    await withTenant(schemaName, async (c) => {
-      for (const [code, gname, type, regClass] of SEED_GL) {
-        await c.query(
-          `INSERT INTO gl_accounts (code, name, type, regulatory_class)
-           VALUES ($1,$2,$3,$4)
-           ON CONFLICT (code) DO UPDATE SET regulatory_class = EXCLUDED.regulatory_class`,
-          [code, gname, type, regClass]
-        );
-      }
-      for (const [k, [id, cname, ctype, gl]] of SEED_CHANNELS.entries()) {
-        await c.query(
-          'INSERT INTO transaction_channels (id, name, channel_type, gl_account_code, sort_order) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING',
-          [id, cname, ctype, gl, k + 1]
-        );
-      }
-      // Cash is the predefined channel: it can be renamed, not deleted or deactivated (the reference platform).
-      await c.query("UPDATE transaction_channels SET is_default = true WHERE id = 'cash'");
-      await c.query(
-        `INSERT INTO savings_products (id, name, annual_rate, gl_liability, gl_interest_exp, gl_fee_inc)
-         VALUES ('SAV01','Ordinary Savings',4.000,'200-100','500-100','400-200') ON CONFLICT DO NOTHING`
-      );
-      await c.query(
-        `INSERT INTO loan_products (id, name, method, monthly_rate, max_term, processing_fee, gl_portfolio, gl_interest_inc, gl_fee_inc)
-         VALUES ('NL01','Normal Loan','FLAT',1.000,60,1000,'100-100','400-100','400-200') ON CONFLICT DO NOTHING`
-      );
-      await c.query(
-        `INSERT INTO share_products (id, name, unit_price, min_units, gl_equity)
-         VALUES ('SHR01','Ordinary Shares',100,10,'300-100') ON CONFLICT DO NOTHING`
-      );
-      // The control accounts the seeded products post to take no manual
-      // journal entries, as migration 041 sets for existing tenants.
-      await c.query(
-        `UPDATE gl_accounts SET allow_manual_entries = false
-          WHERE code IN (SELECT gl_portfolio FROM loan_products UNION SELECT gl_liability FROM savings_products
-                         UNION SELECT gl_od_portfolio FROM savings_products WHERE gl_od_portfolio IS NOT NULL)`);
-    });
+    await seedTenantSchema(schemaName);
 
     const hash = await hashPassword(adminPassword);
     await pool.query(
@@ -225,6 +232,6 @@ async function getTenantBySlug(slug) {
 }
 
 module.exports = {
-  provisionTenant, deprovisionTenant, listTenants, getTenantBySlug,
-  toSchemaName, SLUG_RE, RESERVED,
+  provisionTenant, seedTenantSchema, deprovisionTenant, listTenants, getTenantBySlug,
+  toSchemaName, SLUG_RE, RESERVED, SEED_GL,
 };

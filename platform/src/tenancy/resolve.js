@@ -30,7 +30,7 @@ async function lookupTenant(slug) {
   // quietly fell back to the global defaults.
   const { rows } = await pool.query(
     `SELECT id, slug, schema_name, name, status, currency_code, timezone,
-            max_concurrent_queries, rate_limit_per_min, mfa_required_roles
+            max_concurrent_queries, rate_limit_per_min, mfa_required_roles, environment
      FROM platform.tenants WHERE slug = $1`,
     [slug]
   );

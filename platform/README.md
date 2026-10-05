@@ -160,6 +160,23 @@ After the reference platform's SMS notifications (`docs/audits/audit-sms.md`). P
 - **Manual SMS:** Send SMS on member, group, loan and deposit pages, or `POST /api/communications/messages:sendSms`. It needs SEND_MANUAL_SMS (managers and administrators).
 - **Subscriptions:** as for email, on the member and group pages and in the portal's Settings.
 
+## Getting started and the sandbox
+
+- **Getting Started** (Administration > Getting Started, `GET /api/setup-checklist`): the setup steps of a new SACCO, roughly in order. Each step's state is read from the book: `DONE`, `DEFAULT` (the seeded defaults are in place) or `TODO`, with a link to the page where it is done.
+- **The sandbox** (`src/tenancy/sandbox.js`, platform migration 015):
+  - a second tenant, `<slug>_sbx`, with `environment` `SANDBOX` and a link to its production tenant; one per SACCO, on the same release;
+  - operations: create (empty), reset (empty again), clone (members anonymized by default, or production data as is) and delete. They are queued in `platform.sandbox_operations`, one open at a time, and run straight after the request, by the scheduler's minute pass, by `cli notifications:run` (the `sacco-notify` job) and by `cli sandbox:run`;
+  - a clone migrates a new schema, then copies every table with user triggers off and sets the sequences. It leaves out the notification queues, stream records, idempotency records, member credentials and sessions, and the backup list;
+  - staff users are copied without passwords or second factors. The requester becomes the sandbox's administrator with a temporary password shown once, changed at the first sign-in;
+  - after every operation, webhooks, email and SMS are off in the sandbox, their secrets are dropped and each webhook is switched off, so none reaches production's receivers;
+  - a clone reads production in one snapshot and anonymizes in the same transaction, so production's personal data is never committed to the sandbox when anonymizing. A runner that stops mid-operation leaves it to be marked failed by the next run;
+  - the sandbox takes production's access preferences and second-factor rules at every operation, and sandbox operations ask for the password again when re-authentication is on;
+  - sandboxes are not backed up;
+  - every tenant answer carries `X-Environment: PRODUCTION` or `SANDBOX`, and the console and portal show a "Sandbox Environment" bar in a sandbox.
+- **Who manages it:** tenant administrators from Administration > Sandbox (`GET`, `POST` and `DELETE /api/sandbox`, `POST /api/sandbox:reset`, `POST /api/sandbox:clone`), and platform administrators from `/admin/tenants/:slug/sandbox` and `cli sandbox:request --slug <slug> --kind CREATE|RESET|CLONE|DELETE [--anonymize false] --admin-email <email>`.
+- **`GET /healthcheck`** answers `{"status": "UP"}`, or 503 with `DOWN`, for integrators and load balancers.
+- **For integrators:** `docs/developer-guide.md`.
+
 ## Why schema per tenant
 
 | | Shared schema + RLS | **Schema per tenant** | Database per tenant |

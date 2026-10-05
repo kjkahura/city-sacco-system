@@ -297,7 +297,21 @@ const COMMANDS = {
   async 'notifications:run'() {
     const out = await require('../src/domain/notifications/dispatch').runAll({ log: console.log });
     console.log(`${out.length} tenant(s) with webhooks`);
+    // The same job runs queued sandbox operations (tenancy/sandbox).
+    for (const op of await require('../src/tenancy/sandbox').runPending()) console.log(`  sandbox ${op.kind} ${op.state}: ${op.detail}`);
     if (out.some((r) => r.error)) process.exitCode = 1;
+  },
+
+  // Sandboxes: run what is queued, or queue an operation.
+  //   cli sandbox:run
+  //   cli sandbox:request --slug citysacco --kind CLONE [--anonymize false] --admin-email admin@example.org
+  async 'sandbox:run'() {
+    for (const op of await require('../src/tenancy/sandbox').runPending()) console.log(`${op.kind} ${op.state}: ${op.detail}`);
+  },
+  async 'sandbox:request'() {
+    const out = await require('../src/tenancy/sandbox').request(arg('slug'), String(arg('kind') || '').toUpperCase(),
+      { actor: 'cli', adminEmail: arg('admin-email'), anonymize: arg('anonymize') !== 'false' });
+    console.log(JSON.stringify(out, null, 2));
   },
 
   async 'tokens:prune'() {

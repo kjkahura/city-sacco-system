@@ -847,3 +847,14 @@ html, body {
 /* Email notifications in Settings */
 .check-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0; }
 .settings-card .hint { color: #6b7280; font-size: 0.875rem; }
+
+/* sandbox ---------------------------------------------------------------- */
+.env-banner {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000;
+  background: #1d4ed8; color: #ffffff; text-align: center;
+  font-size: 13px; font-weight: 600; padding: 4px 8px; letter-spacing: .02em;
+}
+body.sandbox { padding-bottom: 28px; }
+.gs-steps { list-style: none; padding: 0; margin: 0; }
+.gs-steps li { display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.gs-steps li .gs-title { flex: 1; }

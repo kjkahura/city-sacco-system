@@ -78,6 +78,7 @@ export async function api(method, path, body, { retry = true, reauth = true } = 
     if (await reauthenticate()) return api(method, path, body, { retry, reauth: false });
   }
 
+  markEnvironment(res.headers.get('x-environment'));
   const out = {
     ok: res.ok,
     status: res.status,
@@ -90,6 +91,26 @@ export async function api(method, path, body, { retry = true, reauth = true } = 
     if (S.timedOut) { toast('Signed out after a time without activity', true); S.timedOut = false; }
   }
   return out;
+}
+
+/**
+ * The "Sandbox Environment" bar, as on the reference platform: shown on every
+ * page while the console talks to a sandbox, from the X-Environment header.
+ */
+export function markEnvironment(env) {
+  if (!env) return;
+  let bar = el('env-banner');
+  if (!bar) {
+    if (env !== 'SANDBOX') return;
+    bar = document.createElement('div');
+    bar.id = 'env-banner';
+    bar.className = 'env-banner';
+    bar.setAttribute('role', 'status');
+    bar.textContent = 'Sandbox Environment';
+    document.body.appendChild(bar);
+  }
+  bar.hidden = env !== 'SANDBOX';
+  document.body.classList.toggle('sandbox', env === 'SANDBOX');
 }
 
 /** A file sent as the raw request body (an attachment), with the session's headers. */
