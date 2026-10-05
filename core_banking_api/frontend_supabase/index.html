@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Core Banking System - Supabase</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>🏦 Core Banking System (Supabase)</h1>
+            <div class="auth-section">
+                <div id="loginForm" class="auth-form">
+                    <input type="text" id="username" placeholder="Username" required>
+                    <input type="password" id="password" placeholder="Password" required>
+                    <button onclick="handleLogin()">Login</button>
+                </div>
+                <div id="userInfo" class="user-info" style="display: none;">
+                    <span id="userName"></span>
+                    <button onclick="handleLogout()">Logout</button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Configuration Notice -->
+        <div id="configNotice" class="notice" style="display: none;">
+            <p>⚠️ Please configure your Supabase credentials in <code>js/config.js</code></p>
+        </div>
+
+        <!-- Navigation Tabs -->
+        <nav class="tabs">
+            <button class="tab-btn active" onclick="showSection('dashboard')">Dashboard</button>
+            <button class="tab-btn" onclick="showSection('members')">Members</button>
+            <button class="tab-btn" onclick="showSection('accounts')">Accounts</button>
+            <button class="tab-btn" onclick="showSection('transactions')">Transactions</button>
+            <button class="tab-btn" onclick="showSection('loans')">Loans</button>
+        </nav>
+
+        <!-- Dashboard Section -->
+        <section id="dashboard" class="content-section active">
+            <h2>Dashboard</h2>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <h3>Total Members</h3>
+                    <p id="totalMembers">-</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Total Accounts</h3>
+                    <p id="totalAccounts">-</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Total Loans</h3>
+                    <p id="totalLoans">-</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Total Transactions</h3>
+                    <p id="totalTransactions">-</p>
+                </div>
+            </div>
+            <button onclick="loadDashboard()" class="btn-primary">Refresh Dashboard</button>
+        </section>
+
+        <!-- Members Section -->
+        <section id="members" class="content-section">
+            <h2>Member Management</h2>
+            <div class="section-header">
+                <button onclick="showAddMemberForm()" class="btn-primary">+ Add New Member</button>
+                <button onclick="loadMembers()" class="btn-secondary">Refresh</button>
+            </div>
+            
+            <!-- Add Member Form -->
+            <div id="addMemberForm" class="form-container" style="display: none;">
+                <h3>Add New Member</h3>
+                <form onsubmit="handleAddMember(event)">
+                    <input type="text" id="firstName" placeholder="First Name" required>
+                    <input type="text" id="lastName" placeholder="Last Name" required>
+                    <input type="text" id="phone" placeholder="Phone Number" required>
+                    <input type="text" id="idNumber" placeholder="ID Number" required>
+                    <input type="date" id="dateOfBirth" required>
+                    <select id="gender" required>
+                        <option value="">Select Gender</option>
+                        <option value="Male">Male</option>
+                        <option value="Female">Female</option>
+                    </select>
+                    <textarea id="address" placeholder="Address" required></textarea>
+                    <input type="text" id="occupation" placeholder="Occupation">
+                    <input type="text" id="employer" placeholder="Employer">
+                    <input type="number" id="monthlyIncome" placeholder="Monthly Income" step="0.01">
+                    <div class="form-actions">
+                        <button type="submit" class="btn-primary">Create Member</button>
+                        <button type="button" onclick="hideAddMemberForm()" class="btn-secondary">Cancel</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Members List -->
+            <div id="membersList" class="data-table">
+                <p>Loading members...</p>
+            </div>
+        </section>
+
+        <!-- Accounts Section -->
+        <section id="accounts" class="content-section">
+            <h2>Account Management</h2>
+            <div class="section-header">
+                <button onclick="showAddAccountForm()" class="btn-primary">+ Create Account</button>
+                <button onclick="loadAccounts()" class="btn-secondary">Refresh</button>
+            </div>
+
+            <!-- Add Account Form -->
+            <div id="addAccountForm" class="form-container" style="display: none;">
+                <h3>Create New Account</h3>
+                <form onsubmit="handleCreateAccount(event)">
+                    <input type="text" id="accountMemberId" placeholder="Member ID (UUID)" required>
+                    <select id="accountType" required>
+                        <option value="">Select Account Type</option>
+                        <option value="savings">Savings</option>
+                        <option value="current">Current</option>
+                        <option value="fixed_deposit">Fixed Deposit</option>
+                        <option value="share">Share</option>
+                    </select>
+                    <input type="number" id="minimumBalance" placeholder="Minimum Balance" step="0.01" value="0">
+                    <input type="number" id="interestRate" placeholder="Interest Rate (%)" step="0.0001" value="0">
+                    <div class="form-actions">
+                        <button type="submit" class="btn-primary">Create Account</button>
+                        <button type="button" onclick="hideAddAccountForm()" class="btn-secondary">Cancel</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Accounts List -->
+            <div id="accountsList" class="data-table">
+                <p>Loading accounts...</p>
+            </div>
+        </section>
+
+        <!-- Transactions Section -->
+        <section id="transactions" class="content-section">
+            <h2>Transaction Processing</h2>
+            <div class="transaction-tabs">
+                <button class="btn-primary" onclick="showTransactionForm('deposit')">Deposit</button>
+                <button class="btn-primary" onclick="showTransactionForm('withdraw')">Withdraw</button>
+                <button class="btn-primary" onclick="showTransactionForm('transfer')">Transfer</button>
+            </div>
+
+            <!-- Deposit Form -->
+            <div id="depositForm" class="form-container" style="display: none;">
+                <h3>Deposit Money</h3>
+                <form onsubmit="handleDeposit(event)">
+                    <input type="text" id="depositAccount" placeholder="Account Number" required>
+                    <input type="number" id="depositAmount" placeholder="Amount" step="0.01" required>
+                    <textarea id="depositDescription" placeholder="Description"></textarea>
+                    <button type="submit" class="btn-primary">Process Deposit</button>
+                </form>
+            </div>
+
+            <!-- Withdraw Form -->
+            <div id="withdrawForm" class="form-container" style="display: none;">
+                <h3>Withdraw Money</h3>
+                <form onsubmit="handleWithdraw(event)">
+                    <input type="text" id="withdrawAccount" placeholder="Account Number" required>
+                    <input type="number" id="withdrawAmount" placeholder="Amount" step="0.01" required>
+                    <textarea id="withdrawDescription" placeholder="Description"></textarea>
+                    <button type="submit" class="btn-primary">Process Withdrawal</button>
+                </form>
+            </div>
+
+            <!-- Transfer Form -->
+            <div id="transferForm" class="form-container" style="display: none;">
+                <h3>Transfer Money</h3>
+                <form onsubmit="handleTransfer(event)">
+                    <input type="text" id="fromAccount" placeholder="From Account Number" required>
+                    <input type="text" id="toAccount" placeholder="To Account Number" required>
+                    <input type="number" id="transferAmount" placeholder="Amount" step="0.01" required>
+                    <textarea id="transferDescription" placeholder="Description"></textarea>
+                    <button type="submit" class="btn-primary">Process Transfer</button>
+                </form>
+            </div>
+
+            <!-- Transactions List -->
+            <div id="transactionsList" class="data-table">
+                <p>Loading transactions...</p>
+            </div>
+        </section>
+
+        <!-- Loans Section -->
+        <section id="loans" class="content-section">
+            <h2>Loan Management</h2>
+            <div class="section-header">
+                <button onclick="showLoanApplicationForm()" class="btn-primary">+ Apply for Loan</button>
+                <button onclick="loadLoans()" class="btn-secondary">Refresh</button>
+            </div>
+
+            <!-- Loan Application Form -->
+            <div id="loanApplicationForm" class="form-container" style="display: none;">
+                <h3>Apply for Loan</h3>
+                <form onsubmit="handleLoanApplication(event)">
+                    <input type="text" id="loanMemberId" placeholder="Member ID (UUID)" required>
+                    <input type="text" id="loanAccountId" placeholder="Account ID (UUID)" required>
+                    <select id="loanType" required>
+                        <option value="">Select Loan Type</option>
+                        <option value="personal">Personal</option>
+                        <option value="business">Business</option>
+                        <option value="emergency">Emergency</option>
+                        <option value="education">Education</option>
+                        <option value="agriculture">Agriculture</option>
+                    </select>
+                    <input type="number" id="loanAmount" placeholder="Principal Amount" step="0.01" required>
+                    <input type="number" id="loanTerm" placeholder="Term (Months)" required>
+                    <textarea id="loanPurpose" placeholder="Purpose"></textarea>
+                    <button type="submit" class="btn-primary">Submit Application</button>
+                </form>
+            </div>
+
+            <!-- Loans List -->
+            <div id="loansList" class="data-table">
+                <p>Loading loans...</p>
+            </div>
+        </section>
+
+        <!-- Message/Notification Area -->
+        <div id="message" class="message" style="display: none;"></div>
+    </div>
+
+    <script src="js/config.js"></script>
+    <script src="js/supabase-client.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,12 @@
+{
+  "name": "core_banking_api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Python/FastAPI project - these npm scripts are shortcuts to the Python commands",
+  "scripts": {
+    "postinstall": "python -m pip install -r requirements_local.txt",
+    "start": "start_local.bat",
+    "frontend": "cd frontend && python -m http.server 8080",
+    "frontend:supabase": "cd frontend_supabase && python -m http.server 8080"
+  }
+}
