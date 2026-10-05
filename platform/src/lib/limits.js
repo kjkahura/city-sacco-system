@@ -131,6 +131,8 @@ function tenantConcurrency({ timeoutMs = 10_000 } = {}) {
     const done = () => { if (!released) { released = true; rel(); } };
     res.on('finish', done);
     res.on('close', done);
+    // A long-lived answer (an event stream) gives its slot back once it starts waiting.
+    req.releaseGate = done;
     next();
   };
 }

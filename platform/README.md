@@ -75,6 +75,32 @@ After the reference platform's notifications (`docs/audits/audit-webhooks.md`).
   - `cli notifications:run`, which the `sacco-notify` Cloud Run job runs every minute;
   - the in-process scheduler, every minute, when it is on.
 
+## Events streaming
+
+After the reference platform's Streaming API (`docs/audits/audit-events-streaming.md`).
+
+- **What it is:** a feed of the SACCO's events that other systems read at their own pace, where a webhook pushes each event to one address.
+- **Where to set it up:** Administration > Events Streaming.
+  - **Streaming Templates:** a template has the webhook's event, conditions and body, without the URL, authentication or signing. It publishes to its topic, `sacco.event.<tenant>.streamingapi.<template name in snake case>`, which is fixed when the template is made.
+  - **Subscriptions:** each subscription with its topics, committed offsets, unconsumed events and whether a stream is reading it.
+- **Publishing:** the webhook dispatcher publishes a matching event to `stream_events` in the same pass that queues webhooks (tenant migration 046). Publishers take turns until they commit, so offsets become visible in order. Streamed events are not written to the communication log. They are kept for 7 days (`STREAM_RETENTION_DAYS`).
+- **Who may read:**
+  - API consumers and users whose role has `CONSUME_EVENT_STREAMS`, and administrators;
+  - a subscription belongs to the consumer that made it: others get 404 for it, and 409 when they ask for the same application, consumer group and topics;
+  - a user limited to some branches reads only those branches' events (row security on `stream_events`).
+- **The API, at `/api/v1/subscriptions`:**
+  - `POST /` creates a subscription (201), or returns the one with the same application, consumer group and topics (200). `read_from` is `begin`, `end` (the default) or `cursors` with `initial_cursors`;
+  - `GET /:id/events` is the stream: newline-separated JSON batches, `{ cursor, events? }`, with the stream ID in the `X-Stream-Id` header;
+  - `POST /:id/cursors` commits `items` with the stream's `X-Stream-Id`: 204 when all are committed, else 200 with `committed` or `outdated` for each;
+  - `GET /:id/stats` gives unconsumed events and, with `show_time_lag=true`, the lag in seconds;
+  - `DELETE /:id`.
+- **A stream:**
+  - one partition, `"0"`; an offset is the event's number padded to 18 digits; a cursor token is signed, so a commit can only be for what that stream was sent;
+  - one stream reads a subscription at a time; a second gets 409. A stream that disconnects frees the subscription at once, and one not heard from for 10 seconds is freed too;
+  - parameters: `batch_limit` (1), `stream_limit`, `batch_flush_timeout` (30 s), `stream_timeout`, `max_uncommitted_events` (10), `stream_keep_alive_limit` and `commit_timeout` (60 s, at most 60);
+  - a stream ends after `STREAM_MAX_SECONDS` (55 by default, inside the hosting's 60-second request limit) or the shorter `stream_timeout`, and when a sent batch is not committed within `commit_timeout`. It reads the database four times a second, taking one of the tenant's request slots for each read rather than for its whole life, and writes no faster than the client reads. The client reconnects and reads on from its committed cursor, so nothing is lost;
+  - delivery is at least once, so a consumer removes duplicates by the event's `eid`.
+
 ## Why schema per tenant
 
 | | Shared schema + RLS | **Schema per tenant** | Database per tenant |

@@ -41,4 +41,7 @@ function open(stored) {
 
 const newSigningSecret = () => crypto.randomBytes(32).toString('hex');
 
-module.exports = { seal, open, newSigningSecret };
+/** An HMAC of the text under the same key, for tokens the platform hands out and checks (stream cursors). */
+const sign = (text) => crypto.createHmac('sha256', key()).update(String(text)).digest('base64url');
+
+module.exports = { seal, open, newSigningSecret, sign };

@@ -10,7 +10,7 @@ import { can } from './access.js';
 import { showDialog } from './users.js';
 
 let catalog = null;
-async function loadCatalog() {
+export async function loadCatalog() {
   if (catalog) return catalog;
   const r = await api('GET', '/api/templates/catalog');
   catalog = r.ok ? r.body : { events: {}, placeholders: [], operators: [] };
@@ -28,7 +28,7 @@ const secretDialog = (title, secret) => showDialog(title, `<p>Give this secret t
 // --------------------------------------------------------------------------
 
 export async function webhooksView() {
-  const [r, st] = await Promise.all([api('GET', '/api/templates'), admin() ? api('GET', '/api/notificationsettings/webhook') : Promise.resolve(null)]);
+  const [r, st] = await Promise.all([api('GET', '/api/templates?type=WEB_HOOK'), admin() ? api('GET', '/api/notificationsettings/webhook') : Promise.resolve(null)]);
   if (!r.ok) throw new Error(r.error);
   const on = st?.body?.state !== 'DISABLED';
   view().innerHTML = `
@@ -55,12 +55,12 @@ export async function webhooksView() {
 }
 
 const headerLines = (list) => (list || []).map((h) => `${h.key}: ${h.value}`).join('\n');
-const conditionLines = (list) => (list || []).map((f) => [f.field, f.filterElement, f.value ?? '', f.secondValue ?? ''].join(' ').trim()).join('\n');
+export const conditionLines = (list) => (list || []).map((f) => [f.field, f.filterElement, f.value ?? '', f.secondValue ?? ''].join(' ').trim()).join('\n');
 const parseHeaders = (text) => String(text || '').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
   const i = l.indexOf(':');
   return { key: l.slice(0, i).trim(), value: l.slice(i + 1).trim() };
 });
-const parseConditions = (text) => String(text || '').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
+export const parseConditions = (text) => String(text || '').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
   const [field, filterElement, value, secondValue] = l.split(/\s+/);
   return { field, filterElement, value: value ?? null, secondValue: secondValue ?? null };
 });

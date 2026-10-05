@@ -78,6 +78,7 @@ const GROUPS = [
     P('EDIT_COMMUNICATION_TEMPLATES', 'Edit templates'),
     P('VIEW_COMMUNICATION_HISTORY', 'View the communication log'),
     P('RESEND_FAILED_MESSAGES', 'Resend failed messages'),
+    P('CONSUME_EVENT_STREAMS', 'Subscribe to and read event streams'),
   ]],
   ['Clients', [
     P('VIEW_CLIENT_DETAILS', 'View members'),

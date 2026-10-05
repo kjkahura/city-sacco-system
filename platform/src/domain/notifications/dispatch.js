@@ -86,6 +86,24 @@ async function queueFor(c, t, e, values, { test = false, actor = null } = {}) {
   return m;
 }
 
+const CONTENT_TYPES = { JSON: 'application/json', XML: 'application/xml', PLAIN_TEXT: 'text/plain; charset=UTF-8' };
+
+/** Publish an event to a streaming template's topic (read by subscribers, ../streaming). */
+async function publish(c, t, e, values) {
+  let body = R.fill(t.body, values, t.content_type);
+  try { R.assertBody(body, t.content_type); } catch (x) {
+    // A body that does not parse once filled is published as the platform's own JSON, so the event is not lost.
+    body = JSON.stringify({ event: e.event, error: x.message, values: Object.fromEntries(Object.entries(values).filter(([, v]) => typeof v !== 'object')) });
+  }
+  // An offset is the row's id, taken when it is inserted but seen by readers only when its transaction
+  // commits. Publishers take turns (until commit) so a reader never sees a later offset before an
+  // earlier one and moves its cursor past an event still being written.
+  await c.query("SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':stream_events'))");
+  await c.query(
+    `INSERT INTO stream_events (topic, event, category, template_name, content_type, body, branch_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [t.topic, e.event, e.target || t.target, t.name, CONTENT_TYPES[t.content_type] || CONTENT_TYPES.JSON, body, e.branch_id || null]);
+}
+
 function wants(t, e) {
   // Only an event with more than one target (ACCOUNT_IN_ARREARS: loans or deposits) is matched on the target too.
   const targets = C.targetsOf(e.event) || [];
@@ -104,7 +122,8 @@ async function processEvents(c, limit = 500) {
       const values = await CTX.build(c, e);
       for (const t of matching) {
         if (!meets(t, values)) continue;
-        await queueFor(c, t, e, values);
+        if (t.type === 'EVENT_STREAM') await publish(c, t, e, values);
+        else await queueFor(c, t, e, values);
         queued += 1;
       }
     }
@@ -283,6 +302,7 @@ async function purge(c) {
     `UPDATE notification_messages SET body = NULL, body_cleared_at = now()
       WHERE body IS NOT NULL AND created_at < now() - make_interval(days => $1) AND state IN ('SENT', 'FAILED')`, [KEEP_BODY_DAYS]);
   await c.query(`DELETE FROM notification_events WHERE processed_at < now() - interval '30 days'`);
+  await c.query('DELETE FROM stream_events WHERE occurred_at < now() - make_interval(days => $1)', [Number(process.env.STREAM_RETENTION_DAYS || 7)]);
   return rowCount;
 }
 
@@ -361,6 +381,7 @@ async function testTemplate(schema, id, { actor }) {
   const m = await withTenant(schema, async (c) => {
     const { rows: [t] } = await c.query('SELECT * FROM notification_templates WHERE id = $1', [id]);
     if (!t) throw Object.assign(new Error('TEMPLATE_NOT_FOUND'), { status: 404 });
+    if (t.type !== 'WEB_HOOK') throw Object.assign(new Error('A_TEST_IS_SENT_FOR_A_WEBHOOK_ONLY'), { status: 400 });
     const custom = Object.fromEntries((await c.query('SELECT id FROM custom_field_definitions')).rows.map((r) => [r.id, 'sample']));
     return queueFor(c, t, { event: t.event }, { ...custom, ...C.PLACEHOLDERS, EVENT: t.event }, { test: true, actor });
   });
@@ -368,4 +389,4 @@ async function testTemplate(schema, id, { actor }) {
   return withTenant(schema, async (c) => (await c.query('SELECT * FROM notification_messages WHERE id = $1', [m.id])).rows[0]);
 }
 
-module.exports = { runTenant, runAll, afterRequest, forget, testTemplate, meets, RETRY_MINUTES };
+module.exports = { runTenant, runAll, afterRequest, forget, testTemplate, meets, publish, RETRY_MINUTES };

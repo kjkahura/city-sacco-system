@@ -15,6 +15,10 @@
  */
 
 const TABLES = {
+  stream_cursors: 'Where each event streaming subscription has committed its reading, per topic.',
+  stream_events: 'Events published to streaming topics, kept 7 days; the id is the offset.',
+  stream_sessions: 'The one stream reading each subscription, while it is heard from.',
+  stream_subscriptions: 'Event streaming subscriptions: an application and consumer group reading some topics.',
   notification_events: 'The outbox: events raised with the change that caused them, for an activated webhook that wants them, until they become messages.',
   notification_messages: 'The communication log: every webhook message, its state, retries and outcome.',
   notification_settings: 'Tenant-wide notification settings (one row): the webhook switch and the daily work done.',
@@ -178,6 +182,29 @@ function convention(table, column) {
 }
 
 const COLUMNS = {
+  'notification_templates.topic': 'For an EVENT_STREAM template, the topic it publishes to; set when it is made.',
+  'stream_cursors.subscription_id': 'The subscription (stream_subscriptions.id).',
+  'stream_cursors.topic': 'The topic.',
+  'stream_cursors.committed': 'The last offset committed (stream_events.id); events after it are unread.',
+  'stream_cursors.committed_at': 'When it was last committed.',
+  'stream_events.topic': 'The topic it was published to.',
+  'stream_events.eid': 'The event\'s own ID, for receivers to remove duplicates.',
+  'stream_events.event': 'The event\'s name (SAVINGS_DEPOSIT...).',
+  'stream_events.category': 'The template\'s target.',
+  'stream_events.template_name': 'The template that published it.',
+  'stream_events.content_type': 'application/json, application/xml or text/plain.',
+  'stream_subscriptions.owner_id': 'The API consumer or user that made it (their ID); only they and administrators read, commit or delete it.',
+  'stream_events.body': 'The body, filled from the event.',
+  'stream_events.occurred_at': 'When it was published.',
+  'stream_subscriptions.owning_application': 'The application that reads it.',
+  'stream_subscriptions.consumer_group': 'The consumer group (default).',
+  'stream_subscriptions.event_types': 'The topics it reads.',
+  'stream_subscriptions.read_from': 'begin, end or cursors: where a new subscription starts.',
+  'stream_sessions.subscription_id': 'The subscription being read.',
+  'stream_sessions.open': 'Whether the stream is still reading.',
+  'stream_sessions.stream_id': 'The stream reading it, sent as X-Stream-Id; commits must carry it.',
+  'stream_sessions.started_at': 'When the stream started.',
+  'stream_sessions.last_seen_at': 'When the stream was last active; after 10 seconds without, another may start.',
   'notification_events.event': 'The event\'s name, as the reference platform\'s (SAVINGS_DEPOSIT, LOAN_APPROVAL...).',
   'notification_events.target': 'What the event is about: CLIENT, GROUP, LOANS, SAVINGS, ACCOUNTING, BACKGROUND_PROCESS or ADMINISTRATIVE.',
   'notification_events.credit_arrangement_id': 'The credit arrangement concerned (credit_arrangements.id), when there is one.',

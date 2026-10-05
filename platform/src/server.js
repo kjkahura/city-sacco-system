@@ -233,6 +233,8 @@ const access = require('./routes/access');
 tenantApi.use('/access-preferences', access.prefs);
 tenantApi.use('/consumers', access.consumers);
 tenantApi.use('/audit-trail', access.trail);
+// Events streaming (the reference platform's Streaming API).
+tenantApi.use('/v1/subscriptions', require('./routes/streaming').router);
 // The reference platform's path for the audit trail query (GET /v1/events).
 tenantApi.use('/v1', access.trail);
 tenantApi.use('/profile', access.profile);

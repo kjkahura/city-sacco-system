@@ -23,7 +23,7 @@ const iso = (v) => (v instanceof Date ? v.toISOString() : v || null);
 
 function shape(t) {
   return {
-    id: t.id, name: t.name, type: t.type, target: t.target, event: t.event, body: t.body, activated: t.activated,
+    id: t.id, name: t.name, type: t.type, ...(t.type === 'EVENT_STREAM' ? { topic: t.topic } : {}), target: t.target, event: t.event, body: t.body, activated: t.activated,
     trigger: t.trigger, triggerDays: t.trigger_days, subscriptionOption: t.subscription_option,
     filtersLinkingOperator: t.filters_linking_operator, filterConstraints: t.filter_constraints,
     url: t.url, requestType: t.request_type, contentType: t.content_type,
@@ -80,8 +80,10 @@ async function normalise(c, b, { current = null } = {}) {
   if (name.length > 255) throw err('NAME_IS_AT_MOST_255_CHARACTERS');
   const { rows: dup } = await c.query('SELECT 1 FROM notification_templates WHERE lower(name) = lower($1) AND id IS DISTINCT FROM $2::uuid', [name, current?.id || null]);
   if (dup.length) throw err(`NAME_ALREADY_USED: ${name}`);
-  const type = String(b.type || 'WEB_HOOK').toUpperCase();
-  if (type !== 'WEB_HOOK') throw err('ONLY_WEB_HOOK_TEMPLATES_ARE_SUPPORTED');
+  const type = String(b.type || current?.type || 'WEB_HOOK').toUpperCase();
+  if (!['WEB_HOOK', 'EVENT_STREAM'].includes(type)) throw err('TYPE_IS_WEB_HOOK_OR_EVENT_STREAM');
+  if (current && type !== current.type) throw err('A_TEMPLATE_KEEPS_ITS_TYPE');
+  const stream = type === 'EVENT_STREAM';
   const event = String(b.event || '').toUpperCase();
   if (C.NOT_SUPPORTED.includes(event)) throw err(`EVENT_NOT_SUPPORTED: ${event} has no source on this platform`);
   const targets = C.targetsOf(event);
@@ -93,10 +95,14 @@ async function normalise(c, b, { current = null } = {}) {
   if (!REQUEST_TYPES.includes(requestType)) throw err(`INVALID_REQUEST_TYPE: ${requestType}; POST, PUT or PATCH`);
   const contentType = String(b.contentType || 'JSON').toUpperCase();
   if (!CONTENT_TYPES.includes(contentType)) throw err(`INVALID_CONTENT_TYPE: ${contentType}; ${CONTENT_TYPES.join(', ')}`);
-  if (/["']/.test(String(b.url || ''))) throw err('WEBHOOK_URL_MUST_NOT_CONTAIN_QUOTATION_MARKS');
-  if (/\{\{/.test(String(b.url || ''))) throw err('PLACEHOLDERS_ARE_NOT_ALLOWED_IN_THE_WEBHOOK_URL');
-  const url = OUT.checkUrl(b.url, { prefix: 'WEBHOOK' });
-  if (!url) throw err('WEBHOOK_URL_REQUIRED');
+  // A streaming template is read by subscribers: it has no address, authorization or signature.
+  let url = null;
+  if (!stream) {
+    if (/["']/.test(String(b.url || ''))) throw err('WEBHOOK_URL_MUST_NOT_CONTAIN_QUOTATION_MARKS');
+    if (/\{\{/.test(String(b.url || ''))) throw err('PLACEHOLDERS_ARE_NOT_ALLOWED_IN_THE_WEBHOOK_URL');
+    url = OUT.checkUrl(b.url, { prefix: 'WEBHOOK' });
+    if (!url) throw err('WEBHOOK_URL_REQUIRED');
+  }
   const body = String(b.body ?? '');
   if (!body.trim()) throw err('BODY_REQUIRED');
   if (Buffer.byteLength(body) > 65536) throw err('MAX_MESSAGE_SIZE_LIMIT_EXCEEDED: a body is at most 64 KB');
@@ -105,7 +111,7 @@ async function normalise(c, b, { current = null } = {}) {
   if (unknown.length) throw err(`UNKNOWN_PLACEHOLDER: ${unknown.join(', ')}`);
   const sample = Object.fromEntries([...custom].map((k) => [k, 'sample']));
   R.assertBody(R.fill(body, { ...sample, ...C.PLACEHOLDERS }, contentType), contentType);
-  const auth = b.authorization || {};
+  const auth = stream ? {} : b.authorization || {};
   const authType = String(auth.type || 'NONE').toUpperCase();
   if (!['NONE', 'BASIC'].includes(authType)) throw err('AUTHORIZATION_IS_NONE_OR_BASIC');
   const username = authType === 'BASIC' ? String(auth.username || '').trim() : null;
@@ -123,30 +129,47 @@ async function normalise(c, b, { current = null } = {}) {
   return {
     name, type, target, event, body, activated: b.activated === undefined ? true : Boolean(b.activated), trigger, triggerDays,
     subscriptionOption: sub, filtersLinkingOperator: link, filterConstraints: constraintsOf(b.filterConstraints),
-    url, requestType, contentType, authType, username, password, headers: headersOf(b.headers),
-    signingEnabled: b.signingEnabled === undefined ? true : Boolean(b.signingEnabled),
+    url, requestType, contentType, authType, username, password, headers: stream ? [] : headersOf(b.headers),
+    signingEnabled: stream ? false : b.signingEnabled === undefined ? true : Boolean(b.signingEnabled),
   };
 }
 
-async function list(c) {
-  const { rows } = await c.query('SELECT * FROM notification_templates ORDER BY lower(name)');
+async function list(c, { type = null } = {}) {
+  const { rows } = await c.query('SELECT * FROM notification_templates WHERE ($1::text IS NULL OR type = $1) ORDER BY lower(name)',
+    [type ? String(type).toUpperCase() : null]);
   return rows.map(shape);
 }
 
 const get = async (c, id) => shape(await row(c, id));
 
+/** A streaming template's topic: sacco.event.<tenant>.streamingapi.<name in snake case>, made unique. */
+async function topicFor(c, name) {
+  const { rows: [t] } = await c.query('SELECT slug FROM platform.tenants WHERE schema_name = current_schema()');
+  const base = `sacco.event.${t?.slug || 'tenant'}.streamingapi.${String(name).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'events'}`;
+  for (let i = 1; ; i += 1) {
+    const topic = i === 1 ? base : `${base}_${i}`;
+    // A topic is not given again while a subscription reads it or its events are kept.
+    const { rows } = await c.query(
+      `SELECT 1 FROM notification_templates WHERE topic = $1
+       UNION ALL SELECT 1 FROM stream_subscriptions WHERE $1 = ANY (event_types)
+       UNION ALL (SELECT 1 FROM stream_events WHERE topic = $1 LIMIT 1)`, [topic]);
+    if (!rows.length) return topic;
+  }
+}
+
 async function create(c, body, { actor }) {
   const v = await normalise(c, body || {});
   const secret = v.signingEnabled ? S.newSigningSecret() : null;
+  const topic = v.type === 'EVENT_STREAM' ? await topicFor(c, v.name) : null;
   const { rows: [t] } = await c.query(
     `INSERT INTO notification_templates (name, type, target, event, body, activated, trigger, trigger_days, subscription_option,
        filters_linking_operator, filter_constraints, url, request_type, content_type, auth_type, auth_username, auth_secret, headers,
-       signing_enabled, signing_secret, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`,
+       signing_enabled, signing_secret, created_by, topic)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
     [v.name, v.type, v.target, v.event, v.body, v.activated, v.trigger, v.triggerDays, v.subscriptionOption, v.filtersLinkingOperator,
       JSON.stringify(v.filterConstraints), v.url, v.requestType, v.contentType, v.authType, v.username,
-      v.authType === 'BASIC' ? S.seal(v.password) : null, JSON.stringify(v.headers), v.signingEnabled, S.seal(secret), actor]);
-  await recordAudit(c, { actor, action: 'WEBHOOK_CREATED', entity: 'notification_template', entityId: t.id, after: JSON.stringify(shape(t)) });
+      v.authType === 'BASIC' ? S.seal(v.password) : null, JSON.stringify(v.headers), v.signingEnabled, S.seal(secret), actor, topic]);
+  await recordAudit(c, { actor, action: v.type === 'EVENT_STREAM' ? 'STREAM_TEMPLATE_CREATED' : 'WEBHOOK_CREATED', entity: 'notification_template', entityId: t.id, after: JSON.stringify(shape(t)) });
   return { ...shape(t), ...(secret ? { signingSecret: secret } : {}) };
 }
 
@@ -202,18 +225,19 @@ async function patch(c, id, ops, { actor }) {
   if (after.url !== t.url) {
     await c.query(`UPDATE notification_messages SET destination = $2 WHERE template_id = $1 AND state IN ('QUEUED', 'WAITING')`, [t.id, after.url]);
   }
-  await recordAudit(c, { actor, action: 'WEBHOOK_EDITED', entity: 'notification_template', entityId: t.id, before: JSON.stringify(before), after: JSON.stringify(shape(after)) });
+  await recordAudit(c, { actor, action: t.type === 'EVENT_STREAM' ? 'STREAM_TEMPLATE_EDITED' : 'WEBHOOK_EDITED', entity: 'notification_template', entityId: t.id, before: JSON.stringify(before), after: JSON.stringify(shape(after)) });
   return { ...shape(after), ...(shown ? { signingSecret: shown } : {}) };
 }
 
 async function remove(c, id, { actor }) {
   const t = await row(c, id);
   await c.query('DELETE FROM notification_templates WHERE id = $1', [t.id]);
-  await recordAudit(c, { actor, action: 'WEBHOOK_DELETED', entity: 'notification_template', entityId: t.id, before: JSON.stringify(shape(t)) });
+  await recordAudit(c, { actor, action: t.type === 'EVENT_STREAM' ? 'STREAM_TEMPLATE_DELETED' : 'WEBHOOK_DELETED', entity: 'notification_template', entityId: t.id, before: JSON.stringify(shape(t)) });
 }
 
 async function rotateSecret(c, id, { actor }) {
   const t = await row(c, id);
+  if (t.type !== 'WEB_HOOK') throw err('ONLY_A_WEBHOOK_HAS_A_SIGNING_SECRET');
   const secret = S.newSigningSecret();
   const { rows: [after] } = await c.query(
     'UPDATE notification_templates SET signing_secret = $2, signing_enabled = true, updated_at = now() WHERE id = $1 RETURNING *', [t.id, S.seal(secret)]);

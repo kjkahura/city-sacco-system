@@ -24,6 +24,6 @@ The same files are kept in the claude.ai project "CoreBanking Service" under `cl
 | 16 | Custom Fields | audit 0b0985f, build in the "Custom fields, after the reference platform" commit | [audit](audit-custom-fields.md), [build log](build-log-custom-fields.md) |
 | 17 | Console navigation (menus and Administration) | design spec and plan in docs/superpowers, build in the three "Console:" commits | [build log](build-log-console-navigation.md) |
 | 18 | Webhooks | audit in the "Webhooks audit" commit, build in the "Webhooks" commit | [audit](audit-webhooks.md), [build log](build-log-webhooks.md) |
-| 19 | Events Streaming | audit in the "Events Streaming audit" commit, not built yet | [audit](audit-events-streaming.md) |
+| 19 | Events Streaming | audit in the "Events Streaming audit" commit, build in the "Events Streaming" commit | [audit](audit-events-streaming.md), [build log](build-log-events-streaming.md) |
 
 Before section 5, the audit findings were recorded inside the build logs, with no separate audit file.

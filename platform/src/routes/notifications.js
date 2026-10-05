@@ -20,7 +20,7 @@ const MSG = require('../domain/notifications/messages');
 
 const templates = express.Router();
 
-templates.get('/', ...H.run((c) => TPL.list(c)));
+templates.get('/', ...H.run((c, req) => TPL.list(c, { type: req.query.type || null })));
 // The events (with their targets) and placeholders a template can use, for the console's form.
 templates.get('/catalog', ...H.run(async () => {
   const C = require('../domain/notifications/catalog');

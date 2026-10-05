@@ -151,6 +151,11 @@ const RULES = [
   ['POST', '/communications/messages:resendAsyncByKeys', 'RESEND_FAILED_MESSAGES'], ['POST', '/communications/messages:resendAsyncByDate', 'RESEND_FAILED_MESSAGES'],
   ['POST', '/notifications/messages/search', 'VIEW_COMMUNICATION_HISTORY'], ['POST', '/notifications/messages', 'RESEND_FAILED_MESSAGES'],
   ['GET', '/notificationsettings/webhook', ADMIN], ['PUT', '/notificationsettings/webhook', ADMIN],
+  // Events streaming: API consumers (and administrators) that read streams. The list is also
+  // shown under Administration > Events Streaming to those who see the templates.
+  ['POST', '/v1/subscriptions', 'CONSUME_EVENT_STREAMS'], ['GET', '/v1/subscriptions', ['CONSUME_EVENT_STREAMS', ...TEMPLATES_VIEW]],
+  ['GET', '/v1/subscriptions/:id/events', 'CONSUME_EVENT_STREAMS'], ['GET', '/v1/subscriptions/:id/stats', 'CONSUME_EVENT_STREAMS'],
+  ['POST', '/v1/subscriptions/:id/cursors', 'CONSUME_EVENT_STREAMS'], ['DELETE', '/v1/subscriptions/:id', 'CONSUME_EVENT_STREAMS'],
   ['POST', '/deposits', 'CREATE_SAVINGS_ACCOUNT'], ['PUT', '/deposits/:id', 'EDIT_SAVINGS_ACCOUNT'], ['PATCH', '/deposits/:id', 'EDIT_SAVINGS_ACCOUNT'],
   ['DELETE', '/deposits/:id', 'DELETE_SAVINGS_ACCOUNT'],
   ['POST', '/deposits/:id', [...DEP_STATE, 'ACTIVATE_MATURITY', 'UNDO_MATURITY', 'APPLY_ACCRUED_SAVINGS_INTEREST']],
