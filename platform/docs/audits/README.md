@@ -27,5 +27,6 @@ The same files are kept in the claude.ai project "CoreBanking Service" under `cl
 | 19 | Events Streaming | audit in the "Events Streaming audit" commit, build in the "Events Streaming" commit | [audit](audit-events-streaming.md), [build log](build-log-events-streaming.md) |
 | 20 | Email | audit in the "Email audit" commit, build in the "Email" commit | [audit](audit-email.md), [build log](build-log-email.md) |
 | 21 | SMS | audit in the "SMS audit" commit, build in the "SMS" commit | [audit](audit-sms.md), [build log](build-log-sms.md) |
+| 22 | Getting Started and Sandbox | audit in the "Getting Started and Sandbox audit" commit, not built yet | [audit](audit-getting-started-and-sandbox.md) |
 
 Before section 5, the audit findings were recorded inside the build logs, with no separate audit file.
