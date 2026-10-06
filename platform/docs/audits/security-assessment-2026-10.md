@@ -124,7 +124,7 @@ Assessed on 6 October 2026, at the Apps commit, on John's request for a security
 | --- | --- |
 | A01 Broken Access Control | The route table refuses unknown routes. Permissions are reloaded on every request. Row security limits branch users in the database. The fixes close the escalations found (IAM-1, IAM-2, IAM-8, IAM-9). Holds. |
 | A02 Security Misconfiguration | Strict CSP on the console and portal, no CORS, no cookies, baseline headers on the API. Cloud Run ingress (CFG-2) is scripted, to be run. |
-| A03 Software Supply Chain Failures | Five runtime dependencies, `npm audit` clean, lockfile with integrity hashes, `npm ci`. Dependabot added. Digest pinning scripted, to be run. |
+| A03 Software Supply Chain Failures | Five runtime dependencies, `npm audit` clean, lockfile with integrity hashes, `npm ci`. Dependabot added, and the test job runs `npm audit --omit=dev --audit-level=high`, so a known high or critical vulnerability stops the deploy. Digest pinning scripted, to be run. |
 | A04 Cryptographic Failures | scrypt for passwords; AES-256-GCM for secrets and backups; hashed tokens and keys; sealed TOTP secrets. scrypt cost raised (IAM-12). |
 | A05 Injection | All SQL values are parameters and identifiers come from fixed maps. Template rendering escapes for its context. Formula injection is fixed. Holds. |
 | A06 Insecure Design | Balance changes run under row locks, journals are balanced, closed periods are enforced by triggers, idempotency is now general. Four-eyes on for new SACCOs, guarantor locking and daily limits added. |

@@ -116,6 +116,9 @@ jobs:
           cache: npm
           cache-dependency-path: platform/package-lock.json
       - run: npm ci
+      # A known vulnerability (high or critical) in a package the service ships stops the deploy,
+      # between Dependabot's weekly checks. Development-only packages are not shipped.
+      - run: npm audit --omit=dev --audit-level=high
       # The backup tests call pg_dump, which must be at least the server's version (16).
       - run: pg_dump --version
       - run: npm test
