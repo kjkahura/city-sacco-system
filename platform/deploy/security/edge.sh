@@ -17,8 +17,15 @@
 #      traffic that does not come through the load balancer (the run.app and web.app
 #      addresses stop working).
 #
-# Keep TRUST_PROXY=2 (client, then the load balancer). The console and portal are served
-# by the service itself (/console, /portal), so Firebase Hosting is no longer needed.
+# Keep TRUST_PROXY=2 (client, then the load balancer). Firebase Hosting is no longer needed.
+#
+# The front ends, deployed apart from the API: with FRONTEND_BUCKET=<a new bucket name> the
+# script also makes that bucket, lets the deploy job's service account publish to it, and,
+# once the deploy job has published the console and portal there (repository variable
+# FRONTEND_BUCKET), sends /console/* and /portal/* to the bucket and everything else to the
+# service. Run it again after the first publish to switch the routing over. The headers the
+# bucket's files carry are the ones src/lib/frontendHeaders.js sets; test/frontends.test.js
+# checks the copies below against it.
 set -euo pipefail
 : "${PROJECT:?set PROJECT}" "${REGION:?set REGION}" "${DOMAIN:?set DOMAIN}"
 SERVICE=${SERVICE:-sacco-platform}
@@ -58,6 +65,70 @@ have gcloud compute target-https-proxies describe sacco-https --global ||
 have gcloud compute addresses describe sacco-ip --global || gcloud compute addresses create sacco-ip --global
 have gcloud compute forwarding-rules describe sacco-https-rule --global ||
   gcloud compute forwarding-rules create sacco-https-rule --global --load-balancing-scheme EXTERNAL_MANAGED --address sacco-ip --target-https-proxy sacco-https --ports 443
+
+# 3b. The front ends from a bucket (optional, FRONTEND_BUCKET).
+CONSOLE_CSP="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src 'self' https:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+PORTAL_CSP="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+if [ -n "${FRONTEND_BUCKET:-}" ]; then
+  DEPLOYER=${DEPLOYER:-sacco-deployer@$PROJECT.iam.gserviceaccount.com}
+  if ! have gcloud storage buckets describe "gs://$FRONTEND_BUCKET"; then
+    gcloud storage buckets create "gs://$FRONTEND_BUCKET" --location "$REGION" --uniform-bucket-level-access
+  fi
+  # A directory address (/console/) is answered with its index.html.
+  gcloud storage buckets update "gs://$FRONTEND_BUCKET" --web-main-page-suffix index.html
+  # The files are the public front ends and carry no secrets; the load balancer reads them anonymously
+  # (anyone may also list and read them at storage.googleapis.com, without these headers and on another origin).
+  if ! gcloud storage buckets add-iam-policy-binding "gs://$FRONTEND_BUCKET" --member allUsers --role roles/storage.objectViewer >/dev/null; then
+    echo "The bucket cannot be made public: the organisation enforces public access prevention" >&2
+    echo "(constraints/storage.publicAccessPrevention). Ask the organisation's administrator for an exception for" >&2
+    echo "this project, or leave FRONTEND_BUCKET unset and keep the front ends on the service." >&2
+    exit 1
+  fi
+  gcloud storage buckets add-iam-policy-binding "gs://$FRONTEND_BUCKET" --member "serviceAccount:$DEPLOYER" --role roles/storage.objectAdmin >/dev/null
+  bucket() { # name, CSP
+    local verb=create
+    have gcloud compute backend-buckets describe "$1" && verb=update
+    gcloud compute backend-buckets "$verb" "$1" --gcs-bucket-name "$FRONTEND_BUCKET" \
+      --custom-response-header "Content-Security-Policy: $2" \
+      --custom-response-header "X-Content-Type-Options: nosniff" \
+      --custom-response-header "Referrer-Policy: same-origin" \
+      --custom-response-header "Strict-Transport-Security: max-age=31536000; includeSubDomains"
+  }
+  bucket sacco-console "$CONSOLE_CSP"
+  bucket sacco-portal "$PORTAL_CSP"
+  if gcloud storage ls "gs://$FRONTEND_BUCKET/console/index.html" >/dev/null 2>&1 &&
+     gcloud storage ls "gs://$FRONTEND_BUCKET/portal/index.html" >/dev/null 2>&1; then
+    API="https://www.googleapis.com/compute/v1/projects/$PROJECT/global"
+    cat > /tmp/sacco-lb.yaml <<YAML
+name: sacco-lb
+defaultService: $API/backendServices/sacco-backend
+hostRules:
+- hosts: ['*']
+  pathMatcher: main
+pathMatchers:
+- name: main
+  defaultService: $API/backendServices/sacco-backend
+  routeRules:
+  - priority: 1
+    matchRules: [{fullPathMatch: /}, {fullPathMatch: /console}]
+    urlRedirect: {pathRedirect: /console/, redirectResponseCode: FOUND}
+  - priority: 2
+    matchRules: [{fullPathMatch: /portal}]
+    urlRedirect: {pathRedirect: /portal/, redirectResponseCode: FOUND}
+  - priority: 3
+    matchRules: [{prefixMatch: /console/}]
+    service: $API/backendBuckets/sacco-console
+  - priority: 4
+    matchRules: [{prefixMatch: /portal/}]
+    service: $API/backendBuckets/sacco-portal
+YAML
+    gcloud compute url-maps import sacco-lb --global --source /tmp/sacco-lb.yaml --quiet
+    echo "Front ends: /console/ and /portal/ now come from gs://$FRONTEND_BUCKET."
+  else
+    echo "Front ends: gs://$FRONTEND_BUCKET is ready but empty. Set the repository variable FRONTEND_BUCKET=$FRONTEND_BUCKET,"
+    echo "run the deploy workflow once, then run this script again to route /console/ and /portal/ to the bucket."
+  fi
+fi
 
 IP=$(gcloud compute addresses describe sacco-ip --global --format='value(address)')
 CERT=$(gcloud compute ssl-certificates describe sacco-cert --global --format='value(managed.status)')

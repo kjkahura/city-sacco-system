@@ -1,4 +1,5 @@
-# Test, then deploy the platform to Google Cloud Run behind Firebase Hosting.
+# Test, then deploy the platform to Google Cloud Run, behind Firebase Hosting or, once
+# deploy/security/edge.sh has run, behind the load balancer.
 # Setup and the settings this reads: platform/docs/deploy.md.
 #
 # Repository variables (Settings > Secrets and variables > Actions > Variables):
@@ -8,6 +9,16 @@
 #   WIF_PROVIDER             projects/NUMBER/locations/global/workloadIdentityPools/github/providers/github
 #   DEPLOY_SERVICE_ACCOUNT   sacco-deployer@PROJECT.iam.gserviceaccount.com
 #   RUNTIME_SERVICE_ACCOUNT  sacco-runtime@PROJECT.iam.gserviceaccount.com
+# Optional repository variables (not environment variables: the jobs' `if:` reads them), once
+# the load balancer is in place (deploy/security/edge.sh):
+#   FRONTEND_BUCKET          the bucket the console and portal are published to.
+#   FRONTENDS_ROUTED         yes, once edge.sh routes /console and /portal to that bucket. Then a
+#                            push that changes only platform/public or platform/portal, compared
+#                            with the commit the running service was built from, publishes the
+#                            front ends and leaves the API alone.
+#   SITE_URL                 https://your-domain: the address checked after a deploy, in place of
+#                            Firebase Hosting, which is then no longer deployed.
+#   SERVE_FRONTENDS          off, so the service stops serving /console and /portal itself.
 # No keys or passwords are stored in GitHub: the workflow signs in to Google
 # through Workload Identity Federation, and the app's secrets are in Secret Manager.
 
@@ -32,6 +43,44 @@ env:
   REPOSITORY: sacco
 
 jobs:
+  # What a push changed: the API (anything else under platform/) or only the front ends.
+  # Compared with the commit the running service was built from (its image tag), not with the
+  # previous push, so an API change from a push that was cancelled or failed is not skipped.
+  # Anything uncertain deploys the API.
+  scope:
+    runs-on: ubuntu-24.04
+    outputs:
+      api: ${{ steps.diff.outputs.api }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: google-github-actions/auth@v2
+        if: vars.FRONTENDS_ROUTED == 'yes' && github.event_name == 'push'
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+        if: vars.FRONTENDS_ROUTED == 'yes' && github.event_name == 'push'
+      - id: diff
+        env:
+          ROUTED: ${{ vars.FRONTENDS_ROUTED }}
+          REGION: ${{ vars.GCP_REGION }}
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          api=true
+          if [ "$ROUTED" = yes ] && [ "${{ github.event_name }}" = push ]; then
+            image=$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(spec.template.spec.containers[0].image)' 2>/dev/null || true)
+            live=${image##*:}
+            if [ -n "$live" ] && git cat-file -e "$live" 2>/dev/null; then
+              other=$(git diff --name-only "$live" "$GITHUB_SHA" | grep -Ev '^platform/(public|portal)/' || true)
+              [ -z "$other" ] && api=false
+            fi
+            echo "Running service built from: ${live:-unknown}"
+          fi
+          echo "api=$api" >> "$GITHUB_OUTPUT"
+          echo "API changed: $api"
+
   test:
     runs-on: ubuntu-24.04
     defaults:
@@ -72,7 +121,8 @@ jobs:
       - run: npm test
 
   deploy:
-    needs: test
+    needs: [test, scope]
+    if: needs.scope.outputs.api == 'true'
     runs-on: ubuntu-24.04
     environment: production
     env:
@@ -119,12 +169,14 @@ jobs:
       - name: Deploy the service
         env:
           APP_DB_USER: ${{ vars.APP_DB_USER }}
+          SERVE_FRONTENDS: ${{ vars.SERVE_FRONTENDS }}
         run: |
           SVC_ENV="$ENV_VARS"; SVC_SECRETS="$SECRETS"
           if [ -n "$APP_DB_USER" ]; then
             SVC_ENV="${ENV_VARS/PGUSER=sacco,/PGUSER=$APP_DB_USER,},SANDBOX_AFTER_REQUEST=off"
             SVC_SECRETS="${SECRETS/PGPASSWORD=sacco-db-password/PGPASSWORD=sacco-app-db-password}"
           fi
+          if [ -n "$SERVE_FRONTENDS" ]; then SVC_ENV="$SVC_ENV,SERVE_FRONTENDS=$SERVE_FRONTENDS"; fi
           gcloud run deploy "$SERVICE" --image "$IMAGE" --region "$REGION" \
             --service-account "$RUNTIME_SA" --add-cloudsql-instances "$SQL_INSTANCE" \
             --set-env-vars "$SVC_ENV" --set-secrets "$SVC_SECRETS" \
@@ -143,14 +195,57 @@ jobs:
           done
 
       - uses: actions/setup-node@v4
+        if: vars.SITE_URL == ''
         with:
           node-version: 22
 
+      # Until the load balancer serves the domain (SITE_URL), Firebase Hosting is the way in.
       - name: Deploy Firebase Hosting
+        if: vars.SITE_URL == ''
         working-directory: platform
         run: npx --yes firebase-tools@15.32.1 deploy --only hosting --project "$PROJECT_ID" --non-interactive
 
       - name: Check the live site
+        env:
+          SITE_URL: ${{ vars.SITE_URL }}
         run: |
           sleep 10
-          curl -fsS "https://$PROJECT_ID.web.app/health"
+          curl -fsS "${SITE_URL:-https://$PROJECT_ID.web.app}/health"
+
+  # The console and portal, published to their bucket apart from the API (FRONTEND_BUCKET).
+  # index.html is never cached, so a release shows at the next page load; the modules are
+  # cached for five minutes, as the service serves them.
+  # After the API, so a console that calls a new route is not live before the route is.
+  frontends:
+    needs: [test, scope, deploy]
+    if: always() && vars.FRONTEND_BUCKET != '' && needs.test.result == 'success' && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped')
+    runs-on: ubuntu-24.04
+    environment: production
+    env:
+      BUCKET: ${{ vars.FRONTEND_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Publish the console and portal
+        run: |
+          for pair in console:platform/public portal:platform/portal; do
+            name="${pair%%:*}"; dir="${pair#*:}"
+            gcloud storage rsync "$dir" "gs://$BUCKET/$name" --recursive --delete-unmatched-destination-objects \
+              --exclude 'index\.html$' --cache-control "public, max-age=300"
+            gcloud storage cp "$dir/index.html" "gs://$BUCKET/$name/index.html" --cache-control "no-cache"
+          done
+
+      - name: Check the published front ends
+        env:
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: |
+          [ -n "$SITE_URL" ] || { echo "SITE_URL not set: skipped"; exit 0; }
+          curl -fsS -o /dev/null "$SITE_URL/console/"
+          curl -fsS -o /dev/null "$SITE_URL/portal/"

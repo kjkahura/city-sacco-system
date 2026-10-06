@@ -18,7 +18,7 @@ what went wrong without them.
 cd platform
 npm install
 npm run migrate      # platform schema, then every tenant
-npm test             # about 3,600 checks in 51 suites; run this after every change
+npm test             # about 3,600 checks in 52 suites; run this after every change
 npm start
 ```
 
@@ -65,6 +65,10 @@ npm start
   advisory lock `member-funds:<memberId>`. Reversing the order deadlocks against a
   withdrawal.
 - **Outbound calls to an address a tenant chose** go through `src/lib/outbound.js`.
+- **The front ends talk to the server only through `/api`.** `platform/public` and
+  `platform/portal` import nothing from `src/` or from each other, and request no other
+  origin. Their headers are in `src/lib/frontendHeaders.js`; when the CSP changes, change
+  the copy in `deploy/security/edge.sh` too. `test/frontends.test.js` checks all of this.
 - **A security fix gets a check in `test/hardening.test.js`.**
 - **Do not name the vendor whose API this platform follows** in code, docs, commits,
   paths or header names. Write "the reference platform".

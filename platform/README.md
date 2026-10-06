@@ -10,7 +10,7 @@ operators) because they are sensible, not because the reference platform invente
 cp .env.example .env          # set PGDATABASE and JWT_SECRET
 npm install
 npm run migrate               # platform schema, then every tenant
-npm test                      # about 3,600 checks in 51 suites
+npm test                      # about 3,600 checks in 52 suites
 npm start
 ```
 
@@ -27,6 +27,23 @@ Each section is audited before it is built against the documentation of the refe
 container (`Dockerfile`) runs on Google Cloud Run in `europe-west1` with
 Cloud SQL for PostgreSQL 16, Firebase Hosting (`firebase.json`) serves it, and
 Cloudflare holds the custom domain's DNS.
+
+## The front ends, deployed apart from the API
+
+- **What they are:** the console (`public/`) and the member portal (`portal/`) are static files: plain JavaScript modules, no build step. They depend on the server for one thing only, the HTTP API under `/api` on their own origin.
+- **The line between them is tested.** `test/frontends.test.js` fails if a front end:
+  - imports anything outside its own folder;
+  - sends a literal request to another origin or to a literal path outside `/api` (requests built from a variable are not checked);
+  - uses an inline script.
+  The same test checks that the bucket's headers in `edge.sh` match the server's.
+- **Where they are served from:**
+  - **Development, the tests, and production until the bucket is set up:** the API server serves them at `/console` and `/portal`, as before.
+  - **In production with the bucket:** the load balancer serves `/console/*` and `/portal/*` from a Cloud Storage bucket and sends everything else (`/api`, `/admin`, `/hooks`, `/apps`, `/health`) to Cloud Run. `SERVE_FRONTENDS=off` then stops the server serving them at all.
+- **Releases are independent.** With the repository variable `FRONTEND_BUCKET`, the deploy workflow publishes the front ends to the bucket on every push. A push that changes only `public/` or `portal/` publishes them without rebuilding or redeploying the API. `index.html` is never cached, so a release shows at the next page load.
+- **One address, no CORS.** Both front ends and the API share the domain, so tokens, the strict content security policy and the API itself are unchanged. The headers live in `src/lib/frontendHeaders.js`; `deploy/security/edge.sh` sets the same ones on the bucket.
+- **What the bucket does not have:** the Cloud Armor rules apply to the API only, a missing file is answered with Cloud Storage's own 404 page, and `edge.sh` rewrites the URL map whole each time it routes the front ends, so routing changed by hand in the Cloud console is lost.
+- **The one remaining link:** the app launch page (`/apps/frame/...`, served by the API) loads `/console/js/appframe.js`. Both are on the same origin, so it works from either source.
+- **Setup:** `docs/deploy.md`, "The front ends from a bucket".
 
 ## The console's navigation
 
@@ -3729,8 +3746,9 @@ provisioning, the close, returns, products, controls, accounting, the
 organization, data (import, backups, dictionary, extract) and users.
 
 Plain JavaScript, no build step, no framework, no CDN. What is on disk is
-what runs, which matters for software somebody may have to audit. The
-console is an ordinary API client on the same origin: it holds no secrets,
+what runs, which matters for software somebody may have to audit. It is
+deployed apart from the API (above, "The front ends, deployed apart from the
+API"). The console is an ordinary API client on the same origin: it holds no secrets,
 every action goes through the same endpoints with the same role checks, and
 the page is served under a self-only Content-Security-Policy with no inline
 script or style, so a cross-site payload in a member's name has nowhere to

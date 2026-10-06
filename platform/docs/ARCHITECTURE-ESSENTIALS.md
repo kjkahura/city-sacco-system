@@ -47,6 +47,12 @@ The short version of `platform/README.md`, for a person or a coding agent starti
 - **Outbound calls** to addresses a tenant chose (webhooks, email and SMS gateways, apps, backup callbacks) go through `src/lib/outbound.js`, which refuses private and metadata addresses.
 - **Request context:** `src/lib/requestContext.js` carries the signed-in user to the database session settings that triggers read (till rules, branch limits, audit).
 
+## Front ends (README: "The front ends, deployed apart from the API")
+
+- **What they are:** `public/` (the console) and `portal/` (the member portal) are static files that use only the HTTP API under `/api` on their own origin. They import nothing outside their own folder; `test/frontends.test.js` enforces this.
+- **Where they are served from:** in development and the tests, by the API server. In production, by the load balancer from a Cloud Storage bucket, published by the deploy workflow apart from the API (`FRONTEND_BUCKET`). `SERVE_FRONTENDS=off` stops the server serving them.
+- **Headers** are defined once, in `src/lib/frontendHeaders.js`, and copied into `deploy/security/edge.sh` for the bucket.
+
 ## Audit (README: "Audit trail", "Activities")
 
 - **Request log:** every staff and API request is recorded in `audit_events`.

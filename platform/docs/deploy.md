@@ -210,6 +210,25 @@ The security review of October 2026 (`docs/audits/security-assessment-2026-10.md
   - `pin-digests.sh`: pins the workflow's actions and the base image by digest; review the diff and commit it.
 - **When something goes wrong:** `docs/incident-response.md`, including the 72-hour notice to the Data Commissioner. `docs/pentest-scope.md` is the brief for an independent penetration test.
 
+## The front ends from a bucket
+
+The console and portal can be served by the load balancer from a Cloud Storage bucket, so they are released apart from the API (README, "The front ends, deployed apart from the API"). This needs the load balancer from `deploy/security/edge.sh` first.
+
+1. **Make the bucket:** run `edge.sh` again with `FRONTEND_BUCKET=<a new, globally unique bucket name>` added to the usual settings. It makes the bucket, lets the deploy service account publish to it, and makes the two backend buckets with the console's and portal's headers. It leaves the routing alone while the bucket is empty.
+2. **Publish:** in GitHub, set the repository variables (not environment variables) `FRONTEND_BUCKET` (the same name) and `SITE_URL` (`https://` and your domain), then run the "Test and deploy" workflow. The `frontends` job publishes `public/` to `console/` and `portal/` to `portal/` in the bucket. With `SITE_URL` set, the workflow checks that address and stops deploying Firebase Hosting.
+3. **Route:** run `edge.sh` once more with `FRONTEND_BUCKET`. It now finds the files and sends `/console/*` and `/portal/*` to the bucket, and `/`, `/console` and `/portal` to `/console/` and `/portal/`. Then set the repository variable `FRONTENDS_ROUTED=yes`; until then every push also redeploys the API, so nothing waits on a bucket nobody is served from.
+4. **Check:** open `https://<domain>/console/`. The browser's developer tools should show the `Content-Security-Policy` header on the page, and signing in should work as before.
+5. **Optional:** set the repository variable `SERVE_FRONTENDS=off`. From the next API deploy, the service no longer serves the front ends itself.
+
+From then on, a push that changes only `platform/public` or `platform/portal`, compared with the commit the running service was built from, publishes the front ends and does not redeploy the API. When a push changes both, the front ends are published after the API is deployed.
+
+Things to know:
+- **The bucket is public:** anyone can list and read it at `storage.googleapis.com`. It holds only the front ends' own files, which carry no secrets; a page opened there runs on Google's origin with no headers of ours and no access to anyone's sign-in.
+- **Organisation policy:** if the organisation enforces public access prevention, `edge.sh` stops with a message; the organisation's administrator can grant this project an exception.
+- **Cloud Armor:** the rules protect the API only. Requests to the static files are not rate limited.
+
+To go back, run `gcloud compute url-maps import` with a map that has only `defaultService: .../backendServices/sacco-backend`, or delete the route rules in the console under Load balancing > `sacco-lb` > Routing rules. If you set `SERVE_FRONTENDS=off`, unset it and run the deploy workflow first, so the service serves the front ends again; also unset `FRONTENDS_ROUTED`.
+
 ## Rollback
 
 - **Code:**

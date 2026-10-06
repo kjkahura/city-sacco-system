@@ -68,42 +68,32 @@ app.get('/health', async (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Back office console
+// The front ends: the back office console (/console) and the member portal
+// (/portal)
 //
-// Static files, no build step, no server-side rendering: the console is an
-// ordinary API client that happens to be served from the same origin. It
-// carries no secrets, so it needs no authentication to fetch; everything it
-// can actually do still goes through the API with a token.
+// Static files, no build step, no server-side rendering: each is an ordinary
+// API client that calls /api on the same origin and carries no secrets. They
+// are deployed apart from the API: in production the load balancer serves them
+// from a Cloud Storage bucket (deploy/security/edge.sh) and sends only /api,
+// /admin, /hooks, /apps and the health checks here. This server serves them
+// too unless SERVE_FRONTENDS=off, for development, the tests and a deployment
+// without the bucket.
 //
-// The CSP is strict and self-only. There is no CDN and no inline script, so
-// a stored cross-site payload in a member name has nowhere to execute.
+// The CSP is strict and self-only (lib/frontendHeaders). There is no CDN and no
+// inline script, so a stored cross-site payload in a member name has nowhere
+// to execute. Members never see /console and staff never sign in at /portal;
+// the API enforces that, the paths just make it obvious.
 // ---------------------------------------------------------------------------
-const CONSOLE_DIR = path.join(__dirname, '..', 'public');
-// Apps (routes/apps) show in a sandboxed frame: the launch page here, then the
-// app's own HTTPS page, so frames may be any HTTPS address; forms still post only here.
-const FRAME_SRC = () => `frame-src 'self' https:${OUTBOUND.allowPrivate() ? ' http:' : ''}`;
-app.use('/console', (req, res, next) => {
-  res.set('Content-Security-Policy',
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-    + `connect-src 'self'; ${FRAME_SRC()}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
-  res.set('X-Content-Type-Options', 'nosniff');
-  res.set('Referrer-Policy', 'same-origin');
-  next();
-}, express.static(CONSOLE_DIR, { index: 'index.html', maxAge: '5m' }));
-
-// The member portal, same rules as the console: static, self-only CSP, an
-// ordinary API client on the same origin. Members never see /console and
-// staff never sign in here; the API enforces that, the paths just make it
-// obvious.
-const PORTAL_DIR = path.join(__dirname, '..', 'portal');
-app.use('/portal', (req, res, next) => {
-  res.set('Content-Security-Policy',
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-    + "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
-  res.set('X-Content-Type-Options', 'nosniff');
-  res.set('Referrer-Policy', 'same-origin');
-  next();
-}, express.static(PORTAL_DIR, { index: 'index.html', maxAge: '5m' }));
+const FRONTEND = require('./lib/frontendHeaders');
+const FRONTEND_DIRS = { console: path.join(__dirname, '..', 'public'), portal: path.join(__dirname, '..', 'portal') };
+if (FRONTEND.serveFrontends()) {
+  for (const kind of FRONTEND.KINDS) {
+    app.use(`/${kind}`, (_req, res, next) => {
+      res.set(FRONTEND.headers(kind, { allowHttpFrames: OUTBOUND.allowPrivate() }));
+      next();
+    }, express.static(FRONTEND_DIRS[kind], { index: 'index.html', maxAge: '5m' }));
+  }
+}
 
 app.get('/', (_req, res) => res.redirect(302, '/console/'));
 
