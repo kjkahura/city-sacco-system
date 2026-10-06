@@ -1,0 +1,17 @@
+# Keeps the deploy workflow's actions and the platform's packages current, as
+# reviewable pull requests (security review, October 2026).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /platform
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: docker
+    directory: /platform
+    schedule:
+      interval: weekly

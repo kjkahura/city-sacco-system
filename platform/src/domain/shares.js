@@ -24,6 +24,7 @@ async function lock(c, accountId) {
   const { rows } = await c.query(
     `SELECT a.*, p.unit_price, p.min_units, p.gl_equity
      FROM share_accounts a JOIN share_products p ON p.id = a.product_id
+     JOIN members m ON m.id = a.member_id
      WHERE a.id::text = $1 OR a.account_no = $1
      FOR UPDATE OF a`,
     [accountId]

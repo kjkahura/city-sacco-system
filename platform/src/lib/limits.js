@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { apiError } = require('./http');
 const store = require('./ratestore');
 
@@ -48,19 +49,30 @@ function rateLimit({ limit = 600, windowMs = 60_000, keyFn } = {}) {
  * password across many accounts from one address is caught, and so is
  * hammering one account from many addresses.
  */
-// Staff sign in with an email, members with a phone, activation with a
-// member number. Whichever the body carries is the account key.
-const accountKey = (req) => String(
-  req.body?.memberNo || req.body?.email || req.body?.phone || '').toLowerCase().replace(/\s+/g, '');
+// Each route says what its account is: the staff email, the member's phone or
+// number, a hash of the refresh token or MFA ticket, the signed-in user. A
+// request that names no account is limited by its address only, never put in
+// one shared bucket (which anyone could fill to lock a whole SACCO out).
+const norm = (v) => String(v || '').toLowerCase().replace(/\s+/g, '');
+const hashed = (v) => (v ? crypto.createHash('sha256').update(String(v)).digest('hex').slice(0, 32) : '');
+const KEYS = {
+  email: (req) => norm(req.body?.email),
+  phone: (req) => norm(req.body?.phone),
+  memberNo: (req) => norm(req.body?.memberNo),
+  refreshToken: (req) => hashed(req.body?.refreshToken),
+  mfaTicket: (req) => hashed(req.body?.mfaTicket),
+  user: (req) => norm(req.auth?.sub),
+};
 
-function loginRateLimit({ perIp = 20, perAccount = 8, windowMs = 900_000 } = {}) {
+function loginRateLimit({ perIp = 20, perAccount = 8, windowMs = 900_000, key = 'email' } = {}) {
+  const keyOf = typeof key === 'function' ? key : KEYS[key];
   return async (req, res, next) => {
     try {
-      const email = accountKey(req);
+      const account = keyOf(req);
       const tenant = req.tenant?.slug || 'unknown';
       const [byIp, byAccount] = await Promise.all([
         store.incr(windowKey('login:ip', req.ip, windowMs), windowMs),
-        store.incr(windowKey('login:acct', `${tenant}:${email}`, windowMs), windowMs),
+        account ? store.incr(windowKey('login:acct', `${tenant}:${account}`, windowMs), windowMs) : { count: 0, resetMs: 0 },
       ]);
       if (byIp.count > perIp || byAccount.count > perAccount) {
         res.set('retry-after', String(Math.ceil(Math.max(byIp.resetMs, byAccount.resetMs) / 1000)));
@@ -73,8 +85,9 @@ function loginRateLimit({ perIp = 20, perAccount = 8, windowMs = 900_000 } = {})
 
 /** Clear the account counter after a success, so one fat-fingered password
  *  does not count against the user for the next fifteen minutes. */
-async function clearLoginAttempts(req, { windowMs = 900_000 } = {}) {
-  const email = accountKey(req);
+async function clearLoginAttempts(req, { windowMs = 900_000, key = 'email' } = {}) {
+  const email = (typeof key === 'function' ? key : KEYS[key])(req);
+  if (!email) return;
   const tenant = req.tenant?.slug || 'unknown';
   await store.reset(windowKey('login:acct', `${tenant}:${email}`, windowMs));
 }
@@ -101,6 +114,8 @@ function gateFor(slug, size) {
 function acquire(slug, size, timeoutMs = 10_000) {
   const g = gateFor(slug, size);
   if (g.active < g.size) { g.active += 1; return Promise.resolve(() => release(g)); }
+  // A bounded wait list: past four times the slots, a request is refused at once rather than parked.
+  if (g.queue.length >= g.size * 4) return Promise.reject(Object.assign(new Error('TENANT_BUSY: too many requests waiting'), { status: 503 }));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       const i = g.queue.indexOf(entry);

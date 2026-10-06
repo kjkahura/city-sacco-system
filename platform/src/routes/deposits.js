@@ -383,6 +383,7 @@ posting('transfer-transactions', async (c, req, b) => {
       narration: b.notes || null, createdBy: req.auth.email, user: req.auth });
     return r.savingsTransaction || r.savings || r;
   }
+  await CTL.assertWithinLimit(c, req.auth, 'withdrawal', b.amount);
   return S.transfer(c, req.params.id, { toAccountId: target, amount: b.amount, valueDate: b.valueDate || undefined, narration: b.notes || null,
     createdBy: req.auth.email, user: req.auth });
 });

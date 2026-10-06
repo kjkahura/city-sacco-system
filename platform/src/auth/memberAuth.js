@@ -77,10 +77,14 @@ async function activate(c, { memberNo, nationalId, phone, pin }) {
   if (!m) throw noMatch;
   // A current member (INACTIVE or ACTIVE, the reference platform's states); a group has no portal.
   if (m.holder_type === 'GROUP') throw noMatch;
-  if (!CURRENT.includes(m.status)) throw err(`MEMBER_NOT_ACTIVE: ${m.status}`, 403);
   const idKey = (v) => String(v || '').replace(/\s/g, '').toUpperCase();
   if (!m.national_id || idKey(m.national_id) !== idKey(nationalId)) throw noMatch;
   if (m.phone && normalisePhone(m.phone) !== ph) throw noMatch;
+  // Said only once the caller has shown they know the member, so states cannot be read by member number.
+  if (!CURRENT.includes(m.status)) throw err(`MEMBER_NOT_ACTIVE: ${m.status}`, 403);
+  // With PORTAL_ACTIVATION_REQUIRES_PHONE_ON_FILE=true, a member with no phone on record activates at the
+  // branch (staff record the phone first), not with a number of the caller's choosing.
+  if (!m.phone && process.env.PORTAL_ACTIVATION_REQUIRES_PHONE_ON_FILE === 'true') throw err('PHONE_NOT_ON_FILE: ask your branch to record your phone number', 409);
 
   const { rows: existing } = await c.query(
     'SELECT 1 FROM member_credentials WHERE member_id = $1', [m.id]);
@@ -214,9 +218,21 @@ async function changePin(c, memberId, { currentPin, newPin }) {
   const { rows: [cred] } = await c.query(
     'SELECT * FROM member_credentials WHERE member_id = $1 FOR UPDATE', [memberId]);
   if (!cred) throw err('NOT_ACTIVATED', 404);
-  if (!(await verifyPassword(String(currentPin || ''), cred.pin_hash))) throw err('INVALID_CREDENTIALS', 401);
+  if (cred.locked_until && new Date(cred.locked_until) > new Date()) return refuse('ACCOUNT_LOCKED', 423);
+  if (!(await verifyPassword(String(currentPin || ''), cred.pin_hash))) {
+    // A wrong current PIN counts towards the same lockout as a wrong sign-in, so a stolen session cannot guess it.
+    const attempts = cred.failed_attempts + 1;
+    const lock = attempts >= MAX_ATTEMPTS;
+    await c.query(
+      `UPDATE member_credentials SET failed_attempts = $2,
+         locked_until = CASE WHEN $3 THEN now() + ($4 || ' minutes')::interval ELSE locked_until END,
+         status = CASE WHEN $3 THEN 'LOCKED' ELSE status END WHERE member_id = $1`,
+      [memberId, lock ? 0 : attempts, lock, String(LOCK_MINUTES)]);
+    if (lock) await c.query('UPDATE member_sessions SET revoked_at = now() WHERE member_id = $1 AND revoked_at IS NULL', [memberId]);
+    return refuse(lock ? 'TOO_MANY_ATTEMPTS_ACCOUNT_LOCKED' : 'INVALID_CREDENTIALS', lock ? 423 : 401);
+  }
   await c.query(
-    'UPDATE member_credentials SET pin_hash = $1, pin_changed_at = now() WHERE member_id = $2',
+    'UPDATE member_credentials SET pin_hash = $1, pin_changed_at = now(), failed_attempts = 0 WHERE member_id = $2',
     [await hashPin(newPin), memberId]);
   // A PIN change signs out every other device.
   await c.query('UPDATE member_sessions SET revoked_at = now() WHERE member_id = $1 AND revoked_at IS NULL', [memberId]);

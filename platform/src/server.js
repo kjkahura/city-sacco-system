@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('crypto');
+
 const path = require('path');
 const express = require('express');
 const { pool } = require('./db/pool');
@@ -16,6 +18,18 @@ const { nullHandling } = require('./lib/apiStandards');
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.disable('x-powered-by');
+
+// API answers carry members' data: not cached, not sniffed, not framed, no referrer. A route that
+// serves a document or a page sets its own Content-Security-Policy over this one.
+const apiHeaders = (_req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', 'no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+  if (process.env.NODE_ENV === 'production') res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+};
+app.use(['/api', '/admin', '/hooks'], apiHeaders);
 // Behind a load balancer the tenant subdomain arrives in X-Forwarded-Host.
 // Enable only when a trusted proxy actually sets it. Note that even if a
 // client forges the header, the JWT tenant claim still wins and a mismatch
@@ -48,7 +62,8 @@ app.get('/health', async (_req, res) => {
       rateStore: store.health(),
     });
   } catch (e) {
-    res.status(503).json({ status: 'degraded', error: e.message });
+    console.error('[health]', e.message);
+    res.status(503).json({ status: 'degraded', error: 'DATABASE_UNAVAILABLE' });
   }
 });
 
@@ -96,7 +111,8 @@ app.get('/', (_req, res) => res.redirect(302, '/console/'));
 // Control plane. Platform admins only; never tenant-scoped.
 // ---------------------------------------------------------------------------
 const admin = express.Router();
-admin.use(resolveTenant({ required: false }), requireAuth('PLATFORM_ADMIN'));
+// Off unless ADMIN_API=on; its own signing key and audience; audited (tenancy/adminAuth).
+admin.use(require('./tenancy/adminAuth').requirePlatformAdmin());
 
 const wrap = (fn) => async (req, res, next) => {
   try { res.json(await fn(req)); } catch (e) { next(e); }
@@ -311,8 +327,20 @@ app.use((err, _req, res, _next) => {
   const dbRefusal = err.code === '23001' || err.code === '23514';
   // Row security (branch access) and the till's permission checks.
   if (err.code === '42501' && /row-level security/.test(err.message || '')) err.message = 'OUTSIDE_YOUR_BRANCH_ACCESS';
+  // Database errors a request can cause are the request's fault, answered with a code, not the database's text.
+  const PG = { '22P02': [400, 'INVALID_VALUE'], 22003: [400, 'VALUE_OUT_OF_RANGE'], 22007: [400, 'INVALID_DATE'], 22008: [400, 'INVALID_DATE'],
+    23505: [409, 'ALREADY_EXISTS'], 23503: [409, 'REFERENCED_RECORD_MISSING_OR_IN_USE'], 57014: [503, 'REQUEST_TOOK_TOO_LONG'],
+    '40P01': [409, 'CONFLICT_TRY_AGAIN'], 40001: [409, 'CONFLICT_TRY_AGAIN'] };
+  const pg = !err.status && PG[err.code];
+  if (pg) { apiError(res, pg[0], pg[0], pg[1]); return; }
   const status = err.status || (err.code === '42501' ? 403 : err.code === '22023' ? 400 : dbRefusal ? 409 : 500);
-  if (status >= 500) console.error('[error]', err);
+  if (status >= 500) {
+    // The detail stays in the log, under an id the caller can quote; the answer carries no internals.
+    const id = crypto.randomUUID();
+    console.error('[error]', id, err);
+    apiError(res, status, status, err.status && err.status !== 500 ? err.message : `INTERNAL_ERROR: ${id}`);
+    return;
+  }
   apiError(res, status, status, err.message || 'INTERNAL_ERROR');
 });
 

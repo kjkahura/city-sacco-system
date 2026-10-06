@@ -1,5 +1,7 @@
 'use strict';
 
+const { notAfterToday } = require('../lib/valueDates');
+
 const CTL = require('../domain/controls');
 const { can } = require('../lib/permissions');
 
@@ -74,6 +76,7 @@ router.post('/deposit-transactions\\:bulk', ...bulkDeposits);
 router.post('/transactions/reversals', ...tx(async (c, req, _res, { actor }) => {
   const refs = Array.isArray(req.body?.references) ? req.body.references : null;
   if (!refs || !refs.length) throw acct.err('REFERENCES_IS_A_LIST', 400);
+  if (refs.length > 1000) throw acct.err('AT_MOST_1000_REFERENCES', 400);
   const done = [];
   const errors = [];
   for (const r of refs) {
@@ -133,6 +136,8 @@ router.post('/:id/withdrawals', ...tx(async (c, req, res, { actor, user }) => {
 
 router.post('/:id/transfers', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
+  // Money leaving an account by transfer is held to the user's withdrawal limit, as cash is.
+  await CTL.assertWithinLimit(c, user, 'withdrawal', req.body?.amount);
   const t = await S.transfer(c, req.params.id, { ...req.body, createdBy: actor, user });
   return CF.applyToTransaction(c, t, req.body?.customFields, { user });
 }));
@@ -201,6 +206,7 @@ router.delete('/:id', ...tx((c, req, _res, { actor }) => S.deleteAccount(c, req.
 
 router.post('/:id/fees', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
+  await notAfterToday(c, req.body?.valueDate);
   if (req.body?.amount !== undefined) await CTL.assertWithinLimit(c, user, 'fee', req.body.amount);
   return await S.applyFee(c, req.params.id, { ...req.body, createdBy: actor });
 }));
@@ -223,6 +229,7 @@ router.post('/:id/overdraft/write-off', ...tx(async (c, req, res, { actor }) => 
 // application date (or when told to). The end of day does both for every
 // account; this is for one.
 router.post('/:id/interest', ...tx(async (c, req, _res, { actor }) => {
+  await notAfterToday(c, req.body?.date, 'date');
   const date = req.body?.date || await orgToday(c);
   const accrued = await S.accrueInterest(c, req.params.id, { date, createdBy: actor });
   const applied = req.body?.apply ? await S.applyInterest(c, req.params.id, { date, createdBy: actor }) : [];

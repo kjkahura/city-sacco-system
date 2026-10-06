@@ -48,7 +48,9 @@ async function backupTenant(slug, { dir = DIR } = {}) {
   // Sandboxes are not backed up (they hold no live data).
   if (t.environment === 'SANDBOX') throw Object.assign(new Error(`A_SANDBOX_IS_NOT_BACKED_UP: ${slug}`), { status: 409 });
 
-  fs.mkdirSync(path.join(dir, slug), { recursive: true });
+  // Only the platform's own user reads backups (a dump is the whole book).
+  fs.mkdirSync(path.join(dir, slug), { recursive: true, mode: 0o700 });
+  fs.chmodSync(path.join(dir, slug), 0o700);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const file = path.join(dir, slug, `${t.schema_name}-${stamp}.dump`);
 
@@ -60,6 +62,8 @@ async function backupTenant(slug, { dir = DIR } = {}) {
 
   try {
     // Custom format so pg_restore can do a selective, parallel restore.
+    // Made private before pg_dump writes into it, so the book is never readable by others, even mid-write.
+    fs.writeFileSync(file, '', { mode: 0o600 });
     await run(PG_DUMP, [
       '--format=custom', '--no-owner', '--no-privileges',
       '--schema', t.schema_name,
@@ -70,6 +74,7 @@ async function backupTenant(slug, { dir = DIR } = {}) {
       process.env.PGDATABASE || 'sacco',
     ]);
 
+    fs.chmodSync(file, 0o600);
     const { size } = fs.statSync(file);
     if (!size) throw new Error('pg_dump produced an empty file');
 
@@ -87,6 +92,7 @@ async function backupTenant(slug, { dir = DIR } = {}) {
       if (fs.statSync(probe).size !== size) throw new Error('encryption round trip size mismatch');
       fs.unlinkSync(probe);
       fs.unlinkSync(file);
+      fs.chmodSync(enc, 0o600);
       finalPath = enc;
       encrypted = true;
     }
@@ -95,7 +101,11 @@ async function backupTenant(slug, { dir = DIR } = {}) {
     const bytes = fs.statSync(finalPath).size;
 
     let shipped = null;
-    if (encrypted || !crypt.isConfigured()) {
+    if (!encrypted && offsite.parse()) {
+      // A book leaves the machine encrypted or not at all (the error crypt.js names): set BACKUP_ENCRYPTION_KEY.
+      shipped = { shipped: false, error: 'BACKUP_ENCRYPTION_KEY_REQUIRED_FOR_OFFSITE: the offsite copy was not made' };
+      console.error(`[backup] ${slug}: offsite copy refused, BACKUP_ENCRYPTION_KEY is not set`);
+    } else if (encrypted) {
       try {
         shipped = await offsite.ship(finalPath, { slug });
       } catch (e) {

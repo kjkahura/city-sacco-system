@@ -228,7 +228,9 @@ td,th{padding:4px 8px}.page-break{page-break-after:always;break-after:page}</sty
 }
 
 /** The content security policy a generated document is served with. */
-const CSP = "default-src 'none'; style-src 'unsafe-inline' https:; img-src data: https:; font-src https: data:";
+// Images and fonts may be hosted (a logo); nothing may post a form, change the base address, frame it
+// from elsewhere or run, and the page is sandboxed (no scripts, no forms, no top navigation).
+const CSP = "default-src 'none'; style-src 'unsafe-inline' https:; img-src data: https:; font-src https: data:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-same-origin allow-popups allow-modals";
 
 /**
  * Generate an account document (`from` and `to` bound the statement block)

@@ -20,15 +20,24 @@ const { err } = require('../lib/errors');
 const TICKET_TTL_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 5;
 
+// TOTP secrets are sealed at rest (AES-256-GCM, domain/notifications/secrets), so a copy of the
+// database or a backup does not hand out second factors. A secret stored before sealing is read as is.
+const SECRETS = require('../domain/notifications/secrets');
+const sealSecret = (v) => SECRETS.seal(v);
+const openSecret = (v) => (v && String(v).startsWith('v1:') ? SECRETS.open(v) : v);
+
 const sha = (v) => crypto.createHash('sha256').update(v).digest('hex');
 
 /** Step 1 of enrolment: hand back a secret to scan. Not active yet. */
 async function beginEnrolment(user, { issuer = 'SACCO Platform' } = {}) {
   const secret = totp.generateSecret();
-  await pool.query(
-    'UPDATE platform.users SET mfa_secret = $1, mfa_enabled = false WHERE id = $2',
-    [secret, user.id]
+  // A working second factor is replaced only through disable (with a code) or an administrator's reset,
+  // never by starting enrolment again with just a session.
+  const { rowCount } = await pool.query(
+    'UPDATE platform.users SET mfa_secret = $1, mfa_enabled = false WHERE id = $2 AND mfa_enabled = false',
+    [sealSecret(secret), user.id]
   );
+  if (!rowCount) throw err('MFA_ALREADY_ENABLED: disable it with a code first, or ask an administrator to reset it', 409);
   return {
     secret,
     uri: totp.provisioningUri({ secret, account: user.email, issuer }),
@@ -48,7 +57,7 @@ async function completeEnrolment(userId, token) {
   if (!u?.mfa_secret) throw err('MFA_ENROLMENT_NOT_STARTED', 409);
   if (u.mfa_enabled) throw err('MFA_ALREADY_ENABLED', 409);
 
-  const res = totp.verify(token, u.mfa_secret);
+  const res = totp.verify(token, openSecret(u.mfa_secret));
   if (!res.ok) throw err('INVALID_MFA_CODE', 401);
 
   const recovery = Array.from({ length: 10 }, () =>
@@ -84,7 +93,7 @@ async function disable(userId, token) {
   const { rows } = await pool.query(
     'SELECT mfa_secret, mfa_enabled FROM platform.users WHERE id = $1', [userId]);
   if (!rows[0]?.mfa_enabled) throw err('MFA_NOT_ENABLED', 409);
-  if (!totp.verify(token, rows[0].mfa_secret).ok) throw err('INVALID_MFA_CODE', 401);
+  if (!totp.verify(token, openSecret(rows[0].mfa_secret)).ok) throw err('INVALID_MFA_CODE', 401);
 
   await pool.query(
     `UPDATE platform.users SET mfa_enabled = false, mfa_secret = NULL,
@@ -137,16 +146,21 @@ async function verifyChallenge(ticket, { token, recoveryCode }) {
     let usedRecovery = false;
 
     if (token && user.mfa_secret) {
-      const res = totp.verify(token, user.mfa_secret);
+      const res = totp.verify(token, openSecret(user.mfa_secret));
       // Reject a code already accepted at this counter, so an observed code
       // cannot be reused inside its 30 second life.
-      if (res.ok && Number(user.mfa_last_counter) === res.counter) {
+      // An earlier step counts as used too: once a later code is accepted, an older one is no good.
+      if (res.ok && user.mfa_last_counter !== null && user.mfa_last_counter !== undefined && res.counter <= Number(user.mfa_last_counter)) {
         throw err('MFA_CODE_ALREADY_USED', 401);
       }
       if (res.ok) {
         ok = true;
         await client.query('UPDATE platform.users SET mfa_last_counter = $1 WHERE id = $2',
           [res.counter, user.id]);
+        // A secret stored before sealing is sealed the first time it is used.
+        if (!String(user.mfa_secret).startsWith('v1:')) {
+          await client.query('UPDATE platform.users SET mfa_secret = $1 WHERE id = $2', [sealSecret(user.mfa_secret), user.id]);
+        }
       }
     } else if (recoveryCode) {
       const { rows: codes } = await client.query(

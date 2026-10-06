@@ -29,7 +29,7 @@ const refused = (res, out) => apiError(res, out.failure.status, out.failure.stat
 
 // --- auth -----------------------------------------------------------------
 
-router.post('/auth/activate', loginRateLimit({ perIp: 10, perAccount: 5 }), async (req, res, next) => {
+router.post('/auth/activate', loginRateLimit({ perIp: 10, perAccount: 5, key: 'memberNo' }), async (req, res, next) => {
   try {
     const b = req.body || {};
     if (!b.memberNo || !b.nationalId || !b.phone || !b.pin) {
@@ -43,7 +43,7 @@ router.post('/auth/activate', loginRateLimit({ perIp: 10, perAccount: 5 }), asyn
 // (five wrong PINs, fifteen minutes), which survives across processes and
 // restarts. The limiter here is for spraying: it keeps its tight per-IP
 // window and gives the per-account counter enough room not to fire first.
-router.post('/auth/login', loginRateLimit({ perAccount: 20 }), async (req, res, next) => {
+router.post('/auth/login', loginRateLimit({ perAccount: 20, key: 'phone' }), async (req, res, next) => {
   try {
     const { phone, pin } = req.body || {};
     if (!phone || !pin) return badRequest(res, 'PHONE_AND_PIN_REQUIRED');
@@ -55,7 +55,7 @@ router.post('/auth/login', loginRateLimit({ perAccount: 20 }), async (req, res, 
   } catch (e) { next(e); }
 });
 
-router.post('/auth/refresh', loginRateLimit({ perIp: 60, perAccount: 60 }), async (req, res, next) => {
+router.post('/auth/refresh', loginRateLimit({ perIp: 60, perAccount: 60, key: 'refreshToken' }), async (req, res, next) => {
   try {
     const { refreshToken } = req.body || {};
     if (!refreshToken) return badRequest(res, 'REFRESH_TOKEN_REQUIRED');
@@ -74,7 +74,14 @@ router.post('/auth/logout', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/auth/pin', ...write((c, req) => MA.changePin(c, req.member.id, req.body || {})));
+// The current PIN is checked under the same lockout as sign-in, and the attempts are limited per member.
+router.post('/auth/pin', requireMember(), loginRateLimit({ perIp: 30, perAccount: 10, key: (req) => String(req.member?.id || '') }), async (req, res, next) => {
+  try {
+    const out = await withTenant(req.tenant.schema_name, (c) => MA.changePin(c, req.member.id, req.body || {}));
+    if (out?.failure) return refused(res, out);
+    res.status(201).json(out);
+  } catch (e) { next(e); }
+});
 
 // --- me -------------------------------------------------------------------
 

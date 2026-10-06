@@ -27,12 +27,29 @@
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const { notFound } = require('./http');
+const { once } = require('./idempotency');
 
 const ctxOf = (req) => ({ actor: req.auth?.email, user: req.auth });
+
+const statusOf = (res, status, keepStatus) => (status !== null ? (keepStatus && res.statusCode !== 200 ? res.statusCode : status) : res.statusCode);
 
 function handle(fn, { write = false, status = null, keepStatus = false, what = null, always = false } = {}) {
   return async (req, res, next) => {
     try {
+      // A write sent with an Idempotency-Key (a retry after a timeout or a dropped
+      // connection) gets the first answer back instead of acting twice (lib/idempotency).
+      if (write && req.method === 'POST' && req.get('idempotency-key')) {
+        const r = await withTenant(req.tenant.schema_name, (c) => once(c, req, `${req.method} ${req.baseUrl}${req.path}`, async () => {
+          const v = await fn(c, req, res, ctxOf(req));
+          if (res.headersSent || (v === undefined && !always)) return { skip: true };
+          if (v === null && what) return { status: 404, body: { errors: [{ errorCode: 404, errorReason: `${String(what).toUpperCase()}_NOT_FOUND` }] } };
+          return { status: statusOf(res, status, keepStatus), body: v };
+        }));
+        if (r.skip) return;
+        if (r.replayed) res.set('idempotent-replayed', 'true');
+        res.status(r.status).json(r.body);
+        return;
+      }
       const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res, ctxOf(req)));
       if (out === undefined && !always) return;
       if (out === null && what) { notFound(res, what); return; }

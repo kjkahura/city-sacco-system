@@ -49,4 +49,16 @@ function cell(v) {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-module.exports = { parse, cell };
+/**
+ * A cell of a file people open in a spreadsheet (exports, reports). Text that
+ * a spreadsheet would read as a formula (=, +, @, a tab or carriage return, or
+ * a - that does not start a number) gets a leading apostrophe, so a name or a
+ * narration typed by a member cannot run as a formula on a staff machine.
+ * Backups and imports use cell(), which keeps values exactly.
+ */
+function exportCell(v) {
+  if (typeof v === 'string' && /^[=+@\t\r]|^-(?!\d+(\.\d+)?$)/.test(v)) return cell(`'${v}`);
+  return cell(v);
+}
+
+module.exports = { parse, cell, exportCell };

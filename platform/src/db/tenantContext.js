@@ -73,9 +73,18 @@ function actorParams() {
  * role row security applies to; without it they are refused, not shown
  * every branch.
  */
+// A request's statements are bounded, so one caller (or one aborted request whose
+// query keeps running) cannot hold a shared connection for long. Jobs (no request) are not.
+const REQUEST_STATEMENT_TIMEOUT = `${Math.max(1, Number(process.env.REQUEST_STATEMENT_TIMEOUT_MS) || 55_000)}ms`;
+
 async function bind(client, schemaName) {
   const params = actorParams();
   await client.query(BIND_SQL, [schemaName, ...params]);
+  const ctx = requestContext.current();
+  if (ctx && !ctx.noStatementTimeout) {
+    await client.query(`SELECT set_config('statement_timeout', $1, true), set_config('idle_in_transaction_session_timeout', $2, true)`,
+      [REQUEST_STATEMENT_TIMEOUT, REQUEST_STATEMENT_TIMEOUT]);
+  }
   if (params[4] || params[5]) {
     try {
       await client.query('SET LOCAL ROLE sacco_branch_scoped');
@@ -136,4 +145,14 @@ async function withTenantRead(schemaName, fn) {
   }
 }
 
-module.exports = { withTenant, withTenantRead, orgToday, assertSchemaName, TenantError, SCHEMA_RE };
+/**
+ * A request that is a job (end of day run now, an import, a backup): its
+ * statements are not cut off at the request limit. Express middleware.
+ */
+function longRunning(_req, _res, next) {
+  const ctx = requestContext.current();
+  if (ctx) ctx.noStatementTimeout = true;
+  next();
+}
+
+module.exports = { withTenant, withTenantRead, orgToday, assertSchemaName, TenantError, SCHEMA_RE, longRunning };

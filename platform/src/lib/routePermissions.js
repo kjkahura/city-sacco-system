@@ -330,10 +330,11 @@ const RULES = [
   ['POST', '/data/import/events/*', ADMIN],
 
   // --- shares and dividends (SACCO; not in the reference platform) ----------------------------------------
-  ['GET', '/shares', OPEN], ['GET', '/shares/*', OPEN],
+  // Share holdings are members' data: reading them needs the member permission (and branch limits apply through members).
+  ['GET', '/shares', V_MEMBER], ['GET', '/shares/*', V_MEMBER],
   ['POST', '/shares', 'BUY_SHARES'], ['POST', '/shares/:id/purchases', 'BUY_SHARES'],
   ['POST', '/shares/:id/transfers', 'TRANSFER_SHARES'], ['POST', '/shares/transactions/:reference/reversal', 'TRANSFER_SHARES'],
-  ['GET', '/dividends', OPEN], ['GET', '/dividends/*', OPEN], ['POST', '/dividends', 'MANAGE_DIVIDENDS'], ['POST', '/dividends/*', 'MANAGE_DIVIDENDS'],
+  ['GET', '/dividends', V_MEMBER], ['GET', '/dividends/*', V_MEMBER], ['POST', '/dividends', 'MANAGE_DIVIDENDS'], ['POST', '/dividends/*', 'MANAGE_DIVIDENDS'],
 
   // --- reports, workspace ---------------------------------------------------------------------
   ['GET', '/reports/balance-sheet', V_ACC], ['GET', '/reports/income-statement', V_ACC], ['GET', '/reports/prudential', V_ACC],
@@ -398,6 +399,7 @@ const CRITICAL = [
   ['POST', '/users/:id/unlock'], ['POST', '/roles'], ['PATCH', '/roles/:code'], ['PUT', '/roles/:code'], ['DELETE', '/roles/:code'],
   ['PUT', '/access-preferences'], ['PATCH', '/access-preferences'], ['POST', '/access-preferences/blocked-ips/reset'],
   ['POST', '/consumers'], ['PATCH', '/consumers/:id'], ['DELETE', '/consumers/:id'], ['DELETE', '/consumers/:id/keys/:keyId'],
+  ['POST', '/consumers/:id/keys'], ['POST', '/consumers/:id/secret-key'],
   ['POST', '/loan-products'], ['PATCH', '/loan-products/:id'], ['POST', '/loan-products/:id/accounting-method'],
   ['POST', '/deposit-products'], ['PATCH', '/deposit-products/:id'], ['POST', '/deposit-products/:id/accounting-method'],
   ['PUT', '/accounting/settings'], ['PUT', '/organization'], ['PATCH', '/branches/:id'],

@@ -151,6 +151,33 @@ function assertActorMay(actor, { role, rolePermissions = [], permissions = [], t
   if (missing.length) throw err(`YOU_CANNOT_GIVE_PERMISSIONS_YOU_DO_NOT_HOLD: ${[...new Set(missing)].join(', ')}`, 403);
 }
 
+/**
+ * A user limited to some branches, or with transaction limits of their own,
+ * hands on no more: the users they make or change stay inside their
+ * branches, and get no higher limits than theirs (null is no limit).
+ */
+async function assertScope(actor, { allBranches, branchIds = [], target = null, limits = {} }) {
+  if (!actor || actor.role === 'TENANT_ADMIN') return;
+  const mine = actor.branches;
+  if (Array.isArray(mine)) {
+    const inside = (ids) => ids.filter(Boolean).every((b) => mine.includes(b));
+    if (allBranches) throw err('YOU_CANNOT_GIVE_ACCESS_TO_EVERY_BRANCH: your own access is limited to some branches', 403);
+    if (!inside(branchIds)) throw err('YOU_CANNOT_GIVE_ACCESS_TO_BRANCHES_YOU_DO_NOT_HAVE', 403);
+    if (target && (target.all_branches || !inside([target.branch_id, ...(target.branch_access || [])]))) {
+      throw err('THE_USER_HAS_BRANCHES_YOU_DO_NOT_HAVE', 403);
+    }
+  }
+  const set = Object.entries(limits).filter(([, v]) => v !== undefined);
+  if (!set.length || !actor.sub) return;
+  const { rows: [own] } = await pool.query(`SELECT ${Object.values(LIMITS).join(', ')} FROM platform.users WHERE id::text = $1`, [String(actor.sub)]);
+  for (const [col, v] of set) {
+    const cap = own ? own[col] : null;
+    if (cap !== null && cap !== undefined && (v === null || Number(v) > Number(cap))) {
+      throw err(`YOU_CANNOT_GIVE_A_HIGHER_LIMIT_THAN_YOURS: ${col}`, 403);
+    }
+  }
+}
+
 /** The user type as it will stand, checked against the role and branch (the reference platform's rules). */
 function typeOf({ role, roleType, given, before }) {
   let t = given !== undefined ? (given ? String(given).toUpperCase() : null) : before?.user_type ?? null;
@@ -178,7 +205,9 @@ async function create(tenant, body, { actor, actorUser = null }) {
   const effective = userType || r.userType;
   if (['TELLER', 'CREDIT_OFFICER'].includes(effective) && !branchId) throw err(`A_${effective}_BELONGS_TO_A_BRANCH: give a branchId`);
   const access = body.accessRights || {};
-  const allBranches = access.allBranches !== undefined ? Boolean(access.allBranches) : body.allBranches !== undefined ? Boolean(body.allBranches) : true;
+  const allGiven = access.allBranches !== undefined ? Boolean(access.allBranches) : body.allBranches !== undefined ? Boolean(body.allBranches) : undefined;
+  // A creator limited to some branches makes users limited too, unless told otherwise (and then refused below).
+  const allBranches = allGiven !== undefined ? allGiven : !(actorUser && actorUser.role !== 'TENANT_ADMIN' && Array.isArray(actorUser.branches));
   const branchAccess = (await branchesOf(tenant, access.branches ?? body.branchAccess)) || [];
   const otherOfficers = access.otherCreditOfficersClients ?? body.otherCreditOfficersClients;
   // A password the administrator chose is still temporary: the user replaces it.
@@ -186,6 +215,12 @@ async function create(tenant, body, { actor, actorUser = null }) {
   if (given) await passwords.check(tenant, String(body.password), { email });
   const password = given ? String(body.password) : temporaryPassword();
   const lim = Object.fromEntries(Object.entries(LIMITS).map(([k, col]) => [col, limit(body[k], k.replace(/[A-Z]/g, (x) => `_${x}`).toUpperCase()) ?? null]));
+  // A limit left out takes the creator's own, when they have one, rather than none.
+  if (actorUser && actorUser.role !== 'TENANT_ADMIN' && actorUser.sub) {
+    const { rows: [own] } = await pool.query(`SELECT ${Object.values(LIMITS).join(', ')} FROM platform.users WHERE id::text = $1`, [String(actorUser.sub)]);
+    for (const [k, col] of Object.entries(LIMITS)) if (body[k] === undefined && own && own[col] !== null) lim[col] = Number(own[col]);
+  }
+  await assertScope(actorUser, { allBranches, branchIds: [branchId, ...branchAccess], limits: lim });
   try {
     const { rows: [u] } = await pool.query(
       `INSERT INTO platform.users (tenant_id, email, password_hash, full_name, title, language, role, role_code, permissions, user_type, status,
@@ -286,6 +321,21 @@ async function update(tenant, id, body, { actor, actorId, actorUser = null }) {
       const n = await officerMembers(tenant, before.email);
       if (n) throw err(`CREDIT_OFFICER_HAS_MEMBERS: ${n} member(s) are assigned to ${before.email}; reassign them, or send confirmCreditOfficerMembers: true`, 409);
     }
+    // Access and limits, like role and status, are changed by someone else, and only within the changer's own.
+    const SCOPE = ['all_branches', 'branch_access', 'branch_id', 'other_officers_clients', 'user_type', ...Object.values(LIMITS)];
+    // A form sends every field back: only a value that differs from the stored one is a change.
+    const same = (a, b) => (Array.isArray(a) || Array.isArray(b)
+      ? JSON.stringify([...(a || [])].map(String).sort()) === JSON.stringify([...(b || [])].map(String).sort())
+      : (a === null || a === undefined ? null : typeof a === 'number' || typeof b === 'number' ? Number(a) : String(a))
+        === (b === null || b === undefined ? null : typeof a === 'number' || typeof b === 'number' ? Number(b) : String(b)));
+    for (const k of SCOPE) if (sets[k] !== undefined && same(sets[k], before[k])) delete sets[k];
+    if (self && SCOPE.some((k) => sets[k] !== undefined)) throw err('YOU_CANNOT_CHANGE_YOUR_OWN_ACCESS_OR_LIMITS', 409);
+    await assertScope(actorUser, {
+      target: before,
+      allBranches: sets.all_branches,
+      branchIds: [sets.branch_id, ...(sets.branch_access || [])],
+      limits: Object.fromEntries(Object.values(LIMITS).map((col) => [col, sets[col]])),
+    });
     const keys = Object.keys(sets);
     if (!keys.length) { await client.query('ROLLBACK'); return shape(before); }
     const { rows: [after] } = await client.query(
@@ -332,8 +382,12 @@ async function unlock(tenant, id, { actor, actorUser = null }) {
   return get(tenant, u.id);
 }
 
-async function resetMfa(tenant, id, { actor }) {
+async function resetMfa(tenant, id, { actor, actorId = null, actorUser = null }) {
   const u = await get(tenant, id);
+  if (actorId && u.id === actorId) throw err('YOU_CANNOT_RESET_YOUR_OWN_SECOND_FACTOR: ask another administrator', 409);
+  assertActorMay(actorUser, { target: { role: u.role } });
+  const { rows: [t] } = await pool.query('SELECT all_branches, branch_id, branch_access FROM platform.users WHERE id = $1', [u.id]);
+  await assertScope(actorUser, { target: t });
   await pool.query(
     `UPDATE platform.users SET mfa_enabled = false, mfa_secret = NULL, mfa_enrolled_at = NULL, mfa_last_counter = NULL, updated_at = now()
      WHERE id = $1`, [u.id]);

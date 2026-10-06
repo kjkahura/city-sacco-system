@@ -276,8 +276,12 @@ const repay = (id, amount, on) => call('POST', `/api/loans/${id}/repayments`, { 
     check('the edit is on the register', (await call('GET', `/api/loans/${ap.id}/schedule-edits`)).body.some((e) => e.kind === 'APPLICATION' && e.note === 'harvest'));
     check('the editor endpoint sees an application', (await call('GET', `/api/loans/${ap.id}/schedule/editable`)).body.application === true);
     await T((c) => L.changeState(c, ap.id, 'APPROVE', { createdBy: 'manager' }));
-    const late = await call('POST', `/api/loans/${ap.id}/disbursements`, { amount: 3000, channelId: 'bank', valueDate: inDays(25) });
-    check('disbursing after the first edited date is refused, to be edited first', late.status === 409 && /APPLICATION_SCHEDULE_DATES_DO_NOT_FIT/.test(late.reason), late.reason);
+    // The API refuses a future value date (security review, BIZ-2); the fit check is the domain's, called directly.
+    const lateApi = await call('POST', `/api/loans/${ap.id}/disbursements`, { amount: 3000, channelId: 'bank', valueDate: inDays(25) });
+    let late = null;
+    try { await T((c) => L.disburse(c, ap.id, { amount: 3000, channelId: 'bank', valueDate: inDays(25), createdBy: 'teller' })); } catch (e) { late = e; }
+    check('disbursing after the first edited date is refused, to be edited first', lateApi.status === 400 && /FUTURE/.test(lateApi.reason)
+      && late && /APPLICATION_SCHEDULE_DATES_DO_NOT_FIT/.test(late.message), `${lateApi.reason} ${late && late.message}`);
     const today = inDays(0);
     const dis = await call('POST', `/api/loans/${ap.id}/disbursements`, { amount: 3000, channelId: 'bank', valueDate: today });
     const sx = await sched(ap.id);

@@ -30,11 +30,11 @@ function excelNumber(v) {
 }
 
 function toCsv({ header = [], columns, rows, totals = null }) {
-  const lines = header.map(([k, v]) => [k, v].map(csv.cell).join(','));
+  const lines = header.map(([k, v]) => [k, v].map(csv.exportCell).join(','));
   if (lines.length) lines.push('');
-  lines.push(columns.map((c) => csv.cell(c.label)).join(','));
-  for (const r of rows) lines.push(columns.map((c) => csv.cell(valueOf(c, r))).join(','));
-  if (totals) lines.push(columns.map((c, i) => csv.cell(i === 0 && totals[c.key] === undefined ? 'Total' : totals[c.key])).join(','));
+  lines.push(columns.map((c) => csv.exportCell(c.label)).join(','));
+  for (const r of rows) lines.push(columns.map((c) => csv.exportCell(valueOf(c, r))).join(','));
+  if (totals) lines.push(columns.map((c, i) => csv.exportCell(i === 0 && totals[c.key] === undefined ? 'Total' : totals[c.key])).join(','));
   return `${lines.join('\r\n')}\r\n`;
 }
 

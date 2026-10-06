@@ -182,6 +182,8 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   if (!ch?.gl_account_code) throw err(`UNKNOWN_OR_UNSETTLED_CHANNEL: ${channelId}`);
 
   const asOf = valueDate ? ymd(valueDate) : (await orgToday(c));
+  // A staff user's repayment (the API, collection batches, pay-offs) is not dated in the future.
+  if (user && asOf > await orgToday(c)) throw err('VALUE_DATE_IS_IN_THE_FUTURE: post on today or an earlier day', 400);
   await assertNoLaterRepayment(c, l.id, asOf);
   // A custom allocation needs the product to allow it and the user the
   // permission (the reference platform). A pay-off allocates its own amounts (`internal`).

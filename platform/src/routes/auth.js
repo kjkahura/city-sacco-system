@@ -154,7 +154,7 @@ router.post('/login', loginRateLimit(), async (req, res, next) => {
  * a token that has already been used revokes the whole family, on the
  * assumption that a copy is in someone else's hands.
  */
-router.post('/refresh', loginRateLimit({ perIp: 60, perAccount: 60 }), async (req, res, next) => {
+router.post('/refresh', loginRateLimit({ perIp: 60, perAccount: 60, key: 'refreshToken' }), async (req, res, next) => {
   try {
     const { refreshToken } = req.body || {};
     if (!refreshToken) return apiError(res, 400, 400, 'REFRESH_TOKEN_REQUIRED');
@@ -199,7 +199,7 @@ router.get('/sessions', requireAuth(), async (req, res, next) => {
  * Critical actions (access preferences): the password again, for a token
  * good for five minutes that the critical request carries as X-Reauth-Token.
  */
-router.post('/reauth', loginRateLimit({ perIp: 30, perAccount: 10 }), requireAuth(), async (req, res, next) => {
+router.post('/reauth', requireAuth(), loginRateLimit({ perIp: 30, perAccount: 10, key: 'user' }), async (req, res, next) => {
   try {
     const { rows: [u] } = await pool.query('SELECT password_hash FROM platform.users WHERE id = $1', [req.auth.sub]);
     if (!u || !(await verifyPassword(String(req.body?.password || ''), u.password_hash))) {
@@ -223,7 +223,7 @@ const sessionOrPasswordChange = (req, res, next) => {
   return requireAuth()(req, res, next);
 };
 
-router.post('/password', sessionOrPasswordChange, async (req, res, next) => {
+router.post('/password', sessionOrPasswordChange, loginRateLimit({ perIp: 30, perAccount: 10, key: 'user' }), async (req, res, next) => {
   try {
     const { currentPassword, newPassword } = req.body || {};
     if (!currentPassword || !newPassword) return apiError(res, 400, 400, 'BOTH_PASSWORDS_REQUIRED');
@@ -252,7 +252,7 @@ router.post('/password', sessionOrPasswordChange, async (req, res, next) => {
 // --- second factor --------------------------------------------------------
 
 /** Exchange an MFA ticket plus a code for a real session. */
-router.post('/mfa/verify', loginRateLimit({ perIp: 30, perAccount: 30 }), async (req, res, next) => {
+router.post('/mfa/verify', loginRateLimit({ perIp: 30, perAccount: 30, key: 'mfaTicket' }), async (req, res, next) => {
   try {
     const { mfaTicket, code, recoveryCode } = req.body || {};
     if (!mfaTicket) return apiError(res, 400, 400, 'MFA_TICKET_REQUIRED');
@@ -285,6 +285,8 @@ const allowEnrolmentScope = (req, res, next) => {
   if (req.auth.scope && req.auth.scope !== 'mfa_enrolment') {
     return apiError(res, 403, 403, 'WRONG_TOKEN_SCOPE');
   }
+  // A session token (no scope) goes through the full check: the user active, of this tenant, not locked.
+  if (!req.auth.scope) return requireAuth()(req, res, next);
   next();
 };
 

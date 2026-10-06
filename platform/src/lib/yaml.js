@@ -155,6 +155,8 @@ function parse(text) {
       const kv = splitKey(ln.text);
       if (!kv) throw err(`YAML_EXPECTED_KEY_VALUE: line ${ln.no}`, 400);
       if (Object.prototype.hasOwnProperty.call(out, kv[0])) throw err(`YAML_DUPLICATE_KEY: line ${ln.no}: ${kv[0]}`, 400);
+      // A key that would reach an object's prototype is refused, not written.
+      if (['__proto__', 'constructor', 'prototype'].includes(kv[0])) throw err(`YAML_KEY_NOT_ALLOWED: line ${ln.no}: ${kv[0]}`, 400);
       pos += 1;
       out[kv[0]] = valueAfter(kv[1], indent, ln.no);
     }

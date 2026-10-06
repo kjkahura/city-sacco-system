@@ -1,5 +1,7 @@
 'use strict';
 
+const { notAfterToday } = require('../lib/valueDates');
+
 const express = require('express');
 const { withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
@@ -39,11 +41,13 @@ router.post('/', ...tx(async (c, req, res) => {
 
 router.post('/:id/purchases', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
+  await notAfterToday(c, req.body?.valueDate);
   return await SH.purchase(c, req.params.id, { ...req.body, createdBy: actor });
 }));
 
 router.post('/:id/transfers', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
+  await notAfterToday(c, req.body?.valueDate);
   return await SH.transfer(c, req.params.id, { ...req.body, createdBy: actor });
 }));
 
@@ -58,6 +62,7 @@ router.get('/:id/movements', requireAuth(), async (req, res, next) => {
       c,
       `SELECT mv.* FROM share_movements mv
        JOIN share_accounts a ON a.id = mv.account_id
+       JOIN members m ON m.id = a.member_id
        WHERE a.id::text = $1 OR a.account_no = $1
        ORDER BY mv.value_date DESC, mv.created_at DESC, mv.id`,
       [req.params.id],

@@ -1,5 +1,7 @@
 'use strict';
 
+const { notAfterToday } = require('../lib/valueDates');
+
 const { orgToday } = require('../lib/orgDate');
 const express = require('express');
 const { withTenantRead } = require('../db/tenantContext');
@@ -441,6 +443,7 @@ router.get('/:id/charge-write-offs', ...read((c, req) => WO.chargeWriteOffs(c, r
 
 router.post('/:id/disbursements', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
+  await notAfterToday(c, req.body?.valueDate);
   const { rows: [a] } = await c.query(
     'SELECT refinance_of, disbursement_savings_account_id, status FROM loan_accounts WHERE id::text = $1 OR account_no = $1', [req.params.id]);
   if (a?.refinance_of) return R.disburseRefinance(c, req.params.id, { ...req.body, createdBy: actor, user });
@@ -455,6 +458,7 @@ router.post('/:id/disbursements', ...tx(async (c, req, res, { actor, user }) => 
 
 router.post('/:id/repayments', ...tx(async (c, req, res, { actor, user }) => {
   res.status(201);
+  await notAfterToday(c, req.body?.valueDate);
   // `internal` marks a repayment the system makes under another permission
   // (a pay-off, securities collected); it is never taken from the wire.
   const { internal: _ignored, ...body } = req.body || {};
@@ -465,8 +469,10 @@ router.post('/:id/repayments', ...tx(async (c, req, res, { actor, user }) => {
 }));
 
 router.post('/:id/accrue-interest', ...tx(async (c, req, res, { actor }) => {
+  await notAfterToday(c, req.body?.valueDate);
   const out = await L.accrueInterest(c, req.params.id, { ...req.body, createdBy: actor });
-  res.status(out ? 201 : 200).json(out || { accrued: 0 });
+  res.status(out ? 201 : 200);
+  return out || { accrued: 0 };
 }));
 
 // A reschedule closes the loan and opens a linked one at once: a management
@@ -536,13 +542,13 @@ router.post('/:id/planned-fees', ...tx(async (c, req, res, { actor }) => {
 router.post('/:id/planned-fees/apply', ...tx((c, req, _res, { actor }) => PF.apply(c, req.params.id, { ...req.body, createdBy: actor })));
 router.patch('/planned-fees/:plannedId', ...tx((c, req, _res, { actor }) => PF.edit(c, req.params.plannedId, { ...req.body, createdBy: actor })));
 router.delete('/planned-fees/:plannedId', ...tx((c, req, _res, { actor }) => PF.remove(c, req.params.plannedId, { createdBy: actor })));
-router.post('/planned-fees/run', ...tx((c, req) => PF.applyDue(c, { ...req.body })));
+router.post('/planned-fees/run', ...tx(async (c, req) => { await notAfterToday(c, req.body?.asOf, 'asOf'); return PF.applyDue(c, { ...req.body }); }));
 
 // Fee amortisation plans and the recognition run.
 router.get('/:id/fee-amortization', ...read((c, req) => FA.forLoan(c, req.params.id)));
-router.post('/fee-amortization/run', ...tx((c, req) => FA.run(c, { ...req.body })));
+router.post('/fee-amortization/run', ...tx(async (c, req) => { await notAfterToday(c, req.body?.asOf, 'asOf'); return FA.run(c, { ...req.body }); }));
 
-router.post('/postdated-payments/run', ...tx((c, req) => PDP.applyDue(c, { ...req.body })));
+router.post('/postdated-payments/run', ...tx(async (c, req) => { await notAfterToday(c, req.body?.asOf, 'asOf'); return PDP.applyDue(c, { ...req.body }); }));
 router.post('/:id/rates/review', ...tx((c, req, _res, { actor }) =>
   RATES.reviewLoan(c, req.params.id, { date: req.body?.asOf, createdBy: actor }).then((x) => x || { changed: false })));
 router.post('/:id/write-off/approve', ...tx(async (c, req, res, { actor, user }) => {
@@ -574,7 +580,7 @@ router.post('/:id/branch', ...tx((c, req, _res, { actor }) =>
 router.get('/:id/settlement-account', ...read((c, req) => SL.forLoan(c, req.params.id)));
 router.put('/:id/settlement-account', ...tx((c, req, _res, { actor }) => SL.link(c, req.params.id, { ...req.body, createdBy: actor })));
 router.delete('/:id/settlement-account', ...tx((c, req, _res, { actor }) => SL.unlink(c, req.params.id, { ...req.body, createdBy: actor })));
-router.post('/settlement/run', ...tx((c, req) => SETTLE.run(c, { ...req.body })));
+router.post('/settlement/run', ...tx(async (c, req) => { await notAfterToday(c, req.body?.asOf, 'asOf'); return SETTLE.run(c, { ...req.body }); }));
 
 // Corrections are reversals. There is no PUT or DELETE on a transaction.
 router.post('/transactions/:reference/reversal', ...tx(async (c, req, res, { actor }) => {
@@ -603,10 +609,14 @@ router.post('/penalties/:chargeId/waive', ...tx((c, req, _res, { actor }) =>
 router.post('/penalties/:chargeId/adjust', ...tx((c, req, _res, { actor }) =>
   P.adjust(c, req.params.chargeId, { ...req.body, createdBy: actor })));
 
-router.post('/penalties/run', ...tx((c, req) => P.accrueAll(c, req.body)));
+router.post('/penalties/run', ...tx(async (c, req) => {
+  await notAfterToday(c, req.body?.asOf, 'asOf');
+  return P.accrueAll(c, req.body);
+}));
 
-router.post('/arrears/run', ...tx((c, req) => L.markArrears(c, req.body)));
+router.post('/arrears/run', ...tx(async (c, req) => { await notAfterToday(c, req.body?.asOf, 'asOf'); return L.markArrears(c, req.body); }));
 router.post('/fees/run', ...tx(async (c, req) => {
+  await notAfterToday(c, req.body?.asOf, 'asOf');
   const asOf = req.body?.asOf || await orgToday(c);
   const { rows } = await c.query("SELECT id FROM loan_accounts WHERE status IN ('ACTIVE','IN_ARREARS')");
   let due = 0, late = 0;

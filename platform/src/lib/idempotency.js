@@ -26,6 +26,8 @@ async function once(c, req, route, fn) {
     return { status: seen.status, body: seen.response, replayed: true };
   }
   const out = await fn();
+  // A handler that answered by itself (a file, a stream) has nothing to replay.
+  if (out?.skip) return out;
   await c.query(
     'INSERT INTO api_idempotency (key, route, request_hash, status, response, created_by) VALUES ($1,$2,$3,$4,$5,$6)',
     [key, route, hash, out.status, JSON.stringify(out.body ?? null), req.auth?.email || null]);

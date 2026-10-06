@@ -1,5 +1,7 @@
 'use strict';
 
+const { longRunning } = require('../db/tenantContext');
+
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
@@ -57,7 +59,7 @@ extract.get('/:stream', ...run((c, req) => EX.read(c, req.params.stream, {
 // --- database backup (the reference platform: POST /database/backup, GET /database/backup/LATEST) ---
 
 const database = express.Router();
-database.post('/backup', requireAuth(), async (req, res, next) => {
+database.post('/backup', requireAuth(), longRunning, async (req, res, next) => {
   try {
     const b = req.body || {};
     const row = await backup.request(req.tenant, {
@@ -125,7 +127,7 @@ function workbookFrom(req) {
   if (!Buffer.isBuffer(req.body) || !req.body.length) throw Object.assign(new Error('SEND_THE_WORKBOOK_AS_THE_REQUEST_BODY'), { status: 400 });
   return { buffer: req.body, fileName: req.get('x-file-name') || req.query.fileName };
 }
-imports.post('/', requireAuth(), (req, res, next) => rawBody(req, res, (e) => (e ? tooLarge(e, next) : next())),
+imports.post('/', requireAuth(), longRunning, (req, res, next) => rawBody(req, res, (e) => (e ? tooLarge(e, next) : next())),
   async (req, res, next) => {
     try {
       const out = await acceptUpload(req, workbookFrom(req));
@@ -158,7 +160,7 @@ async function decide(c, req, id, action) {
   if (out.failed) return { status: 409, body: { errors: [{ errorCode: 409, errorReason: 'IMPORT_FAILED' }], importErrors: out.errors, import: out.import } };
   return { status: 200, body: out };
 }
-imports.post('/:id/approve', requireAuth(), async (req, res, next) => {
+imports.post('/:id/approve', requireAuth(), longRunning, async (req, res, next) => {
   try {
     const out = await withTenant(req.tenant.schema_name, (c) => once(c, req, `approve:${req.params.id}`, () => decide(c, req, req.params.id, 'APPROVE')));
     res.status(out.status).json(out.body);
@@ -180,7 +182,7 @@ imports.post('/:id/reject', requireAuth(), async (req, res, next) => {
 // The same imports as /data-imports, in the reference platform's shapes and names.
 
 const importApi = express.Router();
-importApi.post('/import', requireAuth(), (req, res, next) => rawBody(req, res, (e) => (e ? tooLarge(e, next) : next())),
+importApi.post('/import', requireAuth(), longRunning, (req, res, next) => rawBody(req, res, (e) => (e ? tooLarge(e, next) : next())),
   async (req, res, next) => {
     try {
       const out = await acceptUpload(req, workbookFrom(req));
@@ -193,7 +195,7 @@ importApi.get('/import/:importKey', ...run(async (c, req) => {
   return IMP.apiStatus(await IMP.get(c, req.params.importKey));
 }, { write: true }));
 // Express 5 does not match a colon suffix in a path string, so the route is a RegExp.
-importApi.post(/^\/import\/events\/([^/:]+):action$/, requireAuth(), async (req, res, next) => {
+importApi.post(/^\/import\/events\/([^/:]+):action$/, requireAuth(), longRunning, async (req, res, next) => {
   try {
     const eventKey = req.params[0];
     const action = String(req.body?.action || '').toUpperCase();

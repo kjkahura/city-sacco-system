@@ -9,9 +9,13 @@ const AP = require('../lib/accessPreferences');
 const RP = require('../lib/routePermissions');
 const apiKeys = require('../auth/apiKeys');
 
+// The signing key fails closed: only a development or test run may use the
+// built-in key, and a production key must be long enough not to be guessed.
 const SECRET = process.env.JWT_SECRET;
-if (!SECRET && process.env.NODE_ENV === 'production') {
-  throw new Error('JWT_SECRET must be set in production');
+const DEV = ['development', 'test'].includes(process.env.NODE_ENV);
+if (!SECRET && !DEV) throw new Error('JWT_SECRET must be set (only NODE_ENV=development or test runs without it)');
+if (SECRET && process.env.NODE_ENV === 'production' && Buffer.byteLength(SECRET) < 32) {
+  throw new Error('JWT_SECRET must be at least 32 bytes in production');
 }
 const signingKey = SECRET || 'dev-only-insecure-secret-do-not-ship';
 

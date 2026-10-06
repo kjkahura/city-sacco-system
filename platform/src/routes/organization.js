@@ -1,5 +1,7 @@
 'use strict';
 
+const { longRunning } = require('../db/tenantContext');
+
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
 const { requireAuth, invalidate } = require('../tenancy/resolve');
@@ -60,7 +62,7 @@ organization.get('/eod', ...run(async (c) => {
 organization.put('/eod', ...W((c, req) => ORG.setEod(c, req.body || {}, by(req))));
 // Run Now, for an organization on manual end of day (the reference platform). The business
 // date is the organization's local date unless an earlier one is given.
-organization.post('/eod/run', requireAuth(), async (req, res, next) => {
+organization.post('/eod/run', requireAuth(), longRunning, async (req, res, next) => {
   try {
     const s = await withTenantRead(req.tenant.schema_name, (c) => ORG.settings(c));
     if (s.eod_mode !== 'MANUAL') return next(Object.assign(new Error('EOD_IS_AUTOMATIC: switch it to MANUAL to run it now'), { status: 409 }));

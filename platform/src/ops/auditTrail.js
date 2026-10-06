@@ -73,7 +73,9 @@ function recorder() {
         `INSERT INTO "${schema}".audit_events (event_source, request_method, request_uri, resource, resource_fragment, username, client_ip,
            user_agent, response_code, request_payload, duration_ms, response_payload) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
         [api ? 'API' : 'UI', req.method, `/api${path}`, seg[0] || null, fragment, username, req.ip,
-          req.get('user-agent') || null, res.statusCode, payloadOf(req), Date.now() - started, responseOf(res)]).catch(() => {});
+          req.get('user-agent') || null, res.statusCode, payloadOf(req), Date.now() - started, responseOf(res)])
+        // A lost audit row must be seen: logged under a fixed tag that a log-based alert can watch.
+        .catch((e) => console.error('[audit-write-failed]', schema, req.method, `/api${path}`, e.message));
     });
     return next();
   };
@@ -103,7 +105,7 @@ async function events(c, query = {}) {
   for (const [key, raw] of Object.entries(query)) {
     const m = key.match(/^([a-z_]+)\[([A-Za-z]+)\]$/);
     if (!m) continue;
-    const f = FIELDS[m[1]];
+    const f = Object.hasOwn(FIELDS, m[1]) ? FIELDS[m[1]] : undefined;
     if (!f) throw err(`UNKNOWN_FIELD: ${m[1]} (one of ${Object.keys(FIELDS).join(', ')})`);
     const op = m[2];
     if (!f.ops.includes(op)) throw err(`OPERATOR_${op}_NOT_SUPPORTED_ON_${m[1]}`);
@@ -123,7 +125,7 @@ async function events(c, query = {}) {
     throw err(`From (${from}) and size (${size}) combination exceed 10000, the maximum allowed window. Default size is 100`);
   }
   const sortBy = query.sort_by ? String(query.sort_by) : 'occurred_at';
-  if (!FIELDS[sortBy]) throw err(`UNKNOWN_SORT_FIELD: ${sortBy}`);
+  if (!Object.hasOwn(FIELDS, sortBy)) throw err(`UNKNOWN_SORT_FIELD: ${sortBy}`);
   const order = String(query.sort_order || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
   const cond = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const { rows: [{ n }] } = await c.query(`SELECT count(*)::int AS n FROM audit_events ${cond}`, vals);

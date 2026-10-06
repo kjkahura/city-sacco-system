@@ -181,6 +181,23 @@ The same job publishes events to the streaming templates' topics, so a stream re
 
 The console asks for the SACCO at sign-in, so one domain serves every SACCO. A subdomain per SACCO would mean adding each subdomain in Firebase, because Firebase Hosting takes no wildcard domain.
 
+## Security settings
+
+The security review of October 2026 (`docs/audits/security-assessment-2026-10.md`) added these settings. Nothing changes for a deployment that sets none of them, except where noted.
+
+- **`ADMIN_API`**: the `/admin` control plane is off unless this is `on`. When on, also set:
+  - `ADMIN_JWT_SECRET`: 48 random bytes in Secret Manager, never the same as `JWT_SECRET`;
+  - `ADMIN_ALLOWED_IPS` (optional): a comma-separated list of operator addresses.
+
+  Make a token with `npm run cli admin:token --email you@example.org`; it lasts at most an hour.
+- **`PORTAL_ACTIVATION_REQUIRES_PHONE_ON_FILE=true`**: members with no phone on record activate the portal at a branch. Turn it on once phones are recorded.
+- **`REQUEST_STATEMENT_TIMEOUT_MS`**: the limit on one database statement during a request (default 55000). Jobs are not limited.
+- **Production now refuses to start** without a `JWT_SECRET` of at least 32 bytes, and refuses to seal or open secrets without a `SECRETS_KEY` of at least 32 bytes. The secrets created in section 2 already meet both.
+- **Offsite backups** are never shipped unencrypted: without `BACKUP_ENCRYPTION_KEY`, the offsite copy is skipped and the run says so.
+- **Recommended in the Google Cloud console:**
+  - set the Cloud Run service's ingress to "internal and Cloud Load Balancing" behind an HTTPS load balancer with Cloud Armor, so the client address the platform sees cannot be set by the caller;
+  - add log-based alerts on `[audit-write-failed]`, `[error]` and `[backup]`.
+
 ## Rollback
 
 - **Code:**

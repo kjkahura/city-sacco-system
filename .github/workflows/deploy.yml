@@ -138,7 +138,7 @@ jobs:
 
       - name: Deploy Firebase Hosting
         working-directory: platform
-        run: npx --yes firebase-tools@latest deploy --only hosting --project "$PROJECT_ID" --non-interactive
+        run: npx --yes firebase-tools@15.32.1 deploy --only hosting --project "$PROJECT_ID" --non-interactive
 
       - name: Check the live site
         run: |

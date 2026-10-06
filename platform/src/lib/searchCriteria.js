@@ -30,7 +30,8 @@ function build(body = {}, fields, { params = [], customColumn = 'm.custom_fields
   const where = [];
   const p = (v) => { params.push(v); return `$${params.length}`; };
   const expr = (field) => {
-    if (fields[field]) return fields[field];
+    // Own keys only: a name such as constructor or __proto__ is not a field.
+    if (Object.hasOwn(fields, field)) return fields[field];
     const m = String(field || '').match(/^(_[A-Za-z0-9_]{1,64})\.([A-Za-z0-9_]{1,64})$/);
     if (m) {
       const def = custom ? custom[`${m[1]}.${m[2]}`] : { type: 'text' };

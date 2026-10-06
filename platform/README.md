@@ -160,6 +160,10 @@ After the reference platform's SMS notifications (`docs/audits/audit-sms.md`). P
 - **Manual SMS:** Send SMS on member, group, loan and deposit pages, or `POST /api/communications/messages:sendSms`. It needs SEND_MANUAL_SMS (managers and administrators).
 - **Subscriptions:** as for email, on the member and group pages and in the portal's Settings.
 
+## Security
+
+The October 2026 security assessment (`docs/audits/security-assessment-2026-10.md`) reviewed the platform against the OWASP Top 10:2025, the OWASP API Security Top 10:2023, ASVS 5.0 Level 2 and STRIDE. It also lists the controls that hold, the fixes made (each checked in `test/hardening.test.js`), and the open recommendations in order. `docs/deploy.md` lists the security settings.
+
 ## Apps
 
 - **What an app is:** another provider's web application shown in the back office (`src/domain/apps.js`, tenant migration 049), as on the reference platform. Administration > Apps installs it from its definition, the reference platform's XML, loaded from an HTTPS address through the outbound guard or pasted.

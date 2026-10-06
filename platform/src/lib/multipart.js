@@ -19,7 +19,7 @@ function filePart(body, contentType, field = 'file') {
     const next = body.indexOf(boundary, headerEnd + 4);
     if (next === -1) break;
     const data = body.slice(headerEnd + 4, next - 2); // the CRLF before the boundary
-    const name = /name="([^"]*)"/i.exec(headers);
+    const name = /;\s*name="([^"]*)"/i.exec(headers);
     if (name && name[1] === field) {
       const fn = /filename="([^"]*)"/i.exec(headers);
       return { data, fileName: fn ? fn[1] : null };

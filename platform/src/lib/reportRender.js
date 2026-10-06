@@ -84,12 +84,12 @@ function toXlsx(run) {
 }
 
 function toCsv(run) {
-  const lines = [csv.cell(run.title), ...meta(run).map((m) => m.map(csv.cell).join(','))];
+  const lines = [csv.exportCell(run.title), ...meta(run).map((m) => m.map(csv.exportCell).join(','))];
   for (const s of run.sections) {
-    lines.push('', csv.cell(s.title || s.type));
-    if (s.type === 'TEXT') { lines.push(csv.cell(s.text)); continue; }
-    lines.push(s.columns.map((col) => csv.cell(col.label)).join(','));
-    for (const r of rowsOf(s)) lines.push(r.map(csv.cell).join(','));
+    lines.push('', csv.exportCell(s.title || s.type));
+    if (s.type === 'TEXT') { lines.push(csv.exportCell(s.text)); continue; }
+    lines.push(s.columns.map((col) => csv.exportCell(col.label)).join(','));
+    for (const r of rowsOf(s)) lines.push(r.map(csv.exportCell).join(','));
   }
   return `${lines.join('\r\n')}\r\n`;
 }

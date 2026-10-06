@@ -42,6 +42,7 @@ async function disburse(c, loanId, { amount, channelId = null, valueDate, narrat
   // The reference platform: a loan with offset is not disbursed without its offset account.
   if (l.offset_enabled && !l.settlement_account_id) throw err('MISSING_LINKED_OFFSET_ACCOUNT: link a deposit account first', 409);
   const date = valueDate ? ymd(valueDate) : (await orgToday(c));
+  if (user && date > await orgToday(c)) throw err('VALUE_DATE_IS_IN_THE_FUTURE: post on today or an earlier day', 400);
   // The channel given, else the one in the disbursement details, else bank.
   channelId = channelId || (first && l.disbursement_channel_id) || 'bank';
   // The first repayment date: given now (which needs the Set Disbursement

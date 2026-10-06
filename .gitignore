@@ -12,10 +12,15 @@ node_modules/
 .claude/settings.local.json
 .vscode/
 
-# Databases
+# Databases, dumps and backups (a dump is a SACCO's whole book)
 *.db
 *.sqlite
 *.sqlite3
+*.dump
+*.dump.enc
+*.rdb
+backups/
+.tmp-*/
 
 # Logs
 logs/

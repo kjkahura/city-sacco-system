@@ -488,7 +488,7 @@ function normalise(def, e, fields) {
   if (!Array.isArray(filters)) throw err('FILTERS_MUST_BE_A_LIST');
   if (filters.length > 50) throw err('TOO_MANY_FILTERS: at most 50');
   for (const x of filters) {
-    if (!x || !fields[x.field]) throw err(`UNKNOWN_FIELD: ${x && x.field} for ${e.key}`);
+    if (!x || !Object.hasOwn(fields, x.field)) throw err(`UNKNOWN_FIELD: ${x && x.field} for ${e.key}`);
     if (!OPS[fields[x.field].type].includes(String(x.operator || 'EQUALS').toUpperCase())) {
       throw err(`OPERATOR_NOT_ALLOWED: ${x.operator} on ${x.field} (use ${OPS[fields[x.field].type].join(', ')})`);
     }
@@ -497,10 +497,10 @@ function normalise(def, e, fields) {
   if (!Array.isArray(columns)) throw err('COLUMNS_MUST_BE_A_LIST');
   columns = [...new Set(columns.map(String))];
   if (columns.length > 60) throw err('TOO_MANY_COLUMNS: at most 60');
-  const bad = columns.filter((k) => !fields[k]);
+  const bad = columns.filter((k) => !Object.hasOwn(fields, k));
   if (bad.length) throw err(`UNKNOWN_FIELD: ${bad.join(', ')} for ${e.key}`);
   const sortBy = def.sortBy || null;
-  if (sortBy && !fields[sortBy]) throw err(`UNKNOWN_FIELD: ${sortBy} for ${e.key}`);
+  if (sortBy && !Object.hasOwn(fields, sortBy)) throw err(`UNKNOWN_FIELD: ${sortBy} for ${e.key}`);
   const sortDir = String(def.sortDir || def.sortDirection || 'ASC').toUpperCase();
   if (!['ASC', 'DESC'].includes(sortDir)) throw err('SORT_DIRECTION_MUST_BE_ASC_OR_DESC');
   const display = String(def.display || 'LIST').toUpperCase();

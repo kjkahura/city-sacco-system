@@ -18,7 +18,10 @@ const esc = (s) => String(s)
 
 function unesc(s) {
   return s.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);/g, (_, e) => {
-    if (e[0] === '#') return String.fromCodePoint(e[1] === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10));
+    if (e[0] === '#') {
+      const n = e[1] === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return n >= 1 && n <= 0x10FFFF ? String.fromCodePoint(n) : '\uFFFD';
+    }
     return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[e];
   });
 }
@@ -186,9 +189,12 @@ function read(buf) {
     const xml = get(path);
     if (!xml) continue;
     const rows = [];
+    let cells = 0;
     for (const r of xml.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>|<row\b([^>]*)\/>/g)) {
       const rowAttrs = r[1] || r[3] || '';
       const rn = Number(attr(`<row ${rowAttrs}>`, 'r')) || rows.length + 1;
+      // A row or column number is used as an array index: Excel's own limits, so a few bytes cannot ask for millions of cells.
+      if (!Number.isInteger(rn) || rn < 1 || rn > 1048576) throw invalid(`row number ${rn}`);
       const row = [];
       for (const c of (r[2] || '').matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
         const tag = `<c ${c[1]}>`;
@@ -208,8 +214,12 @@ function read(buf) {
           val = dateStyles.has(s) ? serialToDate(num) : num;
         }
         const ci = ref ? colIndex(ref) : row.length;
+        if (!Number.isInteger(ci) || ci < 0 || ci > 16383) throw invalid(`cell ${ref}`);
         row[ci] = val;
       }
+      // A workbook's cells, counted as they will be held (rows filled out to their last cell), within a budget.
+      cells += row.length;
+      if (cells > 5_000_000) throw invalid('too many cells (at most 5,000,000)');
       for (let i = 0; i < row.length; i += 1) if (row[i] === undefined) row[i] = null;
       rows[rn - 1] = row;
     }

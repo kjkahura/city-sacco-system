@@ -17,6 +17,10 @@ const crypto = require('crypto');
 
 function key() {
   const own = process.env.SECRETS_KEY;
+  // In production the key is its own, and long enough: no fallback tying it to JWT_SECRET.
+  if (process.env.NODE_ENV === 'production' && (!own || Buffer.byteLength(own) < 32)) {
+    throw new Error('SECRETS_KEY_NOT_CONFIGURED: set SECRETS_KEY to at least 32 random bytes in production');
+  }
   if (own) return crypto.createHash('sha256').update(own).digest();
   const jwt = process.env.JWT_SECRET;
   if (!jwt) throw new Error('SECRETS_KEY_NOT_CONFIGURED: set SECRETS_KEY (or JWT_SECRET)');

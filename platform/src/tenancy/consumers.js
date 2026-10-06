@@ -146,8 +146,10 @@ async function insertKey(client, c, { ttl, actor }) {
 }
 
 /** Make a key. It is in the answer once, and never again. */
-async function createKey(tenant, id, body = {}, { actor }) {
+async function createKey(tenant, id, body = {}, { actor, actorUser = null }) {
   const c = await find(tenant, id);
+  // A key carries its consumer's access: making one needs the same right as giving that access.
+  await accessOf(tenant, {}, c, actorUser);
   if (c.status !== 'ACTIVE') throw err('API_CONSUMER_INACTIVE', 409);
   const { key, k } = await insertKey(pool, c, { ttl: ttlOf(body.expirationTime ?? body.ttl), actor });
   await audit(tenant, actor, 'API_KEY_CREATED', { consumerId: c.id, keyId: k.id, prefix: k.prefix, expiresAt: k.expires_at });
@@ -164,8 +166,9 @@ async function deleteKey(tenant, id, keyId, { actor }) {
 }
 
 /** A secret key, for rotating keys. One per consumer; a new one replaces the old at once. */
-async function createSecret(tenant, id, { actor }) {
+async function createSecret(tenant, id, { actor, actorUser = null }) {
   const c = await find(tenant, id);
+  await accessOf(tenant, {}, c, actorUser);
   const secret = keys.mint();
   await pool.query(
     'UPDATE platform.api_consumers SET secret_hash = $2, secret_created_at = now(), prev_secret_hash = NULL, prev_secret_until = NULL WHERE id = $1',

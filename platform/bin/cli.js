@@ -305,6 +305,12 @@ const COMMANDS = {
   // Sandboxes: run what is queued, or queue an operation.
   //   cli sandbox:run
   //   cli sandbox:request --slug citysacco --kind CLONE [--anonymize false] --admin-email admin@example.org
+  //   cli admin:token --email ops@example.org [--minutes 30]
+  // A platform-admin token for /admin (ADMIN_API=on and ADMIN_JWT_SECRET set), at most an hour.
+  async 'admin:token'() {
+    if (!/^[^@\s]+@[^@\s]+$/.test(String(arg('email') || ''))) throw new Error('--email required');
+    console.log(require('../src/tenancy/adminAuth').mint(arg('email'), arg('minutes')));
+  },
   async 'sandbox:run'() {
     for (const op of await require('../src/tenancy/sandbox').runPending()) console.log(`${op.kind} ${op.state}: ${op.detail}`);
   },

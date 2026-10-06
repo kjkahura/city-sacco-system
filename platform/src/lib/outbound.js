@@ -116,6 +116,12 @@ function send({ url, method = 'POST', headers = {}, body = '', timeoutMs = 10_00
   return new Promise((resolve) => {
     let u;
     try { u = new URL(url); } catch { resolve({ error: 'INVALID_URL' }); return; }
+    // Checked here too, whatever the caller checked: https only, and an address written as an IP
+    // (which never goes through the DNS lookup below) must be public.
+    const host = u.hostname.replace(/^\[|\]$/g, '');
+    if (!allowPrivate() && (u.protocol !== 'https:' || host === 'localhost' || host.endsWith('.localhost') || (net.isIP(host) && isPrivateAddress(host)))) {
+      resolve({ error: 'EPRIVATE: only public https addresses' }); return;
+    }
     const payload = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''));
     const lib = u.protocol === 'https:' ? https : http;
     let done = false;

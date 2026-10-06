@@ -1,6 +1,7 @@
 'use strict';
 
 const { orgToday } = require('../lib/orgDate');
+const { exportCell } = require('../lib/csv');
 const acct = require('./accounting');
 const S = require('./schedule');
 const ledger = require('./ledger');
@@ -85,10 +86,8 @@ function toCsv(s) {
   const cols = s.view === 'REPAYMENTS'
     ? ['member_no', 'member_name', 'account_no', 'number', 'due_date', 'expected', 'datePaid', 'amountPaid']
     : ['member_no', 'member_name', 'account_no', 'installments_due', 'installments', 'penalty', 'expected', 'datePaid', 'amountPaid'];
-  const cell = (v) => {
-    const t = v === null || v === undefined ? '' : String(v);
-    return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
-  };
+  // Names are members' own text: written so a spreadsheet does not run them as formulas (lib/csv).
+  const cell = (v) => (v === null || v === undefined ? '' : exportCell(String(v)));
   return [cols.join(','), ...s.rows.map((r) => cols.map((k) => cell(r[k])).join(','))].join('\n') + '\n';
 }
 
