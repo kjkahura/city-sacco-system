@@ -3868,9 +3868,12 @@ official forms are not.
 
 1. **Return templates are yours to load.** The engine, the storage and the
    renderer are done and tested; no official SASRA form ships with it.
-2. **No mobile money and no SMS.** The portal moves money between members'
-   savings accounts; it cannot yet take a deposit from M-Pesa or send one
-   out, and nobody is notified of anything.
+2. **No mobile money integration.** Staff can post a payment received by
+   M-Pesa (the `mpesa` channel), but nothing talks to M-Pesa itself: no paybill
+   or till confirmations (C2B), no prompt to pay on the member's phone, and no
+   disbursement or withdrawal to a phone (B2C). The portal moves money only
+   between a member's own accounts. Members are notified by email and SMS
+   (above, "Email" and "SMS").
 3. **Dividends and provisioning do not talk to each other.** A surplus
    distributed before provisioning is recognised is a real risk and nothing
    here enforces the order. Accepted for now.

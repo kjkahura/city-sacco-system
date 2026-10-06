@@ -31,4 +31,6 @@ The same files are kept in the claude.ai project "CoreBanking Service" under `cl
 | 23 | Apps | audit in the "Apps audit" commit, build in the "Apps" commit | [audit](audit-apps.md), [build log](build-log-apps.md) |
 | 24 | Security assessment (OWASP Top 10:2025, API Top 10:2023, ASVS 5.0, STRIDE) | review and fixes in the "Security review" commit, the remaining fixes in the "Security hardening follow-up" commit | [assessment](security-assessment-2026-10.md) |
 
+The open work, from deployment to real members' money, is tracked in [NEXT.md](NEXT.md).
+
 Before section 5, the audit findings were recorded inside the build logs, with no separate audit file.

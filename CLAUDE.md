@@ -75,6 +75,9 @@ npm start
 
 ## Before you commit
 
+- Check `platform/docs/audits/NEXT.md` for the open work, and mark an item done there
+  (with the date and commit) when your change finishes it.
+
 - Run the suites your change touches, then `npm test`. Some loan suites fail on certain
   calendar dates whatever the change; compare against the previous commit before
   treating a failure as yours.
