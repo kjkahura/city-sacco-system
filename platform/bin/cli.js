@@ -305,6 +305,30 @@ const COMMANDS = {
   // Sandboxes: run what is queued, or queue an operation.
   //   cli sandbox:run
   //   cli sandbox:request --slug citysacco --kind CLONE [--anonymize false] --admin-email admin@example.org
+  //   cli audit:export [--day 2026-10-05]     (default: yesterday)
+  // Copy a day's audit trail to AUDIT_ARCHIVE (write-once storage); run daily by a scheduled job.
+  async 'audit:export'() {
+    const day = arg('day') || new Date(Date.now() - 86400_000).toISOString().slice(0, 10);
+    for (const r of await require('../src/ops/auditArchive').exportDay(day)) console.log(`${r.slug} ${r.kind}: ${r.rows} rows${r.shipped ? '' : ' (not shipped)'}`);
+  },
+  //   cli controls:four-eyes --slug citysacco|--all [--off]
+  // Four eyes on loans (who applies does not approve, who approves does not disburse) for one SACCO or every
+  // production SACCO. The security review recommends it on everywhere.
+  async 'controls:four-eyes'() {
+    const { pool } = require('../src/db/pool');
+    const { withTenant } = require('../src/db/tenantContext');
+    const on = !process.argv.includes('--off');
+    const { rows } = process.argv.includes('--all')
+      ? await pool.query("SELECT slug, schema_name FROM platform.tenants WHERE status = 'ACTIVE' AND environment = 'PRODUCTION' ORDER BY slug")
+      : await pool.query('SELECT slug, schema_name FROM platform.tenants WHERE slug = $1', [arg('slug')]);
+    if (!rows.length) throw new Error('--slug <slug> or --all');
+    for (const t of rows) {
+      await withTenant(t.schema_name, (c) => c.query('UPDATE lending_controls SET two_man_rule = $1 WHERE id = 1', [on]));
+      await pool.query("INSERT INTO platform.audit_log (tenant_id, actor, action, detail) SELECT id, 'cli', 'FOUR_EYES_SET', $2 FROM platform.tenants WHERE slug = $1",
+        [t.slug, JSON.stringify({ twoManRule: on })]);
+      console.log(`${t.slug}: four eyes ${on ? 'on' : 'off'}`);
+    }
+  },
   //   cli admin:token --email ops@example.org [--minutes 30]
   // A platform-admin token for /admin (ADMIN_API=on and ADMIN_JWT_SECRET set), at most an hour.
   async 'admin:token'() {

@@ -49,6 +49,8 @@ async function deposit(c, accountId, { amount, channelId = 'cash', valueDate, na
 }
 async function withdraw(c, accountId, { amount, channelId = 'cash', valueDate, narration, createdBy, branchId = null, offsetPledge = null, user = null, holdExternalReferenceId = null }) {
   const locked = await core.lock(c, accountId);
+  // A guarantor's pledge being made at the same moment waits (../eligibility addGuarantor).
+  await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`member-funds:${locked.member_id}`]);
   const hold = await core.holdToSettle(c, locked, holdExternalReferenceId, 'DBIT', round2(amount), { valueDate, user });
   const { day } = await core.valueDay(c, locked, valueDate, user);
   const a = core.onDay(locked, day);
@@ -103,9 +105,12 @@ async function transfer(c, fromId, { toAccountId, amount, valueDate, narration, 
   await core.lock(c, first);
 
   const fromLocked = await core.lock(c, fromId);
+  const to = await core.lock(c, toAccountId);
+  // Both account rows first, then the member's funds lock, the same order as a withdrawal
+  // (row, then funds), so a transfer and a withdrawal on the same member cannot deadlock.
+  await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`member-funds:${fromLocked.member_id}`]);
   const { day } = await core.valueDay(c, fromLocked, valueDate, user);
   const from = core.onDay(fromLocked, day);
-  const to = await core.lock(c, toAccountId);
   if (from.id === to.id) throw err('SAME_ACCOUNT_TRANSFER');
   // To another holder's account (the reference platform's inter-client transfer).
   if (from.member_id !== to.member_id) core.need(user, 'MAKE_INTER_CLIENTS_TRANSFERS');

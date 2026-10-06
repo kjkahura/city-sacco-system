@@ -162,7 +162,15 @@ After the reference platform's SMS notifications (`docs/audits/audit-sms.md`). P
 
 ## Security
 
-The October 2026 security assessment (`docs/audits/security-assessment-2026-10.md`) reviewed the platform against the OWASP Top 10:2025, the OWASP API Security Top 10:2023, ASVS 5.0 Level 2 and STRIDE. It also lists the controls that hold, the fixes made (each checked in `test/hardening.test.js`), and the open recommendations in order. `docs/deploy.md` lists the security settings.
+The October 2026 security assessment (`docs/audits/security-assessment-2026-10.md`) reviewed the platform against the OWASP Top 10:2025, the OWASP API Security Top 10:2023, ASVS 5.0 Level 2 and STRIDE. It also lists the controls that hold, the fixes made (each checked in `test/hardening.test.js`), and the open recommendations in order. A follow-up closed the code findings it had left open:
+- requests are tied to a live session;
+- stronger password hashing, with rehash at sign-in;
+- backdating permissions for loans and shares;
+- daily limits for users, and limits for API consumers;
+- four eyes on loans for new SACCOs;
+- guarantor locking.
+
+`docs/deploy.md` lists the security settings and the scripts in `deploy/security/` for the Google Cloud project. `docs/incident-response.md` is the response and breach-notification plan, and `docs/pentest-scope.md` the brief for a penetration test.
 
 ## Apps
 

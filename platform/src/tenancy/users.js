@@ -39,11 +39,13 @@ const ROLES = ['TENANT_ADMIN', 'MANAGER', 'ACCOUNTANT', 'TELLER', 'AUDITOR'];
 const STATUSES = ['ACTIVE', 'SUSPENDED'];
 const TYPES = ['ADMINISTRATOR', 'TELLER', 'CREDIT_OFFICER'];
 const LIMITS = { approvalLimit: 'approval_limit', disbursementLimit: 'disbursement_limit', feeLimit: 'fee_limit',
-  depositLimit: 'deposit_limit', withdrawalLimit: 'withdrawal_limit', repaymentLimit: 'repayment_limit' };
+  depositLimit: 'deposit_limit', withdrawalLimit: 'withdrawal_limit', repaymentLimit: 'repayment_limit',
+  dailyDepositLimit: 'daily_deposit_limit', dailyWithdrawalLimit: 'daily_withdrawal_limit', dailyRepaymentLimit: 'daily_repayment_limit' };
 
 const COLUMNS = `id, email, full_name, title, language, role, role_code, permissions, user_type, status, branch_id, all_branches, branch_access,
                  other_officers_clients, phone, mfa_enabled, mfa_enrolled_at, must_change_password,
                  approval_limit, disbursement_limit, fee_limit, deposit_limit, withdrawal_limit, repayment_limit,
+                 daily_deposit_limit, daily_withdrawal_limit, daily_repayment_limit,
                  failed_logins, locked_at, locked_until, password_changed_at, custom_fields, last_login_at, created_at, created_by, updated_at, activity_types`;
 
 /** A user row for the API, with the reference platform's state (ACTIVE, INACTIVE, LOCKED). */
@@ -225,12 +227,14 @@ async function create(tenant, body, { actor, actorUser = null }) {
     const { rows: [u] } = await pool.query(
       `INSERT INTO platform.users (tenant_id, email, password_hash, full_name, title, language, role, role_code, permissions, user_type, status,
           branch_id, all_branches, branch_access, other_officers_clients, phone,
-          approval_limit, disbursement_limit, fee_limit, deposit_limit, withdrawal_limit, repayment_limit, must_change_password, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'ACTIVE',$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,true,$22) RETURNING ${COLUMNS}`,
+          approval_limit, disbursement_limit, fee_limit, deposit_limit, withdrawal_limit, repayment_limit,
+          daily_deposit_limit, daily_withdrawal_limit, daily_repayment_limit, must_change_password, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'ACTIVE',$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$23,$24,$25,true,$22) RETURNING ${COLUMNS}`,
       [tenant.id, email, await hashPassword(password, { minLength: 8 }), body.fullName || null, body.title || null, body.language || 'en',
         r.role, r.roleCode, permissions, userType, branchId ?? null, allBranches, branchAccess,
         otherOfficers !== undefined ? Boolean(otherOfficers) : effective !== 'CREDIT_OFFICER', body.phone || null,
-        lim.approval_limit, lim.disbursement_limit, lim.fee_limit, lim.deposit_limit, lim.withdrawal_limit, lim.repayment_limit, actor]);
+        lim.approval_limit, lim.disbursement_limit, lim.fee_limit, lim.deposit_limit, lim.withdrawal_limit, lim.repayment_limit, actor,
+        lim.daily_deposit_limit, lim.daily_withdrawal_limit, lim.daily_repayment_limit]);
     await audit(tenant, actor, 'USER_CREATED', { userId: u.id, email, role: r.role, roleCode: r.roleCode, permissions, userType, branchId });
     return { ...shape(u), ...(given ? {} : { temporaryPassword: password }) };
   } catch (e) {
@@ -344,9 +348,10 @@ async function update(tenant, id, body, { actor, actorId, actorUser = null }) {
     await client.query('INSERT INTO platform.audit_log (tenant_id, actor, action, detail) VALUES ($1,$2,$3,$4)',
       [tenant.id, actor, 'USER_UPDATED', JSON.stringify({ userId: before.id, changes: sets, before: Object.fromEntries(keys.map((k) => [k, before[k]])) })]);
     await client.query('COMMIT');
-    revoke = Boolean(sets.role || sets.status === 'SUSPENDED');
+    // A suspended user has no business holding a session; it ends at once (sessions are checked on
+    // every request). A new role needs no sign-out: permissions are read afresh on every request.
+    revoke = sets.status === 'SUSPENDED';
     forgetUser(before.id);
-    // A suspended user has no business holding a session.
     if (revoke) await tokens.revokeAll(before.id);
     return shape(after);
   } catch (e) {

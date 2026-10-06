@@ -5,6 +5,7 @@
  */
 
 const { orgToday } = require('../../lib/orgDate');
+const PERMS = require('../../lib/permissions');
 const acct = require('../accounting');
 const savings = require('../savings');
 const S = require('../schedule');
@@ -43,6 +44,10 @@ async function disburse(c, loanId, { amount, channelId = null, valueDate, narrat
   if (l.offset_enabled && !l.settlement_account_id) throw err('MISSING_LINKED_OFFSET_ACCOUNT: link a deposit account first', 409);
   const date = valueDate ? ymd(valueDate) : (await orgToday(c));
   if (user && date > await orgToday(c)) throw err('VALUE_DATE_IS_IN_THE_FUTURE: post on today or an earlier day', 400);
+  // A past value date needs the backdating permission, as for deposit accounts.
+  if (user && date < await orgToday(c) && !PERMS.can(user, 'BACKDATE_LOAN_TRANSACTIONS')) {
+    throw err('PERMISSION_REQUIRED: BACKDATE_LOAN_TRANSACTIONS, to post with a past value date', 403);
+  }
   // The channel given, else the one in the disbursement details, else bank.
   channelId = channelId || (first && l.disbursement_channel_id) || 'bank';
   // The first repayment date: given now (which needs the Set Disbursement

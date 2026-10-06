@@ -1,5 +1,7 @@
 'use strict';
 
+const { once } = require('../lib/idempotency');
+
 const { orgToday } = require('../lib/orgDate');
 const express = require('express');
 const { withTenant, withTenantRead } = require('../db/tenantContext');
@@ -141,8 +143,13 @@ router.post('/', requireAuth(), async (req, res, next) => {
     if (holderType === 'GROUP' && !PERMS.can(req.auth, 'CREATE_GROUP')) {
       const e = new Error('PERMISSION_REQUIRED: CREATE_GROUP'); e.status = 403; throw e;
     }
-    const out = await withTenant(req.tenant.schema_name, (c) => CL.create(c, b, { user: req.auth, holderType }));
-    res.status(201).json({ ...out.member, duplicateWarnings: out.duplicateWarnings, groupWarnings: out.groupWarnings });
+    // A member created twice by a retry (Idempotency-Key) is created once (lib/idempotency).
+    const r = await withTenant(req.tenant.schema_name, (c) => once(c, req, `POST /members`, async () => {
+      const out = await CL.create(c, b, { user: req.auth, holderType });
+      return { status: 201, body: { ...out.member, duplicateWarnings: out.duplicateWarnings, groupWarnings: out.groupWarnings } };
+    }));
+    if (r.replayed) res.set('idempotent-replayed', 'true');
+    res.status(r.status).json(r.body);
   } catch (e) { next(e); }
 });
 

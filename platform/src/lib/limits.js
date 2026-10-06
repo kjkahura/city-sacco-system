@@ -144,8 +144,11 @@ function tenantConcurrency({ timeoutMs = 10_000 } = {}) {
     }
     let released = false;
     const done = () => { if (!released) { released = true; rel(); } };
+    // The request's database work (db/tenantContext): a client that goes away does not free the slot
+    // while its query still runs; the slot is freed when the work ends.
+    req.dbWork = { busy: 0, onIdle: null };
     res.on('finish', done);
-    res.on('close', done);
+    res.on('close', () => { if (req.dbWork.busy > 0) req.dbWork.onIdle = done; else done(); });
     // A long-lived answer (an event stream) gives its slot back once it starts waiting.
     req.releaseGate = done;
     next();

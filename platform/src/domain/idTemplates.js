@@ -3,6 +3,7 @@
 const acct = require('./accounting');
 const { err } = acct;
 const DUP = require('./duplicates');
+const MF = require('./memberFiles');
 const { recordAudit } = require('../lib/auditLog');
 
 /**
@@ -163,7 +164,10 @@ async function shapeDocument(c, d) {
     if (!bytes.length) throw err('ATTACHMENT_IS_EMPTY', 400);
     if (bytes.length > MAX_ATTACHMENT) throw err(`ATTACHMENT_TOO_LARGE: at most ${MAX_ATTACHMENT} bytes`, 413);
     if (!ATTACHMENT_TYPES.includes(d.attachment.type)) throw err(`ATTACHMENT_TYPE_NOT_ALLOWED: ${ATTACHMENT_TYPES.join(', ')}`, 415);
-    Object.assign(out, { attachment: bytes, attachment_name: String(d.attachment.name || 'document').slice(0, 200), attachment_type: d.attachment.type });
+    // The type is read from the bytes, as for member files, not taken from the request.
+    const actual = MF.sniff(bytes);
+    if (!actual || !ATTACHMENT_TYPES.includes(actual)) throw err(`ATTACHMENT_TYPE_NOT_ALLOWED: the file is not a ${ATTACHMENT_TYPES.join(', ')}`, 415);
+    Object.assign(out, { attachment: bytes, attachment_name: String(d.attachment.name || 'document').slice(0, 200), attachment_type: actual });
   }
   return out;
 }

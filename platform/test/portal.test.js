@@ -225,7 +225,9 @@ async function call(method, p, { token, body } = {}) {
 
     section('changing the PIN');
     const relogin = await call('POST', '/api/portal/auth/login', { body: { phone: '0712345678', pin: '1234' } });
-    refreshA = relogin.body.refreshToken;
+    // Another device, signed in at the domain level (the per-IP sign-in window is nearly spent).
+    const MA0 = require('../src/auth/memberAuth');
+    refreshA = (await T((c) => MA0.login(c, { phone: '0712345678', pin: '1234', tenantSlug: SLUG }))).refreshToken;
     const wrongOld = await call('POST', '/api/portal/auth/pin',
       { token: relogin.body.accessToken, body: { currentPin: '9999', newPin: '4321' } });
     check('the current PIN is required', wrongOld.status === 401, String(wrongOld.status));
@@ -234,6 +236,8 @@ async function call(method, p, { token, body } = {}) {
     check('a PIN change succeeds with the right current PIN', changed.status === 201, `${changed.status} ${changed.err}`);
     const afterChange = await call('POST', '/api/portal/auth/refresh', { body: { refreshToken: refreshA } });
     check('and signs out every other device', afterChange.status === 401, String(afterChange.status));
+    const stillIn = await call('GET', '/api/portal/me', { token: relogin.body.accessToken });
+    check('but not the device that changed it', stillIn.status === 200, `${stillIn.status} ${stillIn.err}`);
     // By now this test has made more sign-in calls than the per-IP window
     // allows, which is the limiter doing its job; check the new PIN at the
     // domain level instead.

@@ -1,6 +1,8 @@
 'use strict';
 
+const crypto = require('crypto');
 const { pool } = require('../db/pool');
+const OUT = require('../lib/outbound');
 const { verifyPassword } = require('./passwords');
 const AP = require('../lib/accessPreferences');
 const { err } = require('../lib/errors');
@@ -14,10 +16,26 @@ const { err } = require('../lib/errors');
 
 
 /** Refuse a password the policy does not allow. */
+/**
+ * With PASSWORD_BREACH_CHECK=on, a new password is checked against the
+ * breached-passwords service by k-anonymity: only the first five characters
+ * of its SHA-1 leave the platform. If the service cannot be reached the
+ * password is not refused for it.
+ */
+async function breached(password) {
+  if (process.env.PASSWORD_BREACH_CHECK !== 'on') return false;
+  const h = crypto.createHash('sha1').update(String(password)).digest('hex').toUpperCase();
+  const r = await OUT.send({ url: `https://api.pwnedpasswords.com/range/${h.slice(0, 5)}`, method: 'GET', headers: { 'add-padding': 'true' },
+    maxBytes: 2 * 1024 * 1024, timeoutMs: 3000, agent: 'sacco-platform-password-check' });
+  if (r.error || r.status !== 200) return false;
+  return r.body.split('\n').some((line) => { const [suffix, count] = line.trim().split(':'); return suffix === h.slice(5) && Number(count) > 0; });
+}
+
 async function check(tenant, password, { email = '', userId = null, currentHash = null } = {}) {
   const prefs = await AP.of(tenant?.id);
   const problems = AP.passwordProblems(prefs, password, { email });
   if (problems.length) throw err(`PASSWORD_POLICY: ${problems.join('; ')}`);
+  if (await breached(password)) throw err('PASSWORD_POLICY: this password has appeared in a data breach; choose another');
   if (userId) {
     const n = prefs.password.history;
     if (currentHash && await verifyPassword(password, currentHash)) throw err('NEW_PASSWORD_MUST_DIFFER');

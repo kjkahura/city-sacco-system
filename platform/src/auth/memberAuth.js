@@ -4,8 +4,9 @@
 const CURRENT = ['INACTIVE', 'ACTIVE'];
 
 const crypto = require('crypto');
-const { hashPin, verifyPassword } = require('./passwords');
-const { signToken } = require('../tenancy/resolve');
+const { hashPin, verifyPassword, needsRehash } = require('./passwords');
+const RESOLVE = require('../tenancy/resolve');
+const { signToken } = RESOLVE;
 const { err } = require('../lib/errors');
 const { recordAudit } = require('../lib/auditLog');
 
@@ -114,7 +115,7 @@ async function issueTokens(c, member, tenantSlug, { familyId = crypto.randomUUID
     [member.id, hash(refresh), familyId, expires, userAgent, ip]
   );
   const access = signToken({
-    sub: member.id, mid: member.id, role: 'MEMBER', tid: tenantSlug,
+    sub: member.id, mid: member.id, role: 'MEMBER', tid: tenantSlug, sid: familyId,
     memberNo: member.member_no, name: `${member.first_name} ${member.last_name}`,
   }, ACCESS_TTL);
   return { accessToken: access, refreshToken: refresh, expiresIn: ACCESS_TTL, refreshExpiresAt: expires };
@@ -143,7 +144,7 @@ async function login(c, { phone, pin, tenantSlug, userAgent = null, ip = null })
   // Verify against a dummy hash when there is no such phone, so timing does
   // not say whether a number is enrolled.
   const ok = await verifyPassword(String(pin || ''),
-    cred?.pin_hash || 'scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAA');
+    cred?.pin_hash || 'scrypt$16384$8$5$AAAAAAAAAAAAAAAAAAAAAA==$AAAA');
 
   if (!cred) { await fail(); return refuse('INVALID_CREDENTIALS', 401); }
   if (cred.status === 'DISABLED' || !CURRENT.includes(cred.member_status)) {
@@ -172,6 +173,8 @@ async function login(c, { phone, pin, tenantSlug, userAgent = null, ip = null })
     `UPDATE member_credentials SET failed_attempts = 0, locked_until = NULL,
        status = 'ACTIVE', last_login_at = now() WHERE member_id = $1`,
     [cred.member_id]);
+  // A PIN hashed with older, weaker parameters is replaced now that it is at hand.
+  if (needsRehash(cred.pin_hash)) await c.query('UPDATE member_credentials SET pin_hash = $2 WHERE member_id = $1', [cred.member_id, await hashPin(pin)]);
   await c.query(
     'INSERT INTO member_login_attempts (phone, member_id, succeeded, ip) VALUES ($1,$2,true,$3)',
     [ph, cred.member_id, ip]);
@@ -193,6 +196,7 @@ async function rotate(c, presented, tenantSlug, { userAgent = null, ip = null } 
     await c.query(
       'UPDATE member_sessions SET revoked_at = now() WHERE family_id = $1 AND revoked_at IS NULL',
       [tok.family_id]);
+    RESOLVE.forgetSessions(c);
     return refuse('REFRESH_TOKEN_REUSED_FAMILY_REVOKED', 401);
   }
   if (new Date(tok.expires_at) < new Date()) return refuse('REFRESH_TOKEN_EXPIRED', 401);
@@ -210,10 +214,11 @@ async function logout(c, presented, { all = false } = {}) {
   const { rowCount } = all
     ? await c.query('UPDATE member_sessions SET revoked_at = now() WHERE member_id = $1 AND revoked_at IS NULL', [tok.member_id])
     : await c.query('UPDATE member_sessions SET revoked_at = now() WHERE family_id = $1 AND revoked_at IS NULL', [tok.family_id]);
+  RESOLVE.forgetSessions(c);
   return { revoked: rowCount };
 }
 
-async function changePin(c, memberId, { currentPin, newPin }) {
+async function changePin(c, memberId, { currentPin, newPin }, { sid = null } = {}) {
   if (!PIN_RE.test(String(newPin || ''))) throw err('PIN_MUST_BE_4_TO_6_DIGITS');
   const { rows: [cred] } = await c.query(
     'SELECT * FROM member_credentials WHERE member_id = $1 FOR UPDATE', [memberId]);
@@ -228,14 +233,19 @@ async function changePin(c, memberId, { currentPin, newPin }) {
          locked_until = CASE WHEN $3 THEN now() + ($4 || ' minutes')::interval ELSE locked_until END,
          status = CASE WHEN $3 THEN 'LOCKED' ELSE status END WHERE member_id = $1`,
       [memberId, lock ? 0 : attempts, lock, String(LOCK_MINUTES)]);
-    if (lock) await c.query('UPDATE member_sessions SET revoked_at = now() WHERE member_id = $1 AND revoked_at IS NULL', [memberId]);
+    if (lock) {
+      await c.query('UPDATE member_sessions SET revoked_at = now() WHERE member_id = $1 AND revoked_at IS NULL', [memberId]);
+      RESOLVE.forgetSessions(c);
+    }
     return refuse(lock ? 'TOO_MANY_ATTEMPTS_ACCOUNT_LOCKED' : 'INVALID_CREDENTIALS', lock ? 423 : 401);
   }
   await c.query(
     'UPDATE member_credentials SET pin_hash = $1, pin_changed_at = now(), failed_attempts = 0 WHERE member_id = $2',
     [await hashPin(newPin), memberId]);
-  // A PIN change signs out every other device.
-  await c.query('UPDATE member_sessions SET revoked_at = now() WHERE member_id = $1 AND revoked_at IS NULL', [memberId]);
+  // A PIN change signs out every other device; the one that changed it stays signed in.
+  await c.query('UPDATE member_sessions SET revoked_at = now() WHERE member_id = $1 AND revoked_at IS NULL AND family_id IS DISTINCT FROM $2::uuid',
+    [memberId, /^[0-9a-f-]{36}$/i.test(String(sid || '')) ? sid : null]);
+  RESOLVE.forgetSessions(c);
   return { changed: true };
 }
 

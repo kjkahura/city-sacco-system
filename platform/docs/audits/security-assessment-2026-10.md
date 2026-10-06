@@ -48,7 +48,9 @@ Assessed on 6 October 2026, at the Apps commit, on John's request for a security
 - **Severity** is likelihood times impact for a SACCO holding members' money and personal data.
 - **Fixed** means the code was changed and a check proves it.
 - **Mitigated** means the risk was reduced and the remainder is stated.
+- **Scripted** or **Built** means the change is ready in the repository but takes effect only when the operator runs or switches it on.
 - **Open** means it is recommended, not built.
+- **Follow-up** marks what the second commit, "Security hardening follow-up", did.
 
 ### Identity and access
 
@@ -63,22 +65,22 @@ Assessed on 6 October 2026, at the Apps commit, on John's request for a security
 | IAM-7 | An older one-time code stayed usable after a newer one was accepted | Low | A07 / V6 / S | Fixed: a code at or before the last accepted step is refused |
 | IAM-8 | Second-factor reset had no check on who was reset | Low | A01 / API5 / V8 / E | Fixed: not one's own, not an administrator by a non-administrator, inside the resetter's branches |
 | IAM-9 | Share holdings could be read by any staff user and across branches | Low to Medium | A01 / API1 / V8 / I | Fixed: needs the member permission; share lookups go through members, so branch limits apply |
-| IAM-10 | Access tokens stay valid for up to 15 minutes (30 for members) after logout or a password change | Low | A07 / V7 / S | Open: tie each request to a live session row |
+| IAM-10 | Access tokens stay valid for up to 15 minutes (30 for members) after logout or a password change | Low | A07 / V7 / S | Fixed (follow-up): every staff and member request is checked against a live session row (cached five seconds); sign-out, a password or PIN change and suspension end the session at once. A token without a session is refused in production |
 | IAM-11 | The current password and PIN could be guessed with a stolen session | Low | A07 / API2 / V6 / S | Fixed: limited per user; a wrong PIN counts towards the member lockout, and a locked member cannot change the PIN |
-| IAM-12 | The password policy asks for a letter and a digit (ASVS 5 discourages composition rules); scrypt N=2^14 is below current guidance; no breached-password check | Low | A07 / V6, V11 | Open: see recommendations |
+| IAM-12 | The password policy asks for a letter and a digit (ASVS 5 discourages composition rules); scrypt N=2^14 is below current guidance; no breached-password check | Low | A07 / V6, V11 | Fixed (follow-up): scrypt N=2^14, r=8, p=5 (OWASP's equivalent of N=2^17 at 16 MB), older hashes replaced at the next sign-in; passwords and PINs up to 128 characters; a list of common passwords refused; the digit rule can be set to 0 by a SACCO; `PASSWORD_BREACH_CHECK=on` checks the breached-passwords service by k-anonymity. The default policy is unchanged |
 
 ### Money integrity and resource limits
 
 | ID | Finding | Severity | OWASP / API / ASVS / STRIDE | Status |
 | --- | --- | --- | --- | --- |
 | BIZ-1 | Savings interest could be brought up to any date, including the far future: unearned interest, and a loop of millions of steps | High | A06 / API4, API6 / V2 / T, D | Fixed: the interest date, and the date of every run route (fees, penalties, planned fees, fee amortisation, postdated payments, settlement, arrears), must be valid and not in the future |
-| BIZ-2 | Loan repayments, disbursements and share movements could be dated in the future | Medium | A06 / API6 / V2 / T | Fixed: no future dates on repayments and disbursements made by a staff user (any route, collection batches and pay-offs included) or on share movements. Open: a backdating permission for loans and shares, as savings has |
-| BIZ-3 | The developer guide promised `Idempotency-Key` on money routes, but it applied only to a few routes, so a retried deposit posted twice | Medium | A06 / API6 / V2 / T | Fixed for every POST route built on the shared handler (deposits, withdrawals, transfers, repayments, disbursements, fees, accruals and most others): a replay answers the first result, and the same key on a different request is refused. Open: the few routes that answer by themselves or run their own transaction (member creation, roles, report runs) |
-| BIZ-4 | An aborted request's query kept its database connection; no statement time limit | Medium | A10 / API4 / V2 / D | Mitigated: request statements are limited to 55 seconds (`REQUEST_STATEMENT_TIMEOUT_MS`), except job routes (end of day run now, imports, backups). Open: hold the tenant's slot until the database work ends |
+| BIZ-2 | Loan repayments, disbursements and share movements could be dated in the future | Medium | A06 / API6 / V2 / T | Fixed: no future dates on repayments and disbursements made by a staff user (any route, collection batches and pay-offs included) or on share movements. Follow-up: past-dated loan and share postings need the new `BACKDATE_LOAN_TRANSACTIONS` and `BACKDATE_SHARE_TRANSACTIONS` permissions, given to every role that already had `BACKDATE_SAVINGS_TRANSACTIONS` |
+| BIZ-3 | The developer guide promised `Idempotency-Key` on money routes, but it applied only to a few routes, so a retried deposit posted twice | Medium | A06 / API6 / V2 / T | Fixed for every POST route built on the shared handler (deposits, withdrawals, transfers, repayments, disbursements, fees, accruals and most others): a replay answers the first result, and the same key on a different request is refused. Follow-up: member creation takes the key too. Roles and report runs do not move money and are left as they are |
+| BIZ-4 | An aborted request's query kept its database connection; no statement time limit | Medium | A10 / API4 / V2 / D | Mitigated: request statements are limited to 55 seconds (`REQUEST_STATEMENT_TIMEOUT_MS`), except job routes (end of day run now, imports, backups). Fixed (follow-up): the tenant's slot is held until the request's database work ends, so an aborted request no longer frees a slot its query still uses |
 | BIZ-5 | The per-tenant wait list had no size limit | Low | API4 / D | Fixed: four times the slots, then refused with 503 |
-| BIZ-6 | Transfers skipped the user's withdrawal limit; limits are per transaction, not per day | Medium | A06 / API6 / V2 / E, T | Fixed (transfers held to the withdrawal limit). Open: daily cumulative limits, limits for API consumers |
-| BIZ-7 | The same user can create, approve and disburse a loan unless the four-eyes rule is turned on | Medium | A06 / API6 / V2 / E, R | Open: the rule exists (`two_man_rule`) and is off by default to keep running SACCOs unchanged. Turn it on |
-| BIZ-8 | Guarantor pledges can be over-committed by concurrent pledges | Medium | A06 / V2 / T | Open: lock the guarantor's accounts when pledging |
+| BIZ-6 | Transfers skipped the user's withdrawal limit; limits are per transaction, not per day | Medium | A06 / API6 / V2 / E, T | Fixed (transfers held to the withdrawal limit). Follow-up: daily deposit, withdrawal and repayment limits per user, summed under an advisory lock; API consumers have per-transaction and daily limits of their own. All are empty (no limit) until set |
+| BIZ-7 | The same user can create, approve and disburse a loan unless the four-eyes rule is turned on | Medium | A06 / API6 / V2 / E, R | Follow-up: the rule now also refuses approval by the user who applied. New SACCOs start with it on (`NEW_TENANT_FOUR_EYES=off` to opt out); existing SACCOs keep their setting until switched with `cli controls:four-eyes --slug <s>` or `--all` |
+| BIZ-8 | Guarantor pledges can be over-committed by concurrent pledges | Medium | A06 / V2 / T | Fixed (follow-up): pledges, withdrawals and transfers take a per-member advisory lock, so a pledge and a withdrawal on the same member are decided one after the other |
 | BIZ-9 | Two cash payouts at the same moment could both pass the till's limits | Low | A06 / V2 / T | Fixed: the till row is locked for the posting (tenant migration 050) |
 | BIZ-10 | Fees could be dated in the future | Low | V2 / T | Fixed (with BIZ-1) |
 | BIZ-11 | Bulk reversals had no size limit | Low | API4 / D | Fixed: at most 1,000 |
@@ -94,22 +96,22 @@ Assessed on 6 October 2026, at the Apps commit, on John's request for a security
 | INP-4 | Field-name allow-lists accepted built-in names such as `constructor` | Low | A10 / V2 / D | Fixed: own keys only |
 | INP-5 | The YAML reader accepted `__proto__` as a key | Low | A08 / V5 / T | Fixed: refused |
 | INP-6 | The outbound guard relied on every caller to check the address; an address written as an IP is not looked up | Low | API7 / V12 / I, E | Fixed: every outbound request refuses plain http and private IP addresses itself |
-| INP-7 | The SMS delivery-report token is in the address | Info | V12 / S | Open: accept it in a header where the gateway supports it |
-| INP-8 | Upload type checks differ between upload paths; the multipart name pattern matched inside `filename=` | Info | V5 | Fixed (the pattern). Open: check ID-document uploads by their content, as member media is |
+| INP-7 | The SMS delivery-report token is in the address | Info | V12 / S | Fixed (follow-up): `/hooks/sms/:tenant` takes the token in an `X-Callback-Token` header; the address form still works for gateways that cannot send headers |
+| INP-8 | Upload type checks differ between upload paths; the multipart name pattern matched inside `filename=` | Info | V5 | Fixed (the pattern; follow-up: ID-document uploads are checked by their content) |
 
 ### Configuration, cryptography, logging and supply chain
 
 | ID | Finding | Severity | OWASP / API / ASVS / STRIDE | Status |
 | --- | --- | --- | --- | --- |
 | CFG-1 | Without `BACKUP_ENCRYPTION_KEY`, offsite backups were shipped as plain dumps | Medium | A04, A02 / V11, V14 / I | Fixed: an unencrypted dump is never copied offsite; dumps are written readable by the platform user only |
-| CFG-2 | A request sent straight to the `run.app` address can set its own client address, which the IP allow-list, rate limits and audit trail trust | Medium | A02, A09 / V13 / S, R | Open: set Cloud Run ingress to internal and load balancing, behind a load balancer with Cloud Armor (needs the Google Cloud console) |
+| CFG-2 | A request sent straight to the `run.app` address can set its own client address, which the IP allow-list, rate limits and audit trail trust | Medium | A02, A09 / V13 / S, R | Scripted (follow-up): `deploy/security/edge.sh` builds the load balancer and Cloud Armor policy and sets ingress. Open until it is run against the project |
 | CFG-3 | Error answers and `/health` returned the database's text | Low | A02, A10 / V16 / I | Fixed (with BIZ-12) |
 | CFG-4 | Second-factor secrets were stored in plain text | Medium | A04 / V11, V14 / S, I | Fixed: sealed with AES-256-GCM; older secrets are sealed the first time they are used |
 | CFG-5 | A built-in signing key was used whenever `NODE_ENV` was not exactly `production` | Low | A02, A04 / V13, V9 / S, E | Fixed: only an explicit development or test run may use it; a production key must be at least 32 bytes |
 | CFG-6 | `SECRETS_KEY` had no strength check and fell back to `JWT_SECRET` | Low | A04 / V11 / I | Fixed for production: at least 32 bytes and no fallback |
-| CFG-7 | A failed audit write was silent; the control plane was not audited; no alerting | Medium | A09 / V16 / R | Fixed (logged under `[audit-write-failed]`; control plane audited). Open: log-based alerts in Cloud Logging |
-| CFG-8 | The audit trail's protection is a trigger the application's own database role could switch off | Low | A09, A08 / V16 / T, R | Open: run the service as a non-owner role; copy audit rows daily to write-once storage |
-| CFG-9 | The deploy job ran `firebase-tools@latest`, and actions and the base image are pinned by tag | Medium | A03, A08 / V15 / T, E | Mitigated: `firebase-tools` pinned to 15.32.1; Dependabot added for actions, npm and the image. Open: pin actions and the image by digest |
+| CFG-7 | A failed audit write was silent; the control plane was not audited; no alerting | Medium | A09 / V16 / R | Fixed (logged under `[audit-write-failed]`; control plane audited). Scripted (follow-up): `deploy/security/alerts.sh` creates the log-based metrics and alert policies. Open until run |
+| CFG-8 | The audit trail's protection is a trigger the application's own database role could switch off | Low | A09, A08 / V16 / T, R | Built (follow-up): `deploy/security/db-roles.sql` makes a non-owner `sacco_app` role, migrations grant it what it needs and revoke changes to the audit tables, and the deploy job runs the service as it when `APP_DB_USER` is set. `cli audit:export` copies each day's audit rows to `AUDIT_ARCHIVE`; `deploy/security/audit-archive.sh` makes the bucket with a retention lock. Open until set up |
+| CFG-9 | The deploy job ran `firebase-tools@latest`, and actions and the base image are pinned by tag | Medium | A03, A08 / V15 / T, E | Mitigated: `firebase-tools` pinned to 15.32.1; Dependabot added for actions, npm and the image. Scripted (follow-up): `deploy/security/pin-digests.sh` pins the actions and the base image by digest. Open until run |
 | CFG-10 | Ignore rules did not cover dumps and Redis files | Low | A02 / V13, V14 / I | Fixed |
 | CFG-11 | API answers carried no baseline security headers | Low | A02 / V3, V13 / I | Fixed: `nosniff`, `no-store`, `no-referrer`, a deny-all CSP, HSTS in production |
 | CFG-12 | The console keeps its refresh token in `sessionStorage`; PINs are short by design; small housekeeping | Info | V3, V6 | Open: noted for the next session design |
@@ -121,14 +123,14 @@ Assessed on 6 October 2026, at the Apps commit, on John's request for a security
 | Category | Assessment after this review |
 | --- | --- |
 | A01 Broken Access Control | The route table refuses unknown routes. Permissions are reloaded on every request. Row security limits branch users in the database. The fixes close the escalations found (IAM-1, IAM-2, IAM-8, IAM-9). Holds. |
-| A02 Security Misconfiguration | Strict CSP on the console and portal, no CORS, no cookies, baseline headers on the API. Open: Cloud Run ingress (CFG-2). |
-| A03 Software Supply Chain Failures | Five runtime dependencies, `npm audit` clean, lockfile with integrity hashes, `npm ci`. Dependabot added. Open: digest pinning. |
-| A04 Cryptographic Failures | scrypt for passwords; AES-256-GCM for secrets and backups; hashed tokens and keys; sealed TOTP secrets. Open: scrypt cost (IAM-12). |
+| A02 Security Misconfiguration | Strict CSP on the console and portal, no CORS, no cookies, baseline headers on the API. Cloud Run ingress (CFG-2) is scripted, to be run. |
+| A03 Software Supply Chain Failures | Five runtime dependencies, `npm audit` clean, lockfile with integrity hashes, `npm ci`. Dependabot added. Digest pinning scripted, to be run. |
+| A04 Cryptographic Failures | scrypt for passwords; AES-256-GCM for secrets and backups; hashed tokens and keys; sealed TOTP secrets. scrypt cost raised (IAM-12). |
 | A05 Injection | All SQL values are parameters and identifiers come from fixed maps. Template rendering escapes for its context. Formula injection is fixed. Holds. |
-| A06 Insecure Design | Balance changes run under row locks, journals are balanced, closed periods are enforced by triggers, idempotency is now general. Open: four-eyes default, guarantor locking, daily limits. |
-| A07 Authentication Failures | Lockouts, a second factor for administrators, rotating refresh tokens with reuse detection. The fixes close the enrolment, limiter and replay gaps. Open: session binding (IAM-10). |
-| A08 Software or Data Integrity Failures | Webhooks are signed, app requests are signed, backups are verified by round trip, the audit trail is append-only. Open: a non-owner database role. |
-| A09 Security Logging and Alerting Failures | Every staff and API request is audited, failed sign-ins included, and now the control plane too. Open: alerts. |
+| A06 Insecure Design | Balance changes run under row locks, journals are balanced, closed periods are enforced by triggers, idempotency is now general. Four-eyes on for new SACCOs, guarantor locking and daily limits added. |
+| A07 Authentication Failures | Lockouts, a second factor for administrators, rotating refresh tokens with reuse detection. The fixes close the enrolment, limiter and replay gaps. Requests are bound to a live session (IAM-10). |
+| A08 Software or Data Integrity Failures | Webhooks are signed, app requests are signed, backups are verified by round trip, the audit trail is append-only. A non-owner database role is ready to switch on (CFG-8). |
+| A09 Security Logging and Alerting Failures | Every staff and API request is audited, failed sign-ins included, and now the control plane too. Alerts are scripted, to be run. |
 | A10 Mishandling of Exceptional Conditions | Errors answer codes, not internals. Resource bounds are added (statement time, wait list, workbook size). |
 
 ### OWASP API Security Top 10:2023
@@ -140,7 +142,7 @@ Assessed on 6 October 2026, at the Apps commit, on John's request for a security
 | API3 Broken Object Property Level Authorization | Protected fields (offset pledges, internal flags, roles, limits) are stripped or checked. IAM-1 fixed. |
 | API4 Unrestricted Resource Consumption | Request rate per caller, body limits, page caps, now statement time, wait list and workbook bounds. |
 | API5 Broken Function Level Authorization | The permission table covers every route; unknown routes are administrator-only. IAM-2 and IAM-5 fixed. |
-| API6 Unrestricted Access to Sensitive Business Flows | Future-dated postings, transfers past limits and retries posting twice are fixed. Open: daily limits and four-eyes default. |
+| API6 Unrestricted Access to Sensitive Business Flows | Future-dated postings, transfers past limits and retries posting twice are fixed. Daily limits and four-eyes for new SACCOs added. |
 | API7 Server Side Request Forgery | The outbound guard (HTTPS, public addresses checked when connecting, no redirects) now applies to every request. Holds. |
 | API8 Security Misconfiguration | See A02. |
 | API9 Improper Inventory Management | One API, documented in `docs/developer-guide.md`; the sandbox is a separate tenant and marked in every answer. |
@@ -151,21 +153,21 @@ Assessed on 6 October 2026, at the Apps commit, on John's request for a security
 | Chapter | Result |
 | --- | --- |
 | V1 Encoding and Sanitization | Meets, with INP-2 fixed |
-| V2 Validation and Business Logic | Meets after BIZ-1, BIZ-2, BIZ-3, BIZ-6 and BIZ-11; open items BIZ-7 and BIZ-8 |
+| V2 Validation and Business Logic | Meets after BIZ-1, BIZ-2, BIZ-3, BIZ-6 and BIZ-11; BIZ-7 and BIZ-8 fixed in the follow-up |
 | V3 Web Frontend Security | Meets: strict CSP, no inline script, framing refused, sandboxed app frames |
 | V4 API and Web Service | Meets |
-| V5 File Handling | Meets after INP-1 and INP-5; INP-8 remainder open |
-| V6 Authentication | Meets after IAM-3, IAM-4, IAM-6, IAM-7 and IAM-11; IAM-12 open |
-| V7 Session Management | Partly: IAM-10 open |
+| V5 File Handling | Meets after INP-1 and INP-5; and INP-8 |
+| V6 Authentication | Meets after IAM-3, IAM-4, IAM-6, IAM-7 and IAM-11; and IAM-12 |
+| V7 Session Management | Meets after IAM-10 |
 | V8 Authorization | Meets after IAM-1, IAM-2, IAM-8 and IAM-9 |
 | V9 Self-contained Tokens | Meets: HS256 pinned, separate admin key and audience |
 | V10 OAuth and OIDC | Not applicable (no OAuth); deploy uses Workload Identity Federation |
-| V11 Cryptography | Meets after CFG-4, CFG-5 and CFG-6; scrypt cost open |
+| V11 Cryptography | Meets after CFG-4, CFG-5 and CFG-6; and the scrypt cost |
 | V12 Secure Communication | Meets: HTTPS outbound only, TLS 1.2+ for mail; HSTS added |
-| V13 Configuration | Partly: CFG-2 open |
+| V13 Configuration | Partly: CFG-2 is scripted and not yet run |
 | V14 Data Protection | Meets: anonymisation, sealed secrets, encrypted backups, no-store answers |
-| V15 Secure Coding and Architecture | Meets; digest pinning open |
-| V16 Security Logging and Error Handling | Meets after CFG-3 and CFG-7; alerting open |
+| V15 Secure Coding and Architecture | Meets; digest pinning scripted |
+| V16 Security Logging and Error Handling | Meets after CFG-3 and CFG-7; alerting scripted |
 | V17 WebRTC | Not applicable |
 
 ### STRIDE by boundary
@@ -223,22 +225,45 @@ All were fixed or the wording corrected, with checks added to `test/hardening.te
 - the control plane auditing refused and aborted requests;
 - backup files private from the moment they are created.
 
-## Recommendations, in order
+## Follow-up: the remaining fixes
 
-1. **Cloud Run ingress (CFG-2):** set ingress to "internal and Cloud Load Balancing", front the service with an HTTPS load balancer and Cloud Armor, and point Firebase Hosting at it. Until then, the IP allow-list can be bypassed through the `run.app` address.
-2. **Turn on four-eyes for loans (BIZ-7):** set `two_man_rule` on for every SACCO, and make it the default for new ones.
-3. **Set the new environment settings in production:**
-   - `PORTAL_ACTIVATION_REQUIRES_PHONE_ON_FILE=true`, once staff have recorded members' phones;
-   - `ADMIN_API` stays off unless needed. When it is needed, set `ADMIN_JWT_SECRET` (48 random bytes, in Secret Manager) and `ADMIN_ALLOWED_IPS`.
-4. **Alerting (CFG-7):** add Cloud Logging alerts on these:
-   - `[audit-write-failed]`, `[error]` and `[backup]` lines;
-   - 429 and 401 spikes;
-   - `ADMIN_REQUEST` audit rows.
-5. **Database role (CFG-8):** run the service as a role that does not own the tables, and copy the audit trail daily to a bucket with a retention lock.
-6. **Daily limits and guarantor locking (BIZ-6, BIZ-8),** session binding (IAM-10), a backdating permission for loans and shares (BIZ-2), and scrypt N=2^17 with rehash on sign-in, a breached-password list and no composition rules (IAM-12).
-7. **Digest pinning (CFG-9):** pin the four actions and the Node base image by digest, and let Dependabot update them.
-8. **Independent penetration test** of the deployed platform before real member data. This review read and tested the code; a tester should also probe the deployed edge (Firebase, Cloud Run, Cloud SQL).
-9. **Kenyan obligations:** the Data Protection Act 2019 requires notifying the Data Commissioner within 72 hours of becoming aware of a personal data breach (section 43), and the affected members within a reasonably practicable period. SASRA's and the Central Bank of Kenya's cybersecurity guidance expect an incident response plan and periodic testing. The audit trail and alerts above are what make the 72 hours achievable.
+After the first commit, every open finding that could be closed in code was closed, and the ones that need the Google Cloud project were written as scripts. Each code change has a check in `test/hardening.test.js`.
+
+| Finding | What was done |
+| --- | --- |
+| IAM-10 | Each staff and member request is checked against its session row by its UUID (cached five seconds, cleared on revocation and again after the revoking transaction commits). Status and lock are checked first, so a suspended user is told so. Changing a user's role, or a role's base role, keeps sessions: permissions are read on every request |
+| IAM-12 | scrypt p raised from 1 to 5, rehash on sign-in, at most 128 characters, a common-password list, the digit rule may be 0, optional breached-password check. Member PINs are rehashed and locked out the same way. Checking a hash with the old parameters is topped up to the current cost, so sign-in time does not tell a known account from an unknown one |
+| BIZ-2 | `BACKDATE_LOAN_TRANSACTIONS` and `BACKDATE_SHARE_TRANSACTIONS`, granted by tenant migration 051 and platform migration 016 to roles, users and API consumers that held the savings permission |
+| BIZ-3 | Member creation takes `Idempotency-Key` |
+| BIZ-4 | The concurrency slot is released when the request's database work ends, not when the client goes, for staff, API and member requests |
+| BIZ-6 | Daily deposit, withdrawal and repayment limits (platform migration 017), on the user form, the limits page and the users and API consumer APIs |
+| BIZ-7 | Under `two_man_rule` the applicant may not approve (new) and the approver may not disburse (as before, now without regard to case); new SACCOs start with it on; `cli controls:four-eyes` |
+| BIZ-8 | A per-member advisory lock in pledging, withdrawals and transfers, always taken after the account rows, so a transfer and a withdrawal cannot deadlock |
+| INP-7 | `X-Callback-Token` header on `/hooks/sms/:tenant` |
+| INP-8 | ID-document attachments checked by content |
+| CFG-2, CFG-7, CFG-8, CFG-9 | `deploy/security/` scripts, platform migration 018 (`grant_app_role`), `cli audit:export` with a `gcs:` target, and `APP_DB_USER` in the deploy job |
+
+A reviewer read the follow-up before it was committed and found four important issues: a lock-order deadlock between a transfer and a withdrawal; the non-owner role refusing the audit prune and anonymization, and missing grants on later platform tables; the session check not using its index; and the four-eyes wording. Smaller ones: sign-in timing for accounts not yet rehashed, the session cache refilled before a revocation committed, a PIN change signing out the device that made it, a slot leak if a connection release failed, consumer limits validated after the update, daily limits missing from the limits page, two scripts not safe to re-run, the audit export unable to retry into a locked bucket, and no timeout on the metadata server. All were fixed, with checks added where code changed.
+
+Two plans were also written: `docs/incident-response.md` (roles, the first hour, evidence, the Data Protection Act notices) and `docs/pentest-scope.md` (scope and rules for an independent test).
+
+## What remains, in order
+
+The remaining items are operator steps in the Google Cloud project and decisions for each SACCO:
+
+1. **Run `deploy/security/edge.sh` (CFG-2).** Until it is run, the IP allow-list can be bypassed through the `run.app` address. Point the domain at the load balancer's address and keep `TRUST_PROXY=2`.
+2. **Turn on four eyes for existing SACCOs (BIZ-7):** `npm run cli controls:four-eyes -- --all`, once each SACCO has at least two staff who can approve.
+3. **Run `deploy/security/alerts.sh` (CFG-7)** with an address that is watched.
+4. **Switch the service to the non-owner role (CFG-8):** run `db-roles.sql`, store the password, set `APP_DB_USER=sacco_app`, deploy. Then run `audit-archive.sh`, check a day's copy, and lock the retention with `LOCK=yes`.
+5. **Run `pin-digests.sh` (CFG-9)** and commit the result.
+6. **Set the environment settings in production:**
+   - `PORTAL_ACTIVATION_REQUIRES_PHONE_ON_FILE=true` once phones are recorded;
+   - `PASSWORD_BREACH_CHECK=on`;
+   - `ADMIN_API` off unless needed, and when needed, `ADMIN_JWT_SECRET` and `ADMIN_ALLOWED_IPS`.
+7. **Set daily limits** for tellers and API consumers, in Access > Users and Access > API Consumers. They are empty until set.
+8. **Commission the penetration test** in `docs/pentest-scope.md` before real member data.
+9. **Fill in the contacts in `docs/incident-response.md`** and rehearse it once. Kenya's Data Protection Act 2019 requires notifying the Data Commissioner within 72 hours of becoming aware of a personal data breach (section 43), and the affected members within a reasonably practicable period. SASRA's and the Central Bank of Kenya's guidance expect an incident response plan and periodic testing.
+10. **CFG-12** (the console's refresh token in `sessionStorage`) stays for the next session design.
 
 ## Sources
 
@@ -250,3 +275,4 @@ All were fixed or the wording corrected, with checks added to `test/hardening.te
 - Kenya Data Protection Act, 2019 (ODPC): https://www.odpc.go.ke/wp-content/uploads/2024/02/TheDataProtectionAct__No24of2019.pdf
 - Breach notification under the Kenyan Data Protection Act (Afriwise): https://www.afriwise.com/blog/a-few-insights-on-navigating-data-breaches-in-kenya-under-the-kenyan-data-protection-law
 - Central Bank of Kenya Guidance Note on Cybersecurity (summary): https://www.insideprivacy.com/international/central-bank-of-kenya-issues-guidance-note-on-cybersecurity/
+- OWASP Password Storage Cheat Sheet (scrypt parameters, including N=2^14, r=8, p=5): https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html

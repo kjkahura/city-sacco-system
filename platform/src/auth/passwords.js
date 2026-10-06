@@ -12,9 +12,12 @@ const scrypt = promisify(crypto.scrypt);
  * Node upgrades. scrypt is memory-hard, in the standard library, and needs
  * no toolchain. Parameters below are the interactive-login profile.
  */
+// OWASP's equivalent of N=2^17, r=8, p=1 that needs 16 MB rather than 128 MB a hash
+// (Password Storage Cheat Sheet): N=2^14, r=8, p=5. Older hashes (p=1) are
+// replaced at the next successful sign-in (needsRehash).
 const N = 16384;   // CPU/memory cost
 const r = 8;       // block size
-const p = 1;       // parallelisation
+const p = 5;       // parallelisation
 const KEYLEN = 64;
 const MAXMEM = 64 * 1024 * 1024;
 
@@ -38,6 +41,12 @@ async function verifyPassword(plain, stored) {
     });
     // Constant-time: a length check first, since timingSafeEqual throws on
     // mismatched lengths and that throw would itself leak length.
+    // A hash made with older, cheaper parameters (p=1) is topped up to the current cost, so a
+    // sign-in for an account not yet rehashed takes as long as one for an unknown account.
+    const short = p - Number(pp);
+    if (Number(n) === N && Number(rr) === r && short > 0) {
+      await scrypt(plain, salt, KEYLEN, { N, r, p: short, maxmem: MAXMEM });
+    }
     if (actual.length !== expected.length) return false;
     return crypto.timingSafeEqual(actual, expected);
   } catch {
@@ -53,4 +62,10 @@ async function verifyPassword(plain, stored) {
  */
 const hashPin = (pin) => hashPassword(String(pin), { minLength: 4 });
 
-module.exports = { hashPassword, verifyPassword, hashPin };
+/** Whether a stored hash is weaker than the current parameters. */
+function needsRehash(stored) {
+  const [scheme, n, rr, pp] = String(stored || '').split('$');
+  return scheme === 'scrypt' && (Number(n) * Number(rr) * Number(pp) < N * r * p);
+}
+
+module.exports = { hashPassword, verifyPassword, hashPin, needsRehash };

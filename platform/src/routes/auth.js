@@ -2,7 +2,7 @@
 
 const express = require('express');
 const { pool } = require('../db/pool');
-const { verifyPassword, hashPassword } = require('../auth/passwords');
+const { verifyPassword, hashPassword, needsRehash } = require('../auth/passwords');
 const tokens = require('../auth/tokens');
 const mfa = require('../auth/mfa');
 const { requireAuth, signToken } = require('../tenancy/resolve');
@@ -71,7 +71,7 @@ router.post('/login', loginRateLimit(), async (req, res, next) => {
     // whether the email exists in this tenant.
     const ok = await verifyPassword(
       password,
-      user?.password_hash || 'scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAA'
+      user?.password_hash || 'scrypt$16384$8$5$AAAAAAAAAAAAAAAAAAAAAA==$AAAA'
     );
     const prefs = await AP.of(req.tenant.id);
     if (user && locked(user)) {
@@ -96,6 +96,10 @@ router.post('/login', loginRateLimit(), async (req, res, next) => {
 
     await clearLoginAttempts(req);
     await pool.query('UPDATE platform.users SET failed_logins = 0 WHERE id = $1 AND failed_logins > 0', [user.id]);
+    // A hash made with older, weaker parameters is replaced now that the password is at hand.
+    if (needsRehash(user.password_hash)) {
+      await pool.query('UPDATE platform.users SET password_hash = $2 WHERE id = $1', [user.id, await hashPassword(String(req.body.password), { minLength: 1 })]);
+    }
     await recordAttempt(req, email, true);
     const expiredPassword = policy.expired(prefs, user.password_changed_at);
 

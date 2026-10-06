@@ -24,7 +24,8 @@ export function showDialog(title, inner) {
 
 const LIMIT_FIELDS = [['approvalLimit', 'approval_limit', 'Loan approval'], ['disbursementLimit', 'disbursement_limit', 'Loan disbursement'],
   ['feeLimit', 'fee_limit', 'Fee application'], ['depositLimit', 'deposit_limit', 'Deposits'], ['withdrawalLimit', 'withdrawal_limit', 'Withdrawals'],
-  ['repaymentLimit', 'repayment_limit', 'Repayments']];
+  ['repaymentLimit', 'repayment_limit', 'Repayments'], ['dailyDepositLimit', 'daily_deposit_limit', 'Daily deposits'],
+  ['dailyWithdrawalLimit', 'daily_withdrawal_limit', 'Daily withdrawals and transfers'], ['dailyRepaymentLimit', 'daily_repayment_limit', 'Daily repayments']];
 
 export async function usersView() {
   const [users, roles, branches, rc] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/users/roles'), api('GET', '/api/branches'), rolesCard()]);

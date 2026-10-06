@@ -98,9 +98,26 @@ async function bind(client, schemaName) {
  * Run fn inside a transaction bound to one tenant's schema.
  * Commits on success, rolls back on throw.
  */
+/**
+ * The request's database work in progress: the tenant's concurrency slot
+ * (lib/limits) is given back when it ends, not when an impatient client
+ * disconnects while a query still runs.
+ */
+function workStarted() {
+  const w = requestContext.current()?.work;
+  if (w) w.busy += 1;
+  return () => {
+    if (!w) return;
+    w.busy -= 1;
+    if (w.busy === 0 && w.onIdle) { const f = w.onIdle; w.onIdle = null; f(); }
+  };
+}
+
 async function withTenant(schemaName, fn) {
   assertSchemaName(schemaName);
-  const client = await pool.connect();
+  const done = workStarted();
+  let client;
+  try { client = await pool.connect(); } catch (e) { done(); throw e; }
   try {
     await client.query('BEGIN');
     // format('%I') applies quote_ident server-side; the regex above already
@@ -116,21 +133,30 @@ async function withTenant(schemaName, fn) {
 
     const out = await fn(client);
     await client.query('COMMIT');
+    for (const hook of client.afterCommit || []) { try { hook(); } catch { /* a hook never fails the request */ } }
     return out;
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     throw e;
   } finally {
+    client.afterCommit = null;
     // Release returns the connection to the pool. search_path is already
     // reverted by the transaction ending, so the next borrower is clean.
-    client.release();
+    try { client.release(); } finally { done(); }
   }
+}
+
+/** Run fn once the transaction on c (from withTenant) has committed; never if it rolls back. */
+function afterCommit(c, fn) {
+  (c.afterCommit ||= []).push(fn);
 }
 
 /** Read-only variant; same isolation, marked so a replica can serve it later. */
 async function withTenantRead(schemaName, fn) {
   assertSchemaName(schemaName);
-  const client = await pool.connect();
+  const done = workStarted();
+  let client;
+  try { client = await pool.connect(); } catch (e) { done(); throw e; }
   try {
     await client.query('BEGIN READ ONLY');
     await bind(client, schemaName);
@@ -142,6 +168,7 @@ async function withTenantRead(schemaName, fn) {
     throw e;
   } finally {
     client.release();
+    done();
   }
 }
 
@@ -155,4 +182,4 @@ function longRunning(_req, _res, next) {
   next();
 }
 
-module.exports = { withTenant, withTenantRead, orgToday, assertSchemaName, TenantError, SCHEMA_RE, longRunning };
+module.exports = { withTenant, withTenantRead, orgToday, assertSchemaName, TenantError, SCHEMA_RE, longRunning, afterCommit };

@@ -1,6 +1,16 @@
 'use strict';
 
 const { notAfterToday } = require('../lib/valueDates');
+const PERMS = require('../lib/permissions');
+const { orgToday } = require('../lib/orgDate');
+
+// A past value date needs the backdating permission (it moves who is on the register at a dividend's record date).
+async function mayBackdate(c, req) {
+  const v = req.body?.valueDate;
+  if (v && String(v).slice(0, 10) < await orgToday(c) && !PERMS.can(req.auth, 'BACKDATE_SHARE_TRANSACTIONS')) {
+    throw Object.assign(new Error('PERMISSION_REQUIRED: BACKDATE_SHARE_TRANSACTIONS, to post with a past value date'), { status: 403 });
+  }
+}
 
 const express = require('express');
 const { withTenantRead } = require('../db/tenantContext');
@@ -42,12 +52,14 @@ router.post('/', ...tx(async (c, req, res) => {
 router.post('/:id/purchases', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   await notAfterToday(c, req.body?.valueDate);
+  await mayBackdate(c, req);
   return await SH.purchase(c, req.params.id, { ...req.body, createdBy: actor });
 }));
 
 router.post('/:id/transfers', ...tx(async (c, req, res, { actor }) => {
   res.status(201);
   await notAfterToday(c, req.body?.valueDate);
+  await mayBackdate(c, req);
   return await SH.transfer(c, req.params.id, { ...req.body, createdBy: actor });
 }));
 

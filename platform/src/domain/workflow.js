@@ -224,6 +224,14 @@ async function transition(c, loanId, action, { createdBy, note = null, user = nu
     // may record one for any amount; approving it is the credit decision.
     await eligibility.enforceEligibility(c, l);
     await assertMayApprove(c, l, { user });
+    // Four eyes (lending controls, two_man_rule): whoever applied for a loan does not approve it.
+    const { rows: [fe] } = await c.query('SELECT two_man_rule FROM lending_controls WHERE id = 1');
+    if (fe?.two_man_rule && createdBy) {
+      const { rows: [app] } = await c.query("SELECT actor FROM loan_state_history WHERE loan_id = $1 AND action = 'APPLY' ORDER BY at, id LIMIT 1", [l.id]);
+      if (app && app.actor && app.actor !== 'SYSTEM' && String(app.actor).toLowerCase() === String(createdBy).toLowerCase()) {
+        throw err('TWO_MAN_RULE: the user who applied for a loan may not approve it', 403);
+      }
+    }
     if (l.refinance_of) await assertTopUpStands(c, l);
     await tranches.assertPlanned(c, l);
     await funding.assertFundedForApproval(c, l);

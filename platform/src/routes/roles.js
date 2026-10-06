@@ -3,7 +3,6 @@
 const express = require('express');
 const { withTenant } = require('../db/tenantContext');
 const { requirePermission, forgetUser } = require('../tenancy/resolve');
-const tokens = require('../auth/tokens');
 const ROLE = require('../domain/roles');
 const { json } = require('../lib/handlers');
 const read = (perm, fn) => json((c, req) => fn(c, req), { guard: requirePermission(perm) });
@@ -18,9 +17,9 @@ const router = express.Router();
 const write = (perm, fn, status = 200) => [requirePermission(perm), async (req, res, next) => {
   try {
     const out = await withTenant(req.tenant.schema_name, (c) => fn(c, req));
-    // Everyone's cached access is stale once a role changes.
+    // Everyone's cached access is stale once a role changes. Sessions carry on: the role, base role
+    // and permissions are read afresh on every request, so a moved base role takes effect at once.
     forgetUser();
-    for (const id of out?.baseMoved || []) await tokens.revokeAll(id);
     res.status(status).json(out?.role || out);
   } catch (e) { next(e); }
 }];

@@ -176,6 +176,10 @@ async function provisionTenant({
     await migrateTenant(schemaName);
 
     await seedTenantSchema(schemaName);
+    // A new SACCO starts with four eyes on loans (security review, BIZ-7): who applies does not approve,
+    // who approves does not disburse. NEW_TENANT_FOUR_EYES=off (and test runs) start without it.
+    const fourEyes = process.env.NEW_TENANT_FOUR_EYES ? process.env.NEW_TENANT_FOUR_EYES !== 'off' : process.env.NODE_ENV !== 'test';
+    if (fourEyes) await withTenant(schemaName, (c) => c.query('UPDATE lending_controls SET two_man_rule = true WHERE id = 1'));
 
     const hash = await hashPassword(adminPassword);
     await pool.query(

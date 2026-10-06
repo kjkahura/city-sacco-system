@@ -115,24 +115,54 @@ async function exposure(c, { memberId, loanId = null, refinancing = null, reques
  * administrators; here a limit set on an administrator holds too.
  */
 async function userLimits(c, user) {
-  const none = { approval: null, disbursement: null, fee: null, deposit: null, withdrawal: null, repayment: null, email: user?.email || null };
-  if (!user?.sub || user.apiConsumer) return none;
+  const none = { approval: null, disbursement: null, fee: null, deposit: null, withdrawal: null, repayment: null, email: user?.email || null, daily: {} };
+  // An API consumer's limits are its own (platform migration 017), per transaction and per day.
+  if (user?.apiConsumer) {
+    if (!user.consumerId) return none;
+    const { rows: [k] } = await c.query(
+      `SELECT deposit_limit, withdrawal_limit, repayment_limit, daily_deposit_limit, daily_withdrawal_limit, daily_repayment_limit
+       FROM platform.api_consumers WHERE id = $1`, [user.consumerId]);
+    if (!k) return none;
+    return { ...none, deposit: k.deposit_limit ?? null, withdrawal: k.withdrawal_limit ?? null, repayment: k.repayment_limit ?? null,
+      daily: { deposit: k.daily_deposit_limit ?? null, withdrawal: k.daily_withdrawal_limit ?? null, repayment: k.daily_repayment_limit ?? null },
+      key: `consumer:${user.consumerId}` };
+  }
+  if (!user?.sub) return none;
   const { rows: [u] } = await c.query(
-    `SELECT email, approval_limit, disbursement_limit, fee_limit, deposit_limit, withdrawal_limit, repayment_limit
+    `SELECT email, approval_limit, disbursement_limit, fee_limit, deposit_limit, withdrawal_limit, repayment_limit,
+            daily_deposit_limit, daily_withdrawal_limit, daily_repayment_limit
      FROM platform.users WHERE id = $1`, [user.sub]);
   if (!u) return none;
   return {
     approval: u.approval_limit ?? null, disbursement: u.disbursement_limit ?? null, fee: u.fee_limit ?? null,
     deposit: u.deposit_limit ?? null, withdrawal: u.withdrawal_limit ?? null, repayment: u.repayment_limit ?? null, email: u.email,
+    daily: { deposit: u.daily_deposit_limit ?? null, withdrawal: u.daily_withdrawal_limit ?? null, repayment: u.daily_repayment_limit ?? null },
+    key: `user:${user.sub}`,
   };
 }
+
+// What counts towards a daily limit: money in, money out (transfers included) and repayments taken today.
+const DAILY_KINDS = { deposit: ['SAVINGS_DEPOSIT'], withdrawal: ['SAVINGS_WITHDRAWAL', 'SAVINGS_TRANSFER'], repayment: ['LOAN_REPAYMENT'] };
 
 const LIMIT_NAMES = { fee: 'FEE_APPLICATION', deposit: 'DEPOSIT', withdrawal: 'WITHDRAWAL', repayment: 'REPAYMENT' };
 /** Refuse an amount above the user's limit for fees, deposits, withdrawals or repayments. */
 async function assertWithinLimit(c, user, kind, amount) {
-  const lim = (await userLimits(c, user))[kind];
+  const all = await userLimits(c, user);
+  const lim = all[kind];
   if (lim !== null && lim !== undefined && Number(amount) > Number(lim)) {
     throw err(`ABOVE_YOUR_${LIMIT_NAMES[kind]}_LIMIT: limit ${Number(lim)}, amount ${Number(amount)}`, 403);
+  }
+  const day = all.daily?.[kind];
+  if (day !== null && day !== undefined && DAILY_KINDS[kind] && all.email) {
+    // One posting at a time per user for this check, so two at once cannot both fit under the limit.
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`daily-limit:${all.key}:${kind}`]);
+    const { rows: [s] } = await c.query(
+      `SELECT COALESCE(sum(amount), 0) AS n FROM transactions
+        WHERE lower(created_by) = lower($1) AND kind = ANY($2) AND reversed_by IS NULL AND created_at >= current_date`,
+      [all.email, DAILY_KINDS[kind]]);
+    if (Number(s.n) + Number(amount) > Number(day)) {
+      throw err(`ABOVE_YOUR_DAILY_${LIMIT_NAMES[kind]}_LIMIT: limit ${Number(day)} a day, already ${Number(s.n)} today, amount ${Number(amount)}`, 403);
+    }
   }
 }
 
@@ -145,7 +175,7 @@ async function assertMayApprove(c, l, { user }) {
 
 async function assertMayDisburse(c, l, { actor, amount, user = null }) {
   const ctl = await controls(c);
-  if (ctl.two_man_rule && l.approved_by && actor && l.approved_by === actor) {
+  if (ctl.two_man_rule && l.approved_by && actor && String(l.approved_by).toLowerCase() === String(actor).toLowerCase()) {
     throw err('TWO_MAN_RULE: the user who approved a loan may not disburse it', 403);
   }
   const lim = await userLimits(c, user);
@@ -222,7 +252,8 @@ async function assertMaySetDisbursementConditions(c, { user = null } = {}) {
 
 /** The tenant's staff with their approval and disbursement limits (the reference platform's transaction limits on a user). */
 const LIMIT_COLS = { approvalLimit: 'approval_limit', disbursementLimit: 'disbursement_limit', feeLimit: 'fee_limit',
-  depositLimit: 'deposit_limit', withdrawalLimit: 'withdrawal_limit', repaymentLimit: 'repayment_limit' };
+  depositLimit: 'deposit_limit', withdrawalLimit: 'withdrawal_limit', repaymentLimit: 'repayment_limit',
+  dailyDepositLimit: 'daily_deposit_limit', dailyWithdrawalLimit: 'daily_withdrawal_limit', dailyRepaymentLimit: 'daily_repayment_limit' };
 const limitsOf = (u) => Object.fromEntries(Object.entries(LIMIT_COLS).map(([k, col]) => [k, u[col] === null ? null : Number(u[col])]));
 
 async function staffLimits(c, tenantId) {

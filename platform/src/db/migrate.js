@@ -82,6 +82,14 @@ async function migratePlatform() {
   } finally {
     client.release();
   }
+  // The service's own role, when the operator has made it (platform migration 018): platform
+  // tables added since are granted too, and the platform audit log stays append-only for it.
+  await pool.query(`DO $$ BEGIN
+      IF to_regproc('platform.grant_app_role') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sacco_app') THEN
+        PERFORM platform.grant_app_role('platform');
+        REVOKE UPDATE, DELETE, TRUNCATE ON platform.audit_log FROM sacco_app;
+      END IF;
+    END $$`).catch((e) => console.warn(`[migrate] platform: service role grants not made: ${e.message}`));
   return done;
 }
 
@@ -144,6 +152,10 @@ async function migrateTenant(schemaName, { lockTimeoutMs = 5_000 } = {}) {
     await client.query(
       "SELECT platform.grant_branch_scoped($1) WHERE to_regproc('platform.grant_branch_scoped') IS NOT NULL", [schemaName]
     ).catch((e) => console.warn(`[migrate] ${schemaName}: branch-scoped grants not made: ${e.message}`));
+    // The service's own role, when the operator has made it (platform migration 018).
+    await pool.query(
+      "SELECT platform.grant_app_role($1) WHERE to_regproc('platform.grant_app_role') IS NOT NULL", [schemaName]
+    ).catch((e) => console.warn(`[migrate] ${schemaName}: service role grants not made: ${e.message}`));
     // The data dictionary's words, written into the catalog as comments
     // whenever the schema has moved. A failure here is not a failed
     // migration: the schema is right, only its comments are behind.

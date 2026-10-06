@@ -57,7 +57,9 @@ async function addGuarantor(c, loanId, { memberId, amount, createdBy = null, cus
   if (!(amt > 0)) throw err('INVALID_PLEDGE_AMOUNT');
 
   // The guarantor must actually have the deposits they are pledging, net of
-  // anything already pledged elsewhere.
+  // anything already pledged elsewhere. One pledge or withdrawal at a time per
+  // member (the same lock as savings withdrawals), so two cannot both count the same deposits.
+  await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`member-funds:${memberId}`]);
   const { rows: [bal] } = await c.query(
     'SELECT COALESCE(SUM(balance), 0) AS total FROM savings_accounts WHERE member_id = $1 AND status = ANY($2)',
     [memberId, ['ACTIVE', 'IN_ARREARS']]

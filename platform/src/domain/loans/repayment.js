@@ -5,6 +5,7 @@
  */
 
 const { orgToday } = require('../../lib/orgDate');
+const PERMS = require('../../lib/permissions');
 const acct = require('../accounting');
 const savings = require('../savings');
 const S = require('../schedule');
@@ -184,6 +185,10 @@ async function repay(c, loanId, { amount, channelId = 'mpesa', valueDate, narrat
   const asOf = valueDate ? ymd(valueDate) : (await orgToday(c));
   // A staff user's repayment (the API, collection batches, pay-offs) is not dated in the future.
   if (user && asOf > await orgToday(c)) throw err('VALUE_DATE_IS_IN_THE_FUTURE: post on today or an earlier day', 400);
+  // A past value date needs the backdating permission, as for deposit accounts.
+  if (user && asOf < await orgToday(c) && !PERMS.can(user, 'BACKDATE_LOAN_TRANSACTIONS')) {
+    throw err('PERMISSION_REQUIRED: BACKDATE_LOAN_TRANSACTIONS, to post with a past value date', 403);
+  }
   await assertNoLaterRepayment(c, l.id, asOf);
   // A custom allocation needs the product to allow it and the user the
   // permission (the reference platform). A pay-off allocates its own amounts (`internal`).

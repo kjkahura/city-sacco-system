@@ -172,6 +172,38 @@ function forgetUser(id = null) {
   for (const k of userCache.keys()) if (k.endsWith(`:${id}`)) userCache.delete(k);
 }
 
+/**
+ * An access token is good only while its session is (the refresh token
+ * family it was issued with, `sid`): signing out, a password change, a
+ * second-factor reset or a suspension end it at once, not when the token
+ * runs out. Checked against the database, remembered for a few seconds.
+ * A token without a session is refused in production (only tests make them).
+ */
+const SESSION_TTL_MS = 5_000;
+const live = new Map();
+async function sessionLive(sid, { schema = null } = {}) {
+  const key = `${schema || 'platform'}:${sid}`;
+  const hit = live.get(key);
+  if (hit && hit.expires > Date.now()) return hit.live;
+  // A session id is a UUID; compared as one, the family index is used.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(sid))) return false;
+  const { rows } = schema
+    ? await pool.query(`SELECT 1 FROM ${'"' + schema.replace(/"/g, '') + '"'}.member_sessions WHERE family_id = $1::uuid AND revoked_at IS NULL AND used_at IS NULL AND expires_at > now() LIMIT 1`, [String(sid)])
+    : await pool.query('SELECT 1 FROM platform.refresh_tokens WHERE family_id = $1::uuid AND revoked_at IS NULL AND used_at IS NULL AND expires_at > now() LIMIT 1', [String(sid)]);
+  const ok = rows.length > 0;
+  if (live.size > 50_000) live.clear();
+  live.set(key, { live: ok, expires: Date.now() + SESSION_TTL_MS });
+  return ok;
+}
+/** Forget what is known about sessions (after a revocation). */
+const forgetSessions = (c = null) => {
+  live.clear();
+  // A request between the revocation and its commit may have cached the session as live again;
+  // clear once more when the transaction on c commits.
+  if (c) require('../db/tenantContext').afterCommit(c, () => live.clear());
+};
+const sessionRequired = () => process.env.NODE_ENV === 'production';
+
 // Session activity, for the inactivity timeout: the last request of each
 // signed-in session, written at most once a minute per session.
 const seen = new Map();
@@ -244,6 +276,9 @@ function requireAuth(...roles) {
     if (!req.auth.apiConsumer) {
       if (state.status !== 'ACTIVE') return next(new TenantError(`USER_${state.status}`, 401));
       if (state.locked) return next(new TenantError('USER_LOCKED', 401));
+      try {
+        if (req.auth.sid ? !(await sessionLive(req.auth.sid)) : sessionRequired()) return next(new TenantError('SESSION_ENDED', 401));
+      } catch (e) { return next(e); }
       if (!state.consoleAccess) return next(new TenantError('ROLE_HAS_NO_BACK_OFFICE_ACCESS', 403));
       // The role as it stands, not as the token was issued with.
       req.auth.role = state.role;
@@ -269,6 +304,7 @@ function requireAuth(...roles) {
       tillAdd: PERMS.can(req.auth, 'ADD_CASH'), tillRemove: PERMS.can(req.auth, 'REMOVE_CASH'),
       branches: limited, officer: req.auth.officer || '',
       ip: req.ip || '', channel: req.auth.apiConsumer || req.get('apikey') ? 'API' : 'UI',
+      work: req.dbWork || null,
     }, () => next());
   };
 }
@@ -336,7 +372,7 @@ function permissionGate() {
 
 /** Require a signed-in member. Populates req.member = { id, memberNo }. */
 function requireMember() {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     if (!req.auth) return next(new TenantError('authentication required', 401));
     if (req.auth.scope) return next(new TenantError('scoped token cannot be used here', 403));
     if (req.auth.role !== 'MEMBER' || !req.auth.mid) {
@@ -345,12 +381,19 @@ function requireMember() {
     if (req.tenant && req.auth.tid !== req.tenant.slug) {
       return next(new TenantError('token tenant mismatch', 403));
     }
+    try {
+      if (req.auth.sid ? !(await sessionLive(req.auth.sid, { schema: req.tenant?.schema_name })) : sessionRequired()) {
+        return next(new TenantError('SESSION_ENDED', 401));
+      }
+    } catch (e) { return next(e); }
     req.member = { id: req.auth.mid, memberNo: req.auth.memberNo, name: req.auth.name };
-    next();
+    // The member's database work holds the tenant's concurrency slot until it ends, and its
+    // statements are limited as staff requests are (lib/limits, db/tenantContext). No staff user.
+    return requestContext.run({ work: req.dbWork || null }, () => next());
   };
 }
 
 const signToken = (payload, expiresIn = '12h') =>
   jwt.sign(payload, signingKey, { algorithm: 'HS256', expiresIn });
 
-module.exports = { userState, resolveTenant, requireAuth, requirePermission, permissionGate, requireMember, signToken, tenantFromRequest, lookupTenant, invalidate, forgetUser, signingKey };
+module.exports = { userState, resolveTenant, requireAuth, requirePermission, permissionGate, requireMember, signToken, tenantFromRequest, lookupTenant, invalidate, forgetUser, signingKey, forgetSessions };

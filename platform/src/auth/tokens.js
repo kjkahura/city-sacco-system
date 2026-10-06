@@ -2,7 +2,8 @@
 
 const crypto = require('crypto');
 const { pool } = require('../db/pool');
-const { signToken } = require('../tenancy/resolve');
+const RESOLVE = require('../tenancy/resolve');
+const { signToken } = RESOLVE;
 const AP = require('../lib/accessPreferences');
 
 /**
@@ -76,6 +77,7 @@ async function rotate(presented, { userAgent = null, ip = null } = {}) {
         [tok.user_id, JSON.stringify({ familyId: tok.family_id, ip })]
       );
       await client.query('COMMIT');
+      RESOLVE.forgetSessions();
       throw Object.assign(new Error('REFRESH_TOKEN_REUSED_FAMILY_REVOKED'), { status: 401 });
     }
 
@@ -106,6 +108,7 @@ async function rotate(presented, { userAgent = null, ip = null } = {}) {
     if (user.tenant_id && fam?.seen && Date.now() - new Date(fam.seen).getTime() > prefs.sessionTimeoutMinutes * 60_000) {
       await client.query('UPDATE platform.refresh_tokens SET revoked_at = now() WHERE family_id = $1 AND revoked_at IS NULL', [tok.family_id]);
       await client.query('COMMIT');
+      RESOLVE.forgetSessions();
       throw Object.assign(new Error('SESSION_TIMED_OUT'), { status: 401 });
     }
 
@@ -142,6 +145,7 @@ async function revokeAll(userId) {
     'UPDATE platform.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL',
     [userId]
   );
+  RESOLVE.forgetSessions();
   return rowCount;
 }
 
@@ -150,6 +154,7 @@ async function revoke(presented) {
     'UPDATE platform.refresh_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL',
     [hash(presented)]
   );
+  RESOLVE.forgetSessions();
   return rowCount;
 }
 

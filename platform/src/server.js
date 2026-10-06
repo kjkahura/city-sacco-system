@@ -314,7 +314,7 @@ tenantApi.get('/', requireAuth(), (req, res) => res.json({
 }));
 
 // SMS gateways' delivery reports (routes/notifications): no tenant user, a token in the address.
-app.all('/hooks/sms/:tenant/:token', rateLimit({ limit: 600, keyFn: (req) => `hook:sms:${req.params.tenant}:${req.ip}` }),
+app.all(['/hooks/sms/:tenant/:token', '/hooks/sms/:tenant'], rateLimit({ limit: 600, keyFn: (req) => `hook:sms:${req.params.tenant}:${req.ip}` }),
   express.urlencoded({ extended: false, limit: '256kb' }), require('./routes/notifications').smsDeliveryReport);
 app.use('/api', tenantApi);
 

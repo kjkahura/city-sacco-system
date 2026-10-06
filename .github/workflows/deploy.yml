@@ -113,11 +113,21 @@ jobs:
             --max-retries 0 --task-timeout 30m --quiet
           gcloud run jobs execute sacco-migrate --region "$REGION" --wait
 
+      # With the repository variable APP_DB_USER (deploy/security/db-roles.sql), the service connects as
+      # that role, which does not own the tables; migrations and jobs stay with the owner. Sandbox
+      # operations then run only in the jobs, which may change schemas (security review, CFG-8).
       - name: Deploy the service
+        env:
+          APP_DB_USER: ${{ vars.APP_DB_USER }}
         run: |
+          SVC_ENV="$ENV_VARS"; SVC_SECRETS="$SECRETS"
+          if [ -n "$APP_DB_USER" ]; then
+            SVC_ENV="${ENV_VARS/PGUSER=sacco,/PGUSER=$APP_DB_USER,},SANDBOX_AFTER_REQUEST=off"
+            SVC_SECRETS="${SECRETS/PGPASSWORD=sacco-db-password/PGPASSWORD=sacco-app-db-password}"
+          fi
           gcloud run deploy "$SERVICE" --image "$IMAGE" --region "$REGION" \
             --service-account "$RUNTIME_SA" --add-cloudsql-instances "$SQL_INSTANCE" \
-            --set-env-vars "$ENV_VARS" --set-secrets "$SECRETS" \
+            --set-env-vars "$SVC_ENV" --set-secrets "$SVC_SECRETS" \
             --allow-unauthenticated --port 8080 --cpu 1 --memory 512Mi \
             --min-instances 0 --max-instances 1 --concurrency 80 --timeout 60 --quiet
 

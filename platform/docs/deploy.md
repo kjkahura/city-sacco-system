@@ -194,9 +194,21 @@ The security review of October 2026 (`docs/audits/security-assessment-2026-10.md
 - **`REQUEST_STATEMENT_TIMEOUT_MS`**: the limit on one database statement during a request (default 55000). Jobs are not limited.
 - **Production now refuses to start** without a `JWT_SECRET` of at least 32 bytes, and refuses to seal or open secrets without a `SECRETS_KEY` of at least 32 bytes. The secrets created in section 2 already meet both.
 - **Offsite backups** are never shipped unencrypted: without `BACKUP_ENCRYPTION_KEY`, the offsite copy is skipped and the run says so.
-- **Recommended in the Google Cloud console:**
-  - set the Cloud Run service's ingress to "internal and Cloud Load Balancing" behind an HTTPS load balancer with Cloud Armor, so the client address the platform sees cannot be set by the caller;
-  - add log-based alerts on `[audit-write-failed]`, `[error]` and `[backup]`.
+- **`NEW_TENANT_FOUR_EYES=off`**: a new SACCO starts with four eyes on loans (who applies does not approve, who approves does not disburse); this setting starts it without. Existing SACCOs keep their setting; `npm run cli controls:four-eyes -- --slug <slug>` (or `--all`, or `--off`) changes it.
+- **`PASSWORD_BREACH_CHECK=on`**: new passwords are checked against the breached-passwords service (api.pwnedpasswords.com) by k-anonymity, so only the first five characters of the password's SHA-1 leave the platform. If the service cannot be reached the password is accepted.
+- **`AUDIT_ARCHIVE`**: where `npm run cli audit:export` sends each day's audit trail (`gcs:<bucket>`, `dir:<path>` or `cmd:<command>`). `deploy/security/audit-archive.sh` makes the bucket with a retention policy and the daily job.
+- **`APP_DB_USER`** (a repository variable): the service connects as this role, which does not own the tables (`deploy/security/db-roles.sql` makes it, with the password in Secret Manager as `sacco-app-db-password`). Migrations and jobs stay with the owner. Unset, the service runs as before. With it set:
+  - new SACCOs are made with `npm run cli tenant:create` (a job), since the `/admin` control plane cannot create schemas;
+  - sandbox work runs only in the jobs (the deploy job sets `SANDBOX_AFTER_REQUEST=off`);
+  - the service may add to the audit trail, prune old requests and anonymize change-log rows, which the audit triggers allow, and nothing else.
+- **Sessions:** each staff and member request is checked against a live session, so signing out, changing a password or PIN, or suspending a user ends the session within five seconds (at once on the instance that handled it) rather than when the access token expires, up to 15 minutes later. A PIN change keeps the member's current device signed in and signs out the others.
+- **Scripts for the Google Cloud project** (`deploy/security/`), each run once from Cloud Shell and safe to run again:
+  - `edge.sh`: an HTTPS load balancer with Cloud Armor in front of the service, and ingress set to "internal and Cloud Load Balancing", so the client address the platform sees cannot be set by the caller. Point the domain at the address it prints;
+  - `alerts.sh`: log-based metrics and email alerts on `[audit-write-failed]`, `[error]` and `[backup]` lines, 401 and 429 spikes and control-plane requests;
+  - `audit-archive.sh`: the write-once audit bucket and its daily job (`LOCK=yes` locks the retention, which cannot be undone);
+  - `db-roles.sql`: the non-owner `sacco_app` role;
+  - `pin-digests.sh`: pins the workflow's actions and the base image by digest; review the diff and commit it.
+- **When something goes wrong:** `docs/incident-response.md`, including the 72-hour notice to the Data Commissioner. `docs/pentest-scope.md` is the brief for an independent penetration test.
 
 ## Rollback
 

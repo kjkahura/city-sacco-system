@@ -144,7 +144,9 @@ module.exports.smsDeliveryReport = async (req, res) => {
     const requestContext = require('../lib/requestContext');
     const { rows: [t] } = await pool.query("SELECT schema_name FROM platform.tenants WHERE slug = $1 AND status = 'ACTIVE'", [req.params.tenant]);
     if (!t) { res.status(404).json({ error: 'NOT_FOUND' }); return; }
-    const n = await requestContext.run(null, () => withTenant(t.schema_name, (c) => CH.deliveryReport(c, 'SMS', req.params.token, { body: req.body, query: req.query })));
+    // The token in the address, or in an X-Callback-Token header (kept out of access logs) where the gateway can send one.
+    const token = req.params.token || req.get('x-callback-token') || '';
+    const n = await requestContext.run(null, () => withTenant(t.schema_name, (c) => CH.deliveryReport(c, 'SMS', token, { body: req.body, query: req.query })));
     res.status(200).json({ received: n });
   } catch (e) {
     res.status(e.status === 404 ? 404 : 500).json({ error: e.status === 404 ? 'NOT_FOUND' : 'ERROR' });

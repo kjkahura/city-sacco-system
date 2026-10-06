@@ -77,7 +77,7 @@ router.post('/auth/logout', async (req, res, next) => {
 // The current PIN is checked under the same lockout as sign-in, and the attempts are limited per member.
 router.post('/auth/pin', requireMember(), loginRateLimit({ perIp: 30, perAccount: 10, key: (req) => String(req.member?.id || '') }), async (req, res, next) => {
   try {
-    const out = await withTenant(req.tenant.schema_name, (c) => MA.changePin(c, req.member.id, req.body || {}));
+    const out = await withTenant(req.tenant.schema_name, (c) => MA.changePin(c, req.member.id, req.body || {}, { sid: req.auth?.sid || null }));
     if (out?.failure) return refused(res, out);
     res.status(201).json(out);
   } catch (e) { next(e); }

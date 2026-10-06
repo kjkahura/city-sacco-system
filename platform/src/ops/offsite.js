@@ -3,6 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const http = require('http');
+const https = require('https');
 
 /**
  * Offsite destination for encrypted backups.
@@ -11,6 +13,9 @@ const { spawn } = require('child_process');
  *
  *   dir       copy to another filesystem path. Real offsite when that path
  *             is an NFS mount, an attached volume, or a synced folder.
+ *   gcs       gcs:<bucket>[/<prefix>]: Cloud Storage with the service account the
+ *             job runs as (its token from the metadata server, no SDK), for
+ *             Cloud Run, whose image has no gcloud. Push only.
  *   command   shell out to whatever the operator already uses:
  *             aws s3 cp, rclone copy, gsutil, scp. The push command receives
  *             {src}, {name} and {slug}; the pull command set in
@@ -25,6 +30,10 @@ function parse(target = process.env.BACKUP_OFFSITE) {
   if (!target) return null;
   if (target.startsWith('dir:')) return { driver: 'dir', dest: target.slice(4) };
   if (target.startsWith('cmd:')) return { driver: 'command', cmd: target.slice(4) };
+  if (target.startsWith('gcs:')) {
+    const [bucket, ...prefix] = target.slice(4).split('/');
+    return { driver: 'gcs', bucket, prefix: prefix.filter(Boolean).join('/') };
+  }
   // A bare path is treated as a directory, which is the common case.
   return { driver: 'dir', dest: target };
 }
@@ -58,6 +67,27 @@ async function ship(file, { target = process.env.BACKUP_OFFSITE, slug } = {}) {
     const { size } = fs.statSync(dest);
     if (size !== fs.statSync(file).size) throw new Error('offsite copy size mismatch');
     return { shipped: true, driver: 'dir', dest, bytes: size };
+  }
+
+  if (cfg.driver === 'gcs') {
+    const objectName = [cfg.prefix, slug, name].filter(Boolean).join('/');
+    const token = await metadataToken();
+    const body = await fs.promises.readFile(file);
+    // Create only (ifGenerationMatch=0): an object already there, from an earlier run that failed
+    // part way, is kept, as a bucket with a retention policy requires.
+    let res;
+    try {
+      res = await httpsJson({
+        method: 'POST', host: 'storage.googleapis.com',
+        path: `/upload/storage/v1/b/${encodeURIComponent(cfg.bucket)}/o?uploadType=media&ifGenerationMatch=0&name=${encodeURIComponent(objectName)}`,
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream', 'content-length': body.length },
+      }, body);
+    } catch (e) {
+      if (e.status === 412) return { shipped: true, driver: 'gcs', dest: `gs://${cfg.bucket}/${objectName}`, bytes: body.length, existed: true };
+      throw e;
+    }
+    if (Number(res.size) !== body.length) throw new Error('offsite copy size mismatch');
+    return { shipped: true, driver: 'gcs', dest: `gs://${cfg.bucket}/${objectName}`, bytes: body.length };
   }
 
   // command driver: split on whitespace, substitute placeholders.
@@ -110,6 +140,37 @@ function list({ target = process.env.BACKUP_OFFSITE, slug } = {}) {
   return fs.readdirSync(dir)
     .filter((f) => f.endsWith('.enc'))
     .map((f) => ({ name: f, bytes: fs.statSync(path.join(dir, f)).size }));
+}
+
+function httpsJson(opts, body = null) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({ ...opts, timeout: 120_000 }, (res) => {
+      const chunks = [];
+      res.on('data', (d) => chunks.push(d));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode < 200 || res.statusCode >= 300) return reject(Object.assign(new Error(`gcs: HTTP ${res.statusCode} ${text.slice(0, 200)}`), { status: res.statusCode }));
+        try { resolve(JSON.parse(text)); } catch { reject(new Error('gcs: not JSON')); }
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('gcs: timed out')));
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
+/** The access token of the service account this runs as (Cloud Run's metadata server). */
+function metadataToken() {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ host: 'metadata.google.internal', path: '/computeMetadata/v1/instance/service-accounts/default/token',
+      headers: { 'Metadata-Flavor': 'Google' }, timeout: 5000 }, (res) => {
+      let t = '';
+      res.on('data', (d) => { t += d; });
+      res.on('end', () => { try { resolve(JSON.parse(t).access_token); } catch { reject(new Error('gcs: no token from the metadata server')); } });
+    });
+    req.on('timeout', () => req.destroy(new Error('gcs: the metadata server did not answer')));
+    req.on('error', reject);
+  });
 }
 
 module.exports = { ship, fetch, list, parse };

@@ -21,10 +21,27 @@ const { err } = require('../lib/errors');
  */
 
 
+// A consumer's transaction limits (platform migration 017): per transaction and per day; null is none.
+const LIMITS = { depositLimit: 'deposit_limit', withdrawalLimit: 'withdrawal_limit', repaymentLimit: 'repayment_limit',
+  dailyDepositLimit: 'daily_deposit_limit', dailyWithdrawalLimit: 'daily_withdrawal_limit', dailyRepaymentLimit: 'daily_repayment_limit' };
+function limitsOf(body = {}) {
+  const l = body.limits || {};
+  const out = {};
+  for (const [k, col] of Object.entries(LIMITS)) {
+    if (l[k] === undefined) continue;
+    if (l[k] === null || l[k] === '') { out[col] = null; continue; }
+    const n = Number(l[k]);
+    if (!(Number.isFinite(n) && n >= 0)) throw err(`INVALID_${k.replace(/[A-Z]/g, (x) => `_${x}`).toUpperCase()}`);
+    out[col] = Math.round(n * 100) / 100;
+  }
+  return out;
+}
+
 function shape(c, list = []) {
   return {
     id: c.id, name: c.name, access: { administrator: c.administrator, role: c.role_code, permissions: c.permissions },
     status: c.status, notes: c.notes, hasSecretKey: Boolean(c.secret_hash), secretKeyCreatedAt: c.secret_created_at,
+    limits: Object.fromEntries(Object.entries(LIMITS).map(([k, col]) => [k, c[col] === null || c[col] === undefined ? null : Number(c[col])])),
     keys: list.filter((k) => k.consumer_id === c.id).map((k) => ({
       id: k.id, prefix: k.prefix, expiresAt: k.expires_at, rotatedAt: k.rotated_at, validUntil: k.grace_until, lastUsedAt: k.last_used_at,
       createdAt: k.created_at, createdBy: k.created_by,
@@ -110,12 +127,18 @@ async function update(tenant, id, body = {}, { actor, actorUser }) {
   if (!name || name.length > 255) throw err('NAME_IS_1_TO_255_CHARACTERS');
   const status = body.status !== undefined ? String(body.status).toUpperCase() : before.status;
   if (!['ACTIVE', 'INACTIVE'].includes(status)) throw err('STATUS_IS_ACTIVE_OR_INACTIVE');
+  // Limits are checked before anything is written, so a bad one changes nothing.
+  const lim = limitsOf(body);
   const { rows: [c] } = await pool.query(
     `UPDATE platform.api_consumers SET name = $3, administrator = $4, role_code = $5, permissions = $6, status = $7,
        notes = $8, updated_at = now() WHERE tenant_id = $1 AND id = $2 RETURNING *`,
     [tenant.id, before.id, name, a.administrator, a.role, a.permissions, status, body.notes !== undefined ? body.notes || null : before.notes]);
+  if (Object.keys(lim).length) {
+    await pool.query(`UPDATE platform.api_consumers SET ${Object.keys(lim).map((col, i) => `${col} = $${i + 3}`).join(', ')} WHERE tenant_id = $1 AND id = $2`,
+      [tenant.id, before.id, ...Object.values(lim)]);
+  }
   keys.forget();
-  await audit(tenant, actor, 'API_CONSUMER_UPDATED', { consumerId: c.id, before: { name: before.name, status: before.status }, after: { name, status, ...a } });
+  await audit(tenant, actor, 'API_CONSUMER_UPDATED', { consumerId: c.id, before: { name: before.name, status: before.status }, after: { name, status, ...a, limits: lim } });
   return get(tenant, c.id);
 }
 

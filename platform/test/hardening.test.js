@@ -164,6 +164,91 @@ async function user(email, body) {
     for (const x of outs) if (typeof x === 'function') x();
 
     // ------------------------------------------------------------------------
+    section('follow-up: sessions, passwords, backdating, limits, four eyes');
+    const lg = await login('nk@harden.local');
+    const before = await call('GET', '/api/members', null, { bearer: lg.body.accessToken });
+    await call('POST', '/api/auth/logout', { refreshToken: lg.body.refreshToken }, { bearer: lg.body.accessToken });
+    const after = await call('GET', '/api/members', null, { bearer: lg.body.accessToken });
+    check('IAM-10: signing out ends the access token at once, not when it expires', before.status === 200 && after.status === 401 && /SESSION_ENDED/.test(after.reason), `${before.status} ${after.text}`);
+    const PWH = require('../src/auth/passwords');
+    const oldHash = await (async () => {
+      const crypto = require('crypto');
+      const salt = crypto.randomBytes(16);
+      const key = await new Promise((ok, no) => crypto.scrypt('Old-password-99', salt, 64, { N: 16384, r: 8, p: 1 }, (e, k) => (e ? no(e) : ok(k))));
+      return `scrypt$16384$8$1$${salt.toString('base64')}$${key.toString('base64')}`;
+    })();
+    const time = async (h) => { const t = process.hrtime.bigint(); await PWH.verifyPassword('wrong-password-1', h); return Number(process.hrtime.bigint() - t) / 1e6; };
+    const tOld = await time(oldHash);
+    const tNew = await time('scrypt$16384$8$5$AAAAAAAAAAAAAAAAAAAAAA==$AAAA');
+    check('IAM-12: a hash with the old parameters costs as much to check as an unknown account', PWH.needsRehash(oldHash) && tOld > tNew * 0.6, `${tOld.toFixed(0)}ms vs ${tNew.toFixed(0)}ms`);
+    const AP = require('../src/lib/accessPreferences');
+    const prefs = await AP.of((await pool.query('SELECT id FROM platform.tenants WHERE slug = $1', [SLUG])).rows[0].id);
+    check('IAM-12: common and over-long passwords are refused; no letter is required', AP.passwordProblems(prefs, 'Password1234').some((x) => /commonly used/.test(x))
+      && AP.passwordProblems(prefs, `${'a1'.repeat(70)}`).some((x) => /128/.test(x)) && AP.passwordProblems(prefs, '2468 1357 9753 1').length === 0, JSON.stringify(AP.passwordProblems(prefs, '2468 1357 9753 1')));
+    const PWD = require('../src/auth/passwords');
+    const crypto = require('crypto');
+    const salt = crypto.randomBytes(16);
+    const weak = `scrypt$16384$8$1$${salt.toString('base64')}$${crypto.scryptSync(PW, salt, 64, { N: 16384, r: 8, p: 1 }).toString('base64')}`;
+    await pool.query("UPDATE platform.users SET password_hash = $1 WHERE email = 'nk@harden.local'", [weak]);
+    const relog = await login('nk@harden.local');
+    const rehashed = (await pool.query("SELECT password_hash FROM platform.users WHERE email = 'nk@harden.local'")).rows[0].password_hash;
+    check('IAM-12: a hash with the old parameters is replaced at sign-in with the stronger ones', relog.status === 200 && PWD.needsRehash(weak) && /^scrypt\$16384\$8\$5\$/.test(rehashed) && !PWD.needsRehash(rehashed), rehashed.slice(0, 20));
+    await call('POST', '/api/roles', { name: 'Shares no backdate', code: 'SHARE_NOBACK', baseRole: 'MANAGER', permissions: ['VIEW_CLIENT_DETAILS', 'BUY_SHARES'] });
+    await user('shares@harden.local', { role: 'SHARE_NOBACK' });
+    const shr = await call('POST', '/api/shares', { memberId: m1.id });
+    const past = new Date(Date.now() - 5 * 86400_000).toISOString().slice(0, 10);
+    r = await call('POST', `/api/shares/${shr.body?.id}/purchases`, { units: 1, channelId: 'bank', valueDate: past }, { who: 'shares@harden.local' });
+    const r4 = await call('POST', `/api/shares/${shr.body?.id}/purchases`, { units: 1, channelId: 'bank', valueDate: past });
+    check('BIZ-2: a past-dated share purchase needs the backdating permission', shr.status === 201 && r.status === 403 && /BACKDATE_SHARE_TRANSACTIONS/.test(r.reason) && r4.status === 201, `${shr.text} ${r.text} ${r4.text}`);
+    const PERMS = require('../src/lib/permissions');
+    check('BIZ-2: the built-in front-office roles keep backdating loans and shares', PERMS.DEFAULTS.TELLER.includes('BACKDATE_LOAN_TRANSACTIONS') && PERMS.DEFAULTS.TELLER.includes('BACKDATE_SHARE_TRANSACTIONS'));
+    await user('daily@harden.local', { role: 'TELLER', branchId: 'HQ', dailyWithdrawalLimit: 300 });
+    const w1 = await call('POST', `/api/savings/${sav.id}/withdrawals`, { amount: 200, channelId: 'bank' }, { who: 'daily@harden.local' });
+    const w2 = await call('POST', `/api/savings/${sav.id}/withdrawals`, { amount: 200, channelId: 'bank' }, { who: 'daily@harden.local' });
+    check('BIZ-6: a daily withdrawal limit adds up the day\'s withdrawals', w1.status === 201 && w2.status === 403 && /DAILY_WITHDRAWAL_LIMIT/.test(w2.reason), `${w1.text} ${w2.text}`);
+    const cl = await call('GET', '/api/loans/controls/users');
+    check('BIZ-6: the limits page shows the daily limits', (cl.body || []).some((u) => u.email === 'daily@harden.local' && u.dailyWithdrawalLimit === 300), cl.text.slice(0, 200));
+    const kc = (await call('POST', '/api/consumers', { name: 'Payments gateway', access: { permissions: ['VIEW_SAVINGS_ACCOUNT_DETAILS', 'MAKE_WITHDRAWAL', 'VIEW_CLIENT_DETAILS'] } })).body;
+    await call('PATCH', `/api/consumers/${kc.id}`, { limits: { withdrawalLimit: 50 } });
+    const badK = await call('PATCH', `/api/consumers/${kc.id}`, { name: 'Renamed gateway', limits: { withdrawalLimit: -1 } });
+    const kAfter = await call('GET', `/api/consumers/${kc.id}`);
+    check('BIZ-6: a bad consumer limit is refused before anything changes', badK.status === 400 && kAfter.body?.name === 'Payments gateway', `${badK.text} ${kAfter.text}`);
+    const kk = (await call('POST', `/api/consumers/${kc.id}/keys`, {})).body.apiKey;
+    const kw = await fetch(`http://localhost:${PORT}/api/savings/${sav.id}/withdrawals`, { method: 'POST', headers: { 'x-tenant': SLUG, apikey: kk, 'content-type': 'application/json' }, body: JSON.stringify({ amount: 100, channelId: 'bank' }) });
+    const kwt = await kw.text();
+    check('BIZ-6: an API consumer has transaction limits too', kw.status === 403 && /WITHDRAWAL_LIMIT/.test(kwt), `${kw.status} ${kwt}`);
+    await call('PATCH', '/api/loans/controls', { twoManRule: true });
+    const LOANS = require('../src/domain/loans');
+    let fe = null;
+    try {
+      await T(async (c) => {
+        const l = await LOANS.apply(c, { memberId: m1.id, productId: 'NL01', principal: 1000, termMonths: 3, createdBy: 'admin@harden.local' });
+        await LOANS.changeState(c, l.id, 'APPROVE', { createdBy: 'admin@harden.local' });
+      });
+    } catch (e) { fe = e.message; }
+    check('BIZ-7: with four eyes on, whoever applied for a loan does not approve it', /TWO_MAN_RULE/.test(fe || ''), fe);
+    await call('PATCH', '/api/loans/controls', { twoManRule: false });
+    const ik = `mem-${Date.now()}`;
+    const mA = await call('POST', '/api/members', { firstName: 'Twice', lastName: 'Sent', branchId: 'HQ' }, { headers: { 'idempotency-key': ik } });
+    const mB = await call('POST', '/api/members', { firstName: 'Twice', lastName: 'Sent', branchId: 'HQ' }, { headers: { 'idempotency-key': ik } });
+    const twice = await T(async (c) => (await c.query("SELECT count(*)::int AS n FROM members WHERE first_name = 'Twice'")).rows[0].n);
+    check('BIZ-3: a member created twice with one Idempotency-Key is created once', mA.status === 201 && mB.status === 201 && mB.body?.id === mA.body?.id && twice === 1, `${mA.status} ${mB.status} ${twice}`);
+    await call('POST', '/api/id-templates', { id: 'PP', idType: 'Passport', issuingAuthority: 'Immigration', mask: '@#######', allowAttachments: true });
+    r = await call('POST', `/api/members/${m1.id}/identifications`, { templateId: 'PP', documentId: 'A1234567', attachment: { name: 'x.png', type: 'image/png', data: Buffer.from('<html>not a picture</html>').toString('base64') } });
+    check('INP-8: an ID document file is checked by its content, not by the type it claims', r.status === 415, r.text);
+
+    const arch = fs.mkdtempSync(path.join(os.tmpdir(), 'harden-audit-'));
+    const today = new Date().toISOString().slice(0, 10);
+    const exported = await require('../src/ops/auditArchive').exportDay(today, { target: `dir:${arch}` });
+    const mine = exported.filter((x) => x.slug === SLUG);
+    const archived = fs.readdirSync(path.join(arch, 'audit', SLUG));
+    check('CFG-8: a day\'s audit trail is copied out as gzipped JSON lines, for write-once storage', mine.length === 2 && mine.every((x) => x.shipped && x.rows > 0)
+      && archived.some((f) => /changes-.*\.jsonl\.gz$/.test(f)), JSON.stringify(mine));
+    fs.rmSync(arch, { recursive: true, force: true });
+    const OFF = require('../src/ops/offsite');
+    check('CFG-8: offsite copies can go to Cloud Storage directly (no gcloud in the image)', JSON.stringify(OFF.parse('gcs:city-sacco-audit/x')) === JSON.stringify({ driver: 'gcs', bucket: 'city-sacco-audit', prefix: 'x' }));
+
+    // ------------------------------------------------------------------------
     section('input and output');
     const csv = require('../src/lib/csv');
     check('INP-2: exported text that would be a formula is neutralised; numbers are not', csv.exportCell('=HYPERLINK("x")') === '"\'=HYPERLINK(""x"")"'

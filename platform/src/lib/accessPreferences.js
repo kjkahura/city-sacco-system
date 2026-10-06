@@ -130,14 +130,25 @@ function allowlistPasses(prefs, ip, { admin = false, api = false } = {}) {
 
 // --- passwords ----------------------------------------------------------------------
 
+// Passwords that are long enough but are among the most used (and guessed first),
+// compared without case, spaces or symbols. PASSWORD_BREACH_CHECK=on also asks the
+// breached-passwords service (auth/passwordPolicy).
+const COMMON = new Set(['password1234', 'password12345', 'password123456', '123456789012', '1234567890123', 'qwertyuiop12',
+  'qwerty123456', 'iloveyou1234', 'welcome12345', 'admin1234567', 'administrator', 'letmein12345', 'changeme1234', 'passw0rd1234',
+  'football1234', 'sunshine1234', 'princess1234', 'abcdefgh1234', 'abc123456789', '111111111111', '000000000000', '123123123123',
+  'password2024', 'password2025', 'password2026', 'welcome2024', 'welcome2025', 'welcome2026', 'sacco1234567', 'saccopassword',
+  'nairobi12345', 'kenya1234567', 'mpesa1234567', 'qwertyqwerty', 'asdfghjkl123', 'zaq12wsxcde3', '1q2w3e4r5t6y', 'p4ssw0rd1234']);
+
 /** The problems with a new password under the tenant's policy (empty: none). */
 function passwordProblems(prefs, password, { email = '' } = {}) {
   const p = prefs.password;
   const s = String(password || '');
   const out = [];
   if (s.length < p.minLength) out.push(`at least ${p.minLength} characters`);
-  if (!/[A-Za-z]/.test(s)) out.push('at least one letter');
-  if ((s.match(/[0-9]/g) || []).length < Math.max(1, p.minDigits)) out.push(`at least ${Math.max(1, p.minDigits)} digit(s)`);
+  // ASVS 5: length, not composition, makes a password strong; a SACCO may set the digit count to 0.
+  if (s.length > 128) out.push('at most 128 characters');
+  if ((s.match(/[0-9]/g) || []).length < p.minDigits) out.push(`at least ${p.minDigits} digit(s)`);
+  if (COMMON.has(s.toLowerCase().replace(/[^a-z0-9]/g, ''))) out.push('not a commonly used password');
   if ((s.match(/[A-Z]/g) || []).length < p.minUppercase) out.push(`at least ${p.minUppercase} capital letter(s)`);
   if ((s.match(/[^A-Za-z0-9\s]/g) || []).length < p.minSpecial) out.push(`at least ${p.minSpecial} symbol(s)`);
   const user = String(email).split('@')[0].toLowerCase();
@@ -161,7 +172,7 @@ function validate(current, body = {}) {
   if (body.password) {
     const b = body.password;
     if (b.minLength !== undefined) next.password.minLength = int(b.minLength, 'MIN_LENGTH', 8, 128);
-    if (b.minDigits !== undefined) next.password.minDigits = int(b.minDigits, 'MIN_DIGITS', 1, 64);
+    if (b.minDigits !== undefined) next.password.minDigits = int(b.minDigits, 'MIN_DIGITS', 0, 64);
     if (b.minUppercase !== undefined) next.password.minUppercase = int(b.minUppercase, 'MIN_UPPERCASE', 0, 64);
     if (b.minSpecial !== undefined) next.password.minSpecial = int(b.minSpecial, 'MIN_SPECIAL', 0, 64);
     if (b.history !== undefined) next.password.history = int(b.history, 'HISTORY', 1, 10);
