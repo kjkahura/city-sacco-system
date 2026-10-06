@@ -203,7 +203,7 @@ The security review of October 2026 (`docs/audits/security-assessment-2026-10.md
   - the service may add to the audit trail, prune old requests and anonymize change-log rows, which the audit triggers allow, and nothing else.
 - **Sessions:** each staff and member request is checked against a live session, so signing out, changing a password or PIN, or suspending a user ends the session within five seconds (at once on the instance that handled it) rather than when the access token expires, up to 15 minutes later. A PIN change keeps the member's current device signed in and signs out the others.
 - **Scripts for the Google Cloud project** (`deploy/security/`), each run once from Cloud Shell and safe to run again:
-  - `edge.sh`: an HTTPS load balancer with Cloud Armor in front of the service, and ingress set to "internal and Cloud Load Balancing", so the client address the platform sees cannot be set by the caller. Point the domain at the address it prints;
+  - `edge.sh`: an HTTPS load balancer with Cloud Armor in front of the service, so the client address the platform sees cannot be set by the caller. Run it once, point the domain at the address it prints, and when the certificate is active run it again with `LOCK_INGRESS=yes` to set ingress to "internal and Cloud Load Balancing";
   - `alerts.sh`: log-based metrics and email alerts on `[audit-write-failed]`, `[error]` and `[backup]` lines, 401 and 429 spikes and control-plane requests;
   - `audit-archive.sh`: the write-once audit bucket and its daily job (`LOCK=yes` locks the retention, which cannot be undone);
   - `db-roles.sql`: the non-owner `sacco_app` role;

@@ -251,7 +251,7 @@ Two plans were also written: `docs/incident-response.md` (roles, the first hour,
 
 The remaining items are operator steps in the Google Cloud project and decisions for each SACCO:
 
-1. **Run `deploy/security/edge.sh` (CFG-2).** Until it is run, the IP allow-list can be bypassed through the `run.app` address. Point the domain at the load balancer's address and keep `TRUST_PROXY=2`.
+1. **Run `deploy/security/edge.sh` (CFG-2)** twice: once to build the load balancer, and once the certificate is active with `LOCK_INGRESS=yes`. Until the second run, the IP allow-list can be bypassed through the `run.app` address. Point the domain at the load balancer's address and keep `TRUST_PROXY=2`.
 2. **Turn on four eyes for existing SACCOs (BIZ-7):** `npm run cli controls:four-eyes -- --all`, once each SACCO has at least two staff who can approve.
 3. **Run `deploy/security/alerts.sh` (CFG-7)** with an address that is watched.
 4. **Switch the service to the non-owner role (CFG-8):** run `db-roles.sql`, store the password, set `APP_DB_USER=sacco_app`, deploy. Then run `audit-archive.sh`, check a day's copy, and lock the retention with `LOCK=yes`.

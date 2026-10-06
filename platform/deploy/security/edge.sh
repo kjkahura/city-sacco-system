@@ -7,13 +7,18 @@
 # platform trusts two proxy hops for the client address (IP allow-list, sign-in limits,
 # audit trail). Behind the load balancer only Google's front end writes that header.
 #
-#   PROJECT=city-sacco-prod REGION=europe-west1 DOMAIN=app.example.org bash deploy/security/edge.sh
+# Two passes, so the service is never unreachable while the certificate is issued:
 #
-# Afterwards: point the domain's A record at the address printed at the end, wait for
-# the certificate (gcloud compute ssl-certificates describe sacco-cert --global), and
-# keep TRUST_PROXY=2 (client, then the load balancer). The console and portal are served
-# by the service itself (/console, /portal), so Firebase Hosting is no longer needed
-# for this domain.
+#   1. PROJECT=city-sacco-prod REGION=europe-west1 DOMAIN=app.example.org bash edge.sh
+#      Builds everything and prints the address. Point the domain's A record at it (DNS
+#      only, not proxied) and wait until the certificate is ACTIVE:
+#      gcloud compute ssl-certificates describe sacco-cert --global --format='value(managed.status)'
+#   2. The same command with LOCK_INGRESS=yes in front. Only then does the service refuse
+#      traffic that does not come through the load balancer (the run.app and web.app
+#      addresses stop working).
+#
+# Keep TRUST_PROXY=2 (client, then the load balancer). The console and portal are served
+# by the service itself (/console, /portal), so Firebase Hosting is no longer needed.
 set -euo pipefail
 : "${PROJECT:?set PROJECT}" "${REGION:?set REGION}" "${DOMAIN:?set DOMAIN}"
 SERVICE=${SERVICE:-sacco-platform}
@@ -54,7 +59,15 @@ have gcloud compute addresses describe sacco-ip --global || gcloud compute addre
 have gcloud compute forwarding-rules describe sacco-https-rule --global ||
   gcloud compute forwarding-rules create sacco-https-rule --global --load-balancing-scheme EXTERNAL_MANAGED --address sacco-ip --target-https-proxy sacco-https --ports 443
 
-# 4. Only the load balancer reaches the service.
-gcloud run services update "$SERVICE" --region "$REGION" --ingress internal-and-cloud-load-balancing
+IP=$(gcloud compute addresses describe sacco-ip --global --format='value(address)')
+CERT=$(gcloud compute ssl-certificates describe sacco-cert --global --format='value(managed.status)')
 
-echo "Point $DOMAIN (A record) at: $(gcloud compute addresses describe sacco-ip --global --format='value(address)')"
+# 4. Only the load balancer reaches the service (second pass, once the certificate is active).
+if [ "${LOCK_INGRESS:-}" = yes ]; then
+  [ "$CERT" = ACTIVE ] || { echo "The certificate is $CERT, not ACTIVE: ingress left open. Check the A record and try later." >&2; exit 1; }
+  gcloud run services update "$SERVICE" --region "$REGION" --ingress internal-and-cloud-load-balancing
+  echo "Done: https://$DOMAIN is the only way in."
+else
+  echo "Point $DOMAIN (A record, DNS only) at: $IP"
+  echo "Certificate: $CERT. When it is ACTIVE, run again with LOCK_INGRESS=yes."
+fi
