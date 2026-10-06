@@ -10,9 +10,11 @@ operators) because they are sensible, not because the reference platform invente
 cp .env.example .env          # set PGDATABASE and JWT_SECRET
 npm install
 npm run migrate               # platform schema, then every tenant
-npm test                      # 240 assertions across five suites
+npm test                      # about 3,600 checks in 51 suites
 npm start
 ```
+
+New to the code? `docs/ARCHITECTURE-ESSENTIALS.md` is this README in two pages, with a pointer to the section that holds the detail for each topic.
 
 ## Audits and build logs
 

@@ -8,7 +8,9 @@ Everything live is under `platform/`: the API in `src/`, the back office in
 `public/`, the member portal in `portal/`. The repository root holds only
 specification markdown.
 
-Read `platform/README.md` before changing anything. It explains the design decisions
+Read `platform/docs/ARCHITECTURE-ESSENTIALS.md` first: two pages on tenancy, money,
+access, requests, audit, migrations and tests. Then read the sections of
+`platform/README.md` that touch your change. The README explains the design decisions
 and the reasons behind them; several of them look like over-engineering until you know
 what went wrong without them.
 
@@ -16,7 +18,7 @@ what went wrong without them.
 cd platform
 npm install
 npm run migrate      # platform schema, then every tenant
-npm test             # 240 assertions; run this after every change
+npm test             # about 3,600 checks in 51 suites; run this after every change
 npm start
 ```
 
@@ -47,8 +49,38 @@ npm start
   MEMBER; `requireMember` refuses everything else. Do not add a role list that
   includes both.
 
+- **A committed migration is never edited.** The runner stores checksums and refuses a
+  changed file. Add a new numbered file under `src/db/migrations/platform` or `tenant`.
+- **Every `/api` route has a line in `src/lib/routePermissions.js`.** A route missing from
+  it is open only to administrators. Permissions, not the built-in role, decide access.
+- **Sessions are checked on every request.** After revoking refresh tokens or member
+  sessions, call `RESOLVE.forgetSessions(c)` so the cached session state is cleared once
+  the transaction commits.
+- **Money limits and dates go through the shared checks**: `assertWithinLimit` in
+  `src/domain/controls.js` for amounts, and the backdating permissions
+  (`BACKDATE_SAVINGS_TRANSACTIONS`, `BACKDATE_LOAN_TRANSACTIONS`,
+  `BACKDATE_SHARE_TRANSACTIONS`) for past value dates. Staff may not date a posting in
+  the future.
+- **Lock order for a member's money:** account rows (`FOR UPDATE`) first, then the
+  advisory lock `member-funds:<memberId>`. Reversing the order deadlocks against a
+  withdrawal.
+- **Outbound calls to an address a tenant chose** go through `src/lib/outbound.js`.
+- **A security fix gets a check in `test/hardening.test.js`.**
+- **Do not name the vendor whose API this platform follows** in code, docs, commits,
+  paths or header names. Write "the reference platform".
+
+## Before you commit
+
+- Run the suites your change touches, then `npm test`. Some loan suites fail on certain
+  calendar dates whatever the change; compare against the previous commit before
+  treating a failure as yours.
+- Stage files by path. Never `git add .`: the repository root holds files that are not
+  part of the platform.
+- Update the README section, `docs/deploy.md` (for settings) and the audit or build log
+  that the change belongs to.
+
 ## History
 
-The pre-`platform/` tree — a legacy dashboard API, an in-memory reference-shaped `/api/v2`,
-and the original Qona-MBS server and client — lives on the `archive/pre-platform`
+The pre-`platform/` tree (a legacy dashboard API, an in-memory reference-shaped `/api/v2`,
+and the original Qona-MBS server and client) lives on the `archive/pre-platform`
 branch. Do not resurrect code from it without a reason; it is kept for reference.
