@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { pool } = require('../db/pool');
+const { pool, directPool } = require('../db/pool');
 const { migrateTenant } = require('../db/migrate');
 const { hashPassword } = require('../auth/passwords');
 const { TenantError } = require('../db/tenantContext');
@@ -121,7 +121,8 @@ async function runPending() {
     const out = await recover();
     for (;;) {
       again = false;
-      const c = await pool.connect();
+      // The operation's session advisory lock needs a connection of its own (db/pool directPool).
+      const c = await directPool.connect();
       let op = null;
       try {
         await c.query('BEGIN');
@@ -168,7 +169,7 @@ async function recover() {
   const out = [];
   const { rows } = await pool.query("SELECT * FROM platform.sandbox_operations WHERE state = 'RUNNING'");
   if (!rows.length) return out;
-  const c = await pool.connect();
+  const c = await directPool.connect();
   try {
     for (const op of rows) {
       const { rows: [{ got }] } = await c.query('SELECT pg_try_advisory_lock(hashtext($1)) AS got', [LOCK(op.id)]);

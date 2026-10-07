@@ -28,11 +28,15 @@ From `docs/audits/security-assessment-2026-10.md`, "What remains".
 - [ ] Optional: the front ends from a bucket (`docs/deploy.md`, "The front ends from a bucket").
 - [ ] Independent penetration test of staging (`docs/pentest-scope.md`), its findings fixed and retested.
 - [ ] `docs/incident-response.md`: fill in the contacts and rehearse it once.
+- [ ] High availability: the instance with `--availability-type=REGIONAL` (now in `docs/deploy.md` section 2, or `gcloud sql instances patch`), and one failover rehearsed on staging (`docs/deploy.md`, "High availability and failover").
+- [ ] A load test on staging (`node test/load/postings.js`), and `npm run cli db:connections` before raising `--max-instances`.
+- [ ] `CREATE EXTENSION pg_stat_statements` on the instance; check `npm run cli db:top-queries` and `db:bloat` monthly at first.
+- [ ] Decide the region: measure `europe-west1` against `africa-south1` from Nairobi (`docs/deploy.md`, "Choosing the region").
 
 ## 3. Before real members' money
 
 - [ ] **Regulatory figures**, entered by someone with the current regulations open: provisioning rates, statutory reserve percentage, prudential minimums, and the real SASRA return templates. The system ships them unset on purpose (README, "Numbers this system refuses to invent").
-- [ ] **M-Pesa integration** (README, "Not done yet", item 2): paybill and till confirmations into savings and loan repayments (C2B), a payment prompt on the member's phone, and disbursements and withdrawals to a phone (B2C). Audit it against the reference platform's payment integrations first.
+- [ ] **M-Pesa integration** (README, "Not done yet", item 2): paybill and till confirmations into savings and loan repayments (C2B), a payment prompt on the member's phone, and disbursements and withdrawals to a phone (B2C). Audit it against the reference platform's payment integrations first. Build it as a saga, not a distributed transaction (`docs/data-architecture.md`, section 6).
 - [ ] **Four eyes on for every SACCO**: `npm run cli controls:four-eyes -- --all`, once each has two staff who can approve.
 - [ ] **Daily limits** set for tellers and API consumers.
 - [ ] **Data migration** of each SACCO's existing book (members, accounts, balances, loans with schedules, the ledger), reconciled to the old system's trial balance.
@@ -62,6 +66,7 @@ From `docs/audits/security-assessment-2026-10.md`, "What remains".
 
 Move items here with the date and the commit, newest first.
 
+- [x] 2026-10: the database: rollup slots (lock waiting under load from 88% to 4%), deadlock retries, optimistic locking of configuration, the replica and direct pools, `db:*` health commands, `docs/data-architecture.md` (`docs/audits/build-log-database.md`).
 - [x] 2026-10: transaction channels after the reference platform: API v2, configuration as code, constraint operators, the console form (`docs/audits/build-log-transaction-channels.md`).
 - [x] 2026-10: front ends deployed apart from the API (`c23c45b`); `npm audit` gates the deploy (`3e6257e`).
 - [x] 2026-10: security review and follow-up: every code finding fixed (`docs/audits/security-assessment-2026-10.md`).

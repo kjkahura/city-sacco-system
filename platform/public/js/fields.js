@@ -188,6 +188,8 @@ export function wireFields(reload) {
   on('#cf-entity', 'change', (e) => { st.entity = e.target.value; st.item = ''; reload(); });
   on('#cf-item', 'change', (e) => { st.item = e.target.value; reload(); });
   on('#cf-disabled', 'change', (e) => { st.showDisabled = e.target.checked; reload(); });
+  // The version a record was read at (lib/versioning), sent back so a change made meanwhile is not overwritten.
+  const versionOf = (x) => (x && x.row_version ? `"v${x.row_version}"` : null);
   const defsOf = async () => (await api('GET', `/api/custom-fields/definitions?entity=${st.entity}`)).body || [];
   on('#cf-set-add', 'click', async () => {
     const d = await formDialog('New set', [{ legend: 'Set', fields: [
@@ -200,7 +202,7 @@ export function wireFields(reload) {
     const s = ((await api('GET', `/api/custom-fields/sets?entity=${st.entity}`)).body || []).find((x) => x.id === id);
     const d = await formDialog(`Set ${id}`, [{ legend: 'Set', fields: [{ label: 'Name', name: 'name', value: s?.name, required: true },
       { label: 'Notes', name: 'notes', type: 'textarea', rows: 2, value: s?.notes || '' }] }]);
-    if (d) done(await api('PATCH', `/api/custom-fields/sets/${id}`, { name: d.name, notes: d.notes || null }), 'Set saved');
+    if (d) done(await api('PATCH', `/api/custom-fields/sets/${id}`, { name: d.name, notes: d.notes || null }, { ifMatch: versionOf(s) }), 'Set saved');
   });
   each('cf-set-del', async (id) => done(await api('DELETE', `/api/custom-fields/sets/${id}`), 'Set deleted'));
   const moveSet = async (id, by) => {
@@ -219,11 +221,11 @@ export function wireFields(reload) {
   each('cf-def-edit', async (id) => {
     const d = (await defsOf()).find((x) => x.id === id);
     const body = await definitionForm(st.entity, d?.set_id, d, await itemsOf(st.entity));
-    if (body) done(await api('PATCH', `/api/custom-fields/definitions/${id}`, body), 'Field saved');
+    if (body) done(await api('PATCH', `/api/custom-fields/definitions/${id}`, body, { ifMatch: versionOf(d) }), 'Field saved');
   });
   each('cf-def-active', async (id) => {
     const d = (await defsOf()).find((x) => x.id === id);
-    done(await api('PATCH', `/api/custom-fields/definitions/${id}`, { isActive: !d.is_active }), d.is_active ? 'Field deactivated' : 'Field activated');
+    done(await api('PATCH', `/api/custom-fields/definitions/${id}`, { isActive: !d.is_active }, { ifMatch: versionOf(d) }), d.is_active ? 'Field deactivated' : 'Field activated');
   });
   each('cf-def-del', async (id) => done(await api('DELETE', `/api/custom-fields/definitions/${id}`), 'Field deleted'));
   const moveDef = async (id, by) => {

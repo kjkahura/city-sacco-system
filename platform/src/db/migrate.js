@@ -3,7 +3,9 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { pool } = require('./pool');
+// The run's session advisory lock is held on a direct connection (db/pool directPool);
+// the migrations themselves run through the main pool (every setting they make is LOCAL).
+const { pool, directPool } = require('./pool');
 const { assertSchemaName } = require('./tenantContext');
 const EARLIER = require('./earlierChecksums');
 
@@ -197,7 +199,7 @@ const MIGRATION_LOCK = 41_777;
  * it.
  */
 async function migrateAllTenants({ concurrency = 4, lockTimeoutMs = 5_000 } = {}) {
-  const lock = await pool.connect();
+  const lock = await directPool.connect();
   try {
     const { rows: [got] } = await lock.query('SELECT pg_try_advisory_lock($1) AS ok', [MIGRATION_LOCK]);
     if (!got.ok) {

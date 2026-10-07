@@ -20,7 +20,7 @@ what went wrong without them.
 cd platform
 npm install
 npm run migrate      # platform schema, then every tenant
-npm test             # about 3,700 checks in 53 suites; run this after every change
+npm test             # about 3,800 checks in 54 suites; run this after every change
 npm start
 ```
 
@@ -30,7 +30,8 @@ npm start
   It opens a transaction and sets `search_path` with `is_local = true`, so Postgres
   reverts it on COMMIT or ROLLBACK. A query outside that wrapper runs against whatever
   schema the pooled connection was last used for. Never build a schema name by string
-  concatenation and never add a second connection pool.
+  concatenation and never add a pool per tenant. The only other pools are the optional
+  direct and replica pools in `src/db/pool.js` (`docs/data-architecture.md`).
 - **Money is `numeric` and arithmetic happens in SQL**, with `FOR UPDATE` where a read
   precedes a write. Do not read a balance into JavaScript, add to it, and write it back.
 - **Nothing financial is edited or deleted.** A mistake is corrected by posting a
@@ -43,7 +44,17 @@ npm start
   convenience on top, never the guarantee.
 - **Reports read `gl_daily_balances`, never `journal_lines`.** The rollup is kept
   exact by a trigger because the journal is append-only; `cli ledger:verify` proves
-  it. A report that scans lines is a regression.
+  it. A report that scans lines is a regression. Each account and day is spread over
+  16 slots (migration 052), so always `SUM` the rows; never read one row as the total.
+- **A write handler may run twice.** A request whose transaction PostgreSQL ends to
+  break a deadlock is run again (`retryConflicts`). Call outside services after the
+  commit (`afterCommit`, the notification outbox), never inside the transaction.
+- **Configuration edits carry a version.** Products, channels and custom field sets and
+  definitions answer with an ETag and take `If-Match` (`src/lib/versioning.js`). A new
+  editable configuration table gets `row_version` and the `bump_row_version` trigger
+  (migration 053), and the console sends `ifMatch` when it saves it.
+- **Reports may read a replica** (`withTenantReport`). Anything that decides about
+  money reads the primary inside its own transaction.
 - **A refusal that follows a write must be returned, not thrown.** See
   `memberAuth.refuse`: throwing rolls back the failed-attempt record and the
   lockout with it.

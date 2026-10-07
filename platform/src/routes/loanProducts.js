@@ -9,6 +9,7 @@ const B = require('../domain/branches');
 const CA = require('../domain/creditArrangements');
 const { json } = require('../lib/handlers');
 const { recordAudit } = require('../lib/auditLog');
+const VER = require('../lib/versioning');
 
 /**
  * Loan products, the whole configuration surface, after the reference platform's loan
@@ -495,6 +496,7 @@ router.get('/:id', requireAuth(), async (req, res, next) => {
       const p = (await c.query('SELECT * FROM loan_products WHERE id = $1', [req.params.id])).rows[0];
       return p ? withFees(c, p) : null;
     });
+    if (row) res.set('ETag', VER.etagOf(row.row_version));
     return row ? res.json(publicProduct(row)) : notFound(res, 'loan product');
   } catch (e) { next(e); }
 });
@@ -533,6 +535,7 @@ router.patch('/:id', requireAuth(), async (req, res, next) => {
     const cols = toColumns(req.body);
     if (!Object.keys(cols).length) return badRequest(res, 'NO_UPDATABLE_FIELDS');
     const out = await withTenant(req.tenant.schema_name, async (c) => {
+      await VER.checkRow(c, req, 'loan_products', req.params.id, 'loan product');
       const { rows: [before] } = await c.query(
         'SELECT * FROM loan_products WHERE id = $1 FOR UPDATE', [req.params.id]);
       if (!before) return { missing: true };
@@ -553,6 +556,7 @@ router.patch('/:id', requireAuth(), async (req, res, next) => {
     });
     if (out.missing) return notFound(res, 'loan product');
     if (out.problems) return apiError(res, 400, 400, 'INVALID_LOAN_PRODUCT', out.problems.join('; '));
+    res.set('ETag', VER.etagOf(out.row.row_version));
     res.json(publicProduct(out.row));
   } catch (e) { next(e); }
 });
@@ -682,6 +686,8 @@ router.post('/:id/fees', requireAuth(), async (req, res, next) => {
     const cols = feeCols(req.body);
     if (cols.code) cols.code = String(cols.code).toUpperCase();
     const out = await withTenant(req.tenant.schema_name, async (c) => {
+      // A fee is part of its product: checked against the product's version (lib/versioning).
+      await VER.checkRow(c, req, 'loan_products', req.params.id, 'loan product');
       const { rows: [p] } = await c.query('SELECT id, product_type, accounting_method FROM loan_products WHERE id = $1', [req.params.id]);
       if (!p) return { missing: true };
       // As in the reference platform, a fee left without an id is given one.
@@ -711,6 +717,8 @@ router.patch('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
     delete cols.code;
     if (!Object.keys(cols).length) return badRequest(res, 'NO_UPDATABLE_FIELDS');
     const out = await withTenant(req.tenant.schema_name, async (c) => {
+      // A fee is part of its product: checked against the product's version (lib/versioning).
+      await VER.checkRow(c, req, 'loan_products', req.params.id, 'loan product');
       const { rows: [before] } = await c.query(
         'SELECT * FROM loan_product_fees WHERE product_id = $1 AND (id::text = $2 OR code = $2) FOR UPDATE',
         [req.params.id, req.params.feeId]);
@@ -742,6 +750,8 @@ router.patch('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
 router.delete('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
   try {
     const out = await withTenant(req.tenant.schema_name, async (c) => {
+      // A fee is part of its product: checked against the product's version (lib/versioning).
+      await VER.checkRow(c, req, 'loan_products', req.params.id, 'loan product');
       const { rows: [f] } = await c.query(
         'SELECT * FROM loan_product_fees WHERE product_id = $1 AND (id::text = $2 OR code = $2) FOR UPDATE', [req.params.id, req.params.feeId]);
       if (!f) return { missing: true };

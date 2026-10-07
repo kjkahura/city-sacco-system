@@ -19,6 +19,11 @@
 #   SITE_URL                 https://your-domain: the address checked after a deploy, in place of
 #                            Firebase Hosting, which is then no longer deployed.
 #   SERVE_FRONTENDS          off, so the service stops serving /console and /portal itself.
+# Optional, for the database (platform/docs/deploy.md, "Scaling the database"):
+#   CLOUD_SQL_REPLICA        PROJECT:REGION:INSTANCE of a read replica. Reports and the dashboard
+#                            indicators are then read there; postings stay on the primary.
+#   CONFLICT_RETRIES         how many times a deadlocked or conflicting request is run again
+#                            (default 2; 0 answers the first conflict with 409, as before).
 # No keys or passwords are stored in GitHub: the workflow signs in to Google
 # through Workload Identity Federation, and the app's secrets are in Secret Manager.
 
@@ -175,6 +180,8 @@ jobs:
         env:
           APP_DB_USER: ${{ vars.APP_DB_USER }}
           SERVE_FRONTENDS: ${{ vars.SERVE_FRONTENDS }}
+          CLOUD_SQL_REPLICA: ${{ vars.CLOUD_SQL_REPLICA }}
+          CONFLICT_RETRIES: ${{ vars.CONFLICT_RETRIES }}
         run: |
           SVC_ENV="$ENV_VARS"; SVC_SECRETS="$SECRETS"
           if [ -n "$APP_DB_USER" ]; then
@@ -182,8 +189,14 @@ jobs:
             SVC_SECRETS="${SECRETS/PGPASSWORD=sacco-db-password/PGPASSWORD=sacco-app-db-password}"
           fi
           if [ -n "$SERVE_FRONTENDS" ]; then SVC_ENV="$SVC_ENV,SERVE_FRONTENDS=$SERVE_FRONTENDS"; fi
+          if [ -n "$CONFLICT_RETRIES" ]; then SVC_ENV="$SVC_ENV,CONFLICT_RETRIES=$CONFLICT_RETRIES"; fi
+          SQL_INSTANCES="$SQL_INSTANCE"
+          if [ -n "$CLOUD_SQL_REPLICA" ]; then
+            SQL_INSTANCES="$SQL_INSTANCE,$CLOUD_SQL_REPLICA"
+            SVC_ENV="$SVC_ENV,PG_REPLICA_HOST=/cloudsql/$CLOUD_SQL_REPLICA"
+          fi
           gcloud run deploy "$SERVICE" --image "$IMAGE" --region "$REGION" \
-            --service-account "$RUNTIME_SA" --add-cloudsql-instances "$SQL_INSTANCE" \
+            --service-account "$RUNTIME_SA" --set-cloudsql-instances "$SQL_INSTANCES" \
             --set-env-vars "$SVC_ENV" --set-secrets "$SVC_SECRETS" \
             --allow-unauthenticated --port 8080 --cpu 1 --memory 512Mi \
             --min-instances 0 --max-instances 1 --concurrency 80 --timeout 60 --quiet

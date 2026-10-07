@@ -57,8 +57,10 @@ export function toast(message, bad = false) {
  * refresh, so a session that outlives the 15 minute access token does not
  * drop a teller back to the login screen in the middle of a deposit.
  */
-export async function api(method, path, body, { retry = true, reauth = true } = {}) {
+export async function api(method, path, body, { retry = true, reauth = true, ifMatch = null } = {}) {
   const headers = { 'content-type': 'application/json' };
+  // The version the change was made from (lib/versioning): refused with 412 if the record changed since.
+  if (ifMatch) headers['if-match'] = ifMatch;
   if (S.tenant) headers['x-tenant'] = S.tenant;
   if (S.access) headers.authorization = `Bearer ${S.access}`;
   if (S.reauth && S.reauth.until > Date.now()) headers['x-reauth-token'] = S.reauth.token;
@@ -71,11 +73,11 @@ export async function api(method, path, body, { retry = true, reauth = true } = 
 
   if (res.status === 401 && retry && S.refresh) {
     const ok = await refreshSession();
-    if (ok) return api(method, path, body, { retry: false, reauth });
+    if (ok) return api(method, path, body, { retry: false, reauth, ifMatch });
   }
   // A critical action with re-authentication on: the password, then once more.
   if (res.status === 403 && reauth && /^REAUTHENTICATION_REQUIRED/.test(payload?.errors?.[0]?.errorReason || '')) {
-    if (await reauthenticate()) return api(method, path, body, { retry, reauth: false });
+    if (await reauthenticate()) return api(method, path, body, { retry, reauth: false, ifMatch });
   }
 
   markEnvironment(res.headers.get('x-environment'));
@@ -84,6 +86,9 @@ export async function api(method, path, body, { retry = true, reauth = true } = 
     status: res.status,
     body: payload,
     total: Number(res.headers.get('items-total') || 0),
+    etag: res.headers.get('etag'),
+    // A report read from the reporting replica says how current it is (db/tenantContext withTenantReport).
+    asAt: res.headers.get('data-source') === 'replica' ? res.headers.get('data-as-at') : null,
     error: res.ok ? null : (payload?.errors?.[0]?.errorReason || `HTTP ${res.status}`),
   };
   if (!res.ok && res.status === 401) {

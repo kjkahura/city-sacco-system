@@ -284,8 +284,10 @@ reach Washa SACCO by editing a header. Tested both ways.
 ```
 src/
   db/
-    pool.js            one pool for the process, never one per tenant
-    tenantContext.js   withTenant / withTenantRead, the isolation boundary
+    pool.js            one pool for the process, never one per tenant; the
+                       optional direct and replica pools
+    tenantContext.js   withTenant / withTenantRead / withTenantReport, the
+                       isolation boundary, retryConflicts
     migrate.js         platform + per-tenant runner, checksums, drift report
     migrations/
       platform/        tenant registry, users, migration ledger, audit
@@ -378,6 +380,7 @@ src/
     crypt.js           AES-256-GCM streaming encryption, key ring, rekey
     offsite.js         dir and command drivers for shipping backups
     scheduler.js       in-process timer behind a Postgres advisory lock
+    dbHealth.js        connections, heaviest statements, dead rows (cli db:*)
   routes/              auth, members, clients (/clients and /groups),
                        creditArrangements (/creditarrangements), loans,
                        loanProducts, depositProducts, branches, savings,
@@ -396,6 +399,7 @@ src/
     errors.js          err(message, status), the error every layer throws
     dates.js           local and UTC calendar days as yyyy-MM-dd
     auditLog.js        recordAudit, the one writer of audit_log rows
+    versioning.js      ETag and If-Match for configuration (optimistic locking)
 public/                the back office console: index.html, styles.css, and js/
                        (ES modules: main.js the entry, base.js, ui.js,
                        nav.js, one module per page)
@@ -3284,6 +3288,15 @@ an insert trigger is the whole maintenance story. `cli ledger:verify`, and
 `GET /api/accounting/verify` for an auditor, recompute from the lines and
 report any account that disagrees; an empty list is the claim made good.
 Run it after a restore or after any manual SQL against the ledger.
+
+Since migration 052 each account and day is spread over 16 rows ("slots"),
+chosen by the writing transaction's ID. With one row, every cash deposit of
+the day locked the same cash and savings-liability rows until it committed,
+and a load test (`test/load/postings.js`) showed postings waiting on each
+other for 88% of their time from eight concurrent tellers. With slots the
+waiting fell to 4% and throughput rose by half. Every reader sums the rows,
+so no report changed. The rest of the database design (locking, retries,
+replicas, payments, growth) is in `docs/data-architecture.md`.
 
 ## Migrations at fleet scale
 

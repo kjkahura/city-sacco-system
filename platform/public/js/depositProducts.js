@@ -141,6 +141,7 @@ async function depositProductDetail(p0) {
   const r = await api('GET', `/api/deposit-products/${p0.id}`);
   if (!r.ok) throw new Error(r.error);
   const p = r.body;
+  const etag = r.etag;
   view().innerHTML = `
     <button class="secondary" id="back">← Products</button>
     <div class="toolbar"><h1>${esc(p.id)} · ${esc(p.name)}</h1><span class="spacer"></span>
@@ -184,7 +185,7 @@ async function depositProductDetail(p0) {
     if (!d) return;
     const body = await depositBody(d);
     if (p.accounts > 0) { delete body.accountingMethod; delete body.interestAccruedAccounting; }
-    const res = await api('PATCH', `/api/deposit-products/${p.id}`, body);
+    const res = await api('PATCH', `/api/deposit-products/${p.id}`, body, { ifMatch: etag });
     toast(res.ok ? `${p.id} saved` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) depositProductDetail(p);
   });
@@ -197,7 +198,7 @@ async function depositProductDetail(p0) {
     if (res.ok) productsView();
   });
   view().querySelectorAll('[data-fee-drop]').forEach((b) => b.addEventListener('click', async () => {
-    const res = await api('DELETE', `/api/deposit-products/${p.id}/fees/${b.dataset.feeDrop}`);
+    const res = await api('DELETE', `/api/deposit-products/${p.id}/fees/${b.dataset.feeDrop}`, undefined, { ifMatch: etag });
     toast(res.ok ? 'Fee deleted' : res.error, !res.ok);
     if (res.ok) depositProductDetail(p);
   }));
@@ -213,7 +214,7 @@ async function depositProductDetail(p0) {
     const res = await api('POST', `/api/deposit-products/${p.id}/fees`, {
       code: d.code.toUpperCase(), name: d.name, trigger: d.trigger, amount: d.amount === '' ? null : Number(d.amount), glIncome: d.glIncome || null,
       applyDateMethod: d.trigger === 'MONTHLY' ? d.applyDateMethod : undefined,
-    });
+    }, { ifMatch: etag });
     toast(res.ok ? `Fee ${res.body.code} added` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) depositProductDetail(p);
   });

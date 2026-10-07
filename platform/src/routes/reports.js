@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenant, withTenantRead, withTenantReport, reportHeaders } = require('../db/tenantContext');
 const { requirePermission } = require('../tenancy/resolve');
 const PERMS = require('../lib/permissions');
 const { pageParams, pageQuery, sendPage } = require('../lib/page');
@@ -46,10 +46,13 @@ function report(fn, exp = null, perm = REPORTS) {
       const fmt = X.format(req.query.format);
       if (req.query.format && !fmt) return next(Object.assign(new Error('FORMAT_MUST_BE_CSV_OR_XLSX'), { status: 400 }));
       if (fmt && !PERMS.can(req.auth, 'EXPORT_TO_EXCEL')) return next(Object.assign(new Error('PERMISSION_REQUIRED: EXPORT_TO_EXCEL'), { status: 403 }));
-      const out = await withTenantRead(req.tenant.schema_name, (c) => fn(c, req.query, req, Boolean(fmt)));
+      // Reports read the replica when one is set (db/tenantContext withTenantReport); the answer says as at when.
+      const meta = {};
+      const out = await withTenantReport(req.tenant.schema_name, (c) => fn(c, req.query, req, Boolean(fmt)), meta);
+      reportHeaders(res, meta);
       if (fmt && exp) {
         const e = exp(out, req);
-        e.header = [['Organization', req.tenant.name], ...e.header, ['Generated', new Date().toISOString()]];
+        e.header = [['Organization', req.tenant.name], ...e.header, ['Generated', new Date().toISOString()], ['Data as at', meta.asAt]];
         return X.send(res, fmt, e, `${req.tenant.slug}-${e.file}`);
       }
       if (fmt) return next(Object.assign(new Error('THIS_REPORT_HAS_NO_EXPORT'), { status: 400 }));
@@ -338,14 +341,16 @@ async function trialBalance(req, res, next) {
     // one report that lists every account that moved, and a mature chart of
     // accounts is long. An export holds every row.
     const { offset, limit } = fmt ? { offset: 0, limit: null } : pageParams(req.query);
-    const t = await withTenantRead(req.tenant.schema_name, (c) => acct.trialBalance(c, {
+    const meta = {};
+    const t = await withTenantReport(req.tenant.schema_name, (c) => acct.trialBalance(c, {
       from: req.query.from || null, to: req.query.to || null, offset, limit, branchId: req.query.branchId || null,
       zeroBalances: ['true', '1'].includes(String(req.query.zeroBalances || '').toLowerCase()),
       glTypes: req.query.glTypes ? String(req.query.glTypes).split(',').map((s) => s.trim().toUpperCase()).filter(Boolean) : null,
-    }));
+    }), meta);
+    reportHeaders(res, meta);
     if (!fmt) return res.json(t);
     const e = trialBalanceExport(t);
-    e.header = [['Organization', req.tenant.name], ...e.header, ['Generated', new Date().toISOString()]];
+    e.header = [['Organization', req.tenant.name], ...e.header, ['Generated', new Date().toISOString()], ['Data as at', meta.asAt]];
     return X.send(res, fmt, e, `${req.tenant.slug}-${e.file}`);
   } catch (e) { next(e); }
 }

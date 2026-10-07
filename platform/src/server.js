@@ -312,6 +312,8 @@ app.use('/api', tenantApi);
 app.use((req, res) => apiError(res, 404, 404, 'ROUTE_NOT_FOUND', req.path));
 
 app.use((err, _req, res, _next) => {
+  // A refused If-Match (lib/versioning) carries the record's current version.
+  if (err.etag && !res.headersSent) res.set('ETag', err.etag);
   // The ledger's own locks (closed year, accounting closure, savings floor)
   // raise from triggers; they are refusals, not server faults.
   const dbRefusal = err.code === '23001' || err.code === '23514';

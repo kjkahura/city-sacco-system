@@ -24,12 +24,15 @@
  *       no tenant transaction: fn(req) for routes on the platform tables.
  */
 
-const { withTenant, withTenantRead } = require('../db/tenantContext');
+const { withTenant, withTenantRead, retryConflicts } = require('../db/tenantContext');
 const { requireAuth } = require('../tenancy/resolve');
 const { notFound } = require('./http');
 const { once } = require('./idempotency');
 
 const ctxOf = (req) => ({ actor: req.auth?.email, user: req.auth });
+
+// Before a retry the status a failed try set is forgotten (a retry may take another path).
+const fresh = (res, attempt) => { if (attempt > 0) res.statusCode = 200; return true; };
 
 const statusOf = (res, status, keepStatus) => (status !== null ? (keepStatus && res.statusCode !== 200 ? res.statusCode : status) : res.statusCode);
 
@@ -39,18 +42,20 @@ function handle(fn, { write = false, status = null, keepStatus = false, what = n
       // A write sent with an Idempotency-Key (a retry after a timeout or a dropped
       // connection) gets the first answer back instead of acting twice (lib/idempotency).
       if (write && req.method === 'POST' && req.get('idempotency-key')) {
-        const r = await withTenant(req.tenant.schema_name, (c) => once(c, req, `${req.method} ${req.baseUrl}${req.path}`, async () => {
+        const r = await retryConflicts((attempt) => fresh(res, attempt) && withTenant(req.tenant.schema_name, (c) => once(c, req, `${req.method} ${req.baseUrl}${req.path}`, async () => {
           const v = await fn(c, req, res, ctxOf(req));
           if (res.headersSent || (v === undefined && !always)) return { skip: true };
           if (v === null && what) return { status: 404, body: { errors: [{ errorCode: 404, errorReason: `${String(what).toUpperCase()}_NOT_FOUND` }] } };
           return { status: statusOf(res, status, keepStatus), body: v };
-        }));
+        })), { canRetry: () => !res.headersSent && !req.socket?.destroyed, label: `${req.method} ${req.baseUrl}${req.path}` });
         if (r.skip) return;
         if (r.replayed) res.set('idempotent-replayed', 'true');
         res.status(r.status).json(r.body);
         return;
       }
-      const out = await (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res, ctxOf(req)));
+      // A deadlock or serialization conflict rolls the transaction back; it is run again (db/tenantContext retryConflicts).
+      const out = await retryConflicts((attempt) => fresh(res, attempt) && (write ? withTenant : withTenantRead)(req.tenant.schema_name, (c) => fn(c, req, res, ctxOf(req))),
+        { canRetry: () => !res.headersSent && !req.socket?.destroyed, label: `${req.method} ${req.baseUrl}${req.path}` });
       if (out === undefined && !always) return;
       if (out === null && what) { notFound(res, what); return; }
       if (status !== null) res.status(keepStatus && res.statusCode !== 200 ? res.statusCode : status);

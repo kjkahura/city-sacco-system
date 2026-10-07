@@ -1,6 +1,6 @@
 'use strict';
 
-const { pool } = require('./pool');
+const { pool, replicaPool } = require('./pool');
 const { orgToday } = require('../lib/orgDate');
 const requestContext = require('../lib/requestContext');
 
@@ -173,6 +173,120 @@ async function withTenantRead(schemaName, fn) {
 }
 
 /**
+ * A read for reports, the data extract and the dashboard indicators. With a
+ * read replica set (db/pool replicaPool) it is read there, so heavy reports
+ * do not take the primary's time from postings; otherwise from the primary,
+ * as withTenantRead. `meta` receives where it was read (`source`: replica or
+ * primary) and `asAt`: on the replica, the time of the latest change it has
+ * applied (a replica is a little behind); on the primary, now. A replica that
+ * cannot be reached is skipped for the primary, so a report never fails
+ * because the replica is down. Nothing that comes before a posting reads
+ * here: postings read the primary in their own transaction.
+ */
+// After a replica cannot be reached, reports skip it for this long instead of waiting on it each time.
+const REPLICA_RETRY_MS = 30_000;
+let replicaDownUntil = 0;
+// A replica further behind than this, and not caught up, is skipped (REPLICA_MAX_LAG_SECONDS, default 60).
+const replicaMaxLag = () => Math.max(1, Number(process.env.REPLICA_MAX_LAG_SECONDS) || 60);
+// Errors that mean "this replica cannot answer now", not "the report is wrong": read the primary instead.
+// 40001 is a query cancelled for a conflict with the replica applying changes; 57P0x the server
+// shutting down or starting; 08xxx a lost connection; 42P01 and 3F000 a table or schema not yet replicated.
+const REPLICA_GIVE_UP = (e) => ['40001', '57P01', '57P02', '57P03', '42P01', '3F000'].includes(e.code)
+  || /^08/.test(e.code || '') || ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT'].includes(e.code)
+  || /Connection terminated|connection timeout/i.test(e.message || '');
+
+async function fromPrimary(schemaName, fn, meta, why) {
+  if (why) console.warn(`[db] reading the primary for a report: ${why}`);
+  meta.source = 'primary';
+  meta.asAt = new Date().toISOString();
+  return withTenantRead(schemaName, fn);
+}
+
+async function withTenantReport(schemaName, fn, meta = {}) {
+  assertSchemaName(schemaName);
+  if (!replicaPool || Date.now() < replicaDownUntil) return fromPrimary(schemaName, fn, meta);
+  const done = workStarted();
+  let client;
+  try {
+    client = await replicaPool.connect();
+  } catch (e) {
+    done();
+    replicaDownUntil = Date.now() + REPLICA_RETRY_MS;
+    return fromPrimary(schemaName, fn, meta, `replica unavailable (${e.message})`);
+  }
+  let skip = null;
+  let out;
+  try {
+    await client.query('BEGIN READ ONLY');
+    await bind(client, schemaName);
+    // How current the replica is. Caught up (everything received is applied) and still
+    // streaming: as at now. Otherwise as at the last change it applied; too far behind, skipped.
+    const { rows: [st] } = await client.query(
+      `SELECT pg_is_in_recovery() AS replica, pg_last_xact_replay_timestamp() AS replay_ts,
+              COALESCE(pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn(), false) AS caught_up,
+              (SELECT status FROM pg_stat_wal_receiver LIMIT 1) AS receiver,
+              EXTRACT(EPOCH FROM now() - pg_last_xact_replay_timestamp())::float AS lag_seconds`);
+    const current = !st.replica || (st.caught_up && st.receiver !== 'stopping' && st.receiver !== 'stopped');
+    if (!current && (st.lag_seconds === null || st.lag_seconds > replicaMaxLag())) {
+      skip = `replica ${st.lag_seconds === null ? 'has applied nothing yet' : `${Math.round(st.lag_seconds)} s behind`}`;
+      await client.query('ROLLBACK');
+    } else {
+      out = await fn(client);
+      await client.query('COMMIT');
+      meta.source = st.replica ? 'replica' : 'primary';
+      meta.asAt = (current || !st.replay_ts ? new Date() : new Date(st.replay_ts)).toISOString();
+    }
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (!REPLICA_GIVE_UP(e)) throw e;
+    skip = `replica could not answer (${e.code || e.message})`;
+  } finally {
+    client.release();
+    done();
+  }
+  return skip ? fromPrimary(schemaName, fn, meta, skip) : out;
+}
+
+/** The Data-As-At and Data-Source headers for a report read with withTenantReport. */
+function reportHeaders(res, meta) {
+  if (meta.asAt) res.set('Data-As-At', meta.asAt);
+  if (meta.source) res.set('Data-Source', meta.source);
+}
+
+/**
+ * Run a whole transaction again when PostgreSQL ended it to break a deadlock
+ * (40P01) or a serialization conflict (40001). Either way the transaction was
+ * rolled back, so nothing it did in the database remains, and running it
+ * again is the database's own advice. `run` must open its own transaction
+ * (withTenant). A handler that calls an outside service inside its
+ * transaction would call it again, so outside calls belong after the commit
+ * (afterCommit, the notification outbox). CONFLICT_RETRIES sets how many more
+ * tries (default 2; 0 answers the first conflict with 409 CONFLICT_TRY_AGAIN,
+ * as before). `canRetry()` says whether the caller can still start over (an
+ * answer already sent cannot).
+ */
+const RETRYABLE = new Set(['40P01', '40001']);
+const conflictRetries = () => {
+  const n = Number(process.env.CONFLICT_RETRIES);
+  return Number.isInteger(n) && n >= 0 ? Math.min(n, 5) : 2;
+};
+async function retryConflicts(run, { retries = conflictRetries(), canRetry = () => true, label = '' } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await run(attempt);
+    } catch (e) {
+      if (!RETRYABLE.has(e.code) || attempt >= retries || !canRetry()) throw e;
+      // Back off a little, with jitter, so the two transactions do not meet again at once.
+      const wait = 15 * 2 ** attempt + Math.floor(Math.random() * 40);
+      console.warn(`[db] ${e.code === '40P01' ? 'deadlock' : 'serialization conflict'}${label ? ` on ${label}` : ''}; retrying in ${wait} ms (try ${attempt + 2})`);
+      await new Promise((ok) => setTimeout(ok, wait));
+      // The caller may have gone during the wait (its concurrency slot is then given back).
+      if (!canRetry()) throw e;
+    }
+  }
+}
+
+/**
  * A request that is a job (end of day run now, an import, a backup): its
  * statements are not cut off at the request limit. Express middleware.
  */
@@ -182,4 +296,4 @@ function longRunning(_req, _res, next) {
   next();
 }
 
-module.exports = { withTenant, withTenantRead, orgToday, assertSchemaName, TenantError, SCHEMA_RE, longRunning, afterCommit };
+module.exports = { withTenant, withTenantRead, orgToday, assertSchemaName, TenantError, SCHEMA_RE, longRunning, afterCommit, retryConflicts, withTenantReport, reportHeaders };

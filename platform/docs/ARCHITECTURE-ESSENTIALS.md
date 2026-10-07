@@ -24,7 +24,8 @@ The short version of `platform/README.md`, for a person or a coding agent starti
 - **Journals balance** by a deferred constraint trigger at COMMIT.
 - **Nothing financial is edited or deleted.** Posted lines and transactions are immutable by trigger, and corrections are reversals.
 - **Closed periods** are refused by triggers.
-- **Reports read `gl_daily_balances`,** a rollup kept exact by trigger, never `journal_lines`. `cli ledger:verify` proves it.
+- **Reports read `gl_daily_balances`,** a rollup kept exact by trigger, never `journal_lines`. `cli ledger:verify` proves it. Each account and day is spread over 16 slots so concurrent postings do not queue on one row: sum them.
+- **One writer.** Every write goes to the primary. Postings fail rather than risk a conflict when it is unreachable. Reports may read a replica (`withTenantReport`); nothing that decides about money does. The full model is `docs/data-architecture.md`.
 - **The end of day** (`src/ops/eod.js`) is idempotent per business date: accruals, arrears, penalties, dormancy, maturity.
 - **Concurrent postings on the same member** take the advisory lock `member-funds:<memberId>` after the account rows (withdrawals, transfers, guarantor pledges). Keep that order: rows first, then the lock.
 
@@ -43,6 +44,7 @@ The short version of `platform/README.md`, for a person or a coding agent starti
 
 - **Route wrapper:** `src/lib/handlers.js` runs a route in a tenant transaction and replies with JSON. POST routes built on it honour `Idempotency-Key` (`src/lib/idempotency.js`).
 - **Limits:** rate limits and a per-tenant concurrency slot (`src/lib/limits.js`). The slot is held until the request's database work ends, and statements are limited to 55 seconds except on job routes (`longRunning`).
+- **Conflicts:** a request whose transaction PostgreSQL ends to break a deadlock is run again up to twice (`retryConflicts`), so call outside services after the commit. Configuration edits are checked against the version the editor read (`ETag`, `If-Match`, 412; `src/lib/versioning.js`).
 - **Errors** are thrown with `err(message, status)` (`src/lib/errors.js`); the message starts with an upper-case code such as `INSUFFICIENT_AVAILABLE_BALANCE: ...`. A refusal that follows a write is returned, not thrown, so the write is not rolled back with it.
 - **Outbound calls** to addresses a tenant chose (webhooks, email and SMS gateways, apps, backup callbacks) go through `src/lib/outbound.js`, which refuses private and metadata addresses.
 - **Request context:** `src/lib/requestContext.js` carries the signed-in user to the database session settings that triggers read (till rules, branch limits, audit).
@@ -81,7 +83,7 @@ The short version of `platform/README.md`, for a person or a coding agent starti
 
 - **Setup:** each suite in `test/` is a plain Node script against a real Postgres. It creates its own tenants and prints `N passed, M failed`.
 - **Commands:** `npm test` runs the suites in order. `npm run test:browser` runs the console and portal in a real browser.
-- **Size:** about 3,700 checks across the suites.
+- **Size:** about 3,800 checks across the suites. `test/load/postings.js` is a load test, not part of `npm test`.
 - **Date-dependent suites:** some fail on certain calendar dates whatever the change, so compare against the commit before yours.
 - **Security changes** get a check in `test/hardening.test.js`.
 
@@ -96,6 +98,7 @@ The short version of `platform/README.md`, for a person or a coding agent starti
 | Topic | Where |
 | --- | --- |
 | Every design decision, in detail | `platform/README.md` |
+| Consistency, locking, replicas, payments as sagas, growing past one database | `docs/data-architecture.md` |
 | The API for integrators | `docs/developer-guide.md` |
 | Going live, settings and rollback | `docs/deploy.md` |
 | Security review, findings and what remains | `docs/audits/security-assessment-2026-10.md` |

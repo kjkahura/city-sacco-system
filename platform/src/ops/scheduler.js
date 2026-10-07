@@ -1,6 +1,6 @@
 'use strict';
 
-const { pool } = require('../db/pool');
+const { directPool: pool } = require('../db/pool');
 const eod = require('./eod');
 const backup = require('./backup');
 const tokens = require('../auth/tokens');

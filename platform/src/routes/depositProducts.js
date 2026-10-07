@@ -12,6 +12,7 @@ const CA = require('../domain/creditArrangements');
 const DR = require('../domain/depositRules');
 const { json } = require('../lib/handlers');
 const { recordAudit } = require('../lib/auditLog');
+const VER = require('../lib/versioning');
 
 /**
  * Deposit products: interest, withholding tax, overdrafts, fees, and the
@@ -317,6 +318,7 @@ router.get('/:id', requireAuth(), async (req, res, next) => {
         [req.params.id])).rows[0];
       return p ? withFees(c, p) : null;
     });
+    if (row) res.set('ETag', VER.etagOf(row.row_version));
     return row ? res.json(publicProduct(row)) : notFound(res, 'deposit product');
   } catch (e) { next(e); }
 });
@@ -376,6 +378,7 @@ router.patch('/:id', requireAuth(), async (req, res, next) => {
     const cols = toColumns(req.body);
     if (!Object.keys(cols).length && req.body?.customFields === undefined) return badRequest(res, 'NO_UPDATABLE_FIELDS');
     const out = await withTenant(req.tenant.schema_name, async (c) => {
+      await VER.checkRow(c, req, 'savings_products', req.params.id, 'deposit product');
       const { rows: [before] } = await c.query('SELECT * FROM savings_products WHERE id = $1 FOR UPDATE', [req.params.id]);
       if (!before) return { missing: true };
       const accounts = await accountsUnder(c, before.id);
@@ -394,6 +397,7 @@ router.patch('/:id', requireAuth(), async (req, res, next) => {
     });
     if (out.missing) return notFound(res, 'deposit product');
     if (out.problems) return apiError(res, 400, 400, 'INVALID_DEPOSIT_PRODUCT', out.problems.join('; '));
+    res.set('ETag', VER.etagOf(out.row.row_version));
     res.json(publicProduct(out.row));
   } catch (e) { next(e); }
 });
@@ -445,6 +449,8 @@ router.post('/:id/fees', requireAuth(), async (req, res, next) => {
   try {
     const cols = feeCols(req.body);
     const out = await withTenant(req.tenant.schema_name, async (c) => {
+      // A fee is part of its product: checked against the product's version (lib/versioning).
+      await VER.checkRow(c, req, 'savings_products', req.params.id, 'deposit product');
       const { rows: [p] } = await c.query('SELECT id FROM savings_products WHERE id = $1', [req.params.id]);
       if (!p) return { missing: true };
       const problems = await validateFee(c, cols, null);
@@ -471,6 +477,8 @@ router.patch('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
     delete cols.code;
     if (!Object.keys(cols).length) return badRequest(res, 'NO_UPDATABLE_FIELDS');
     const out = await withTenant(req.tenant.schema_name, async (c) => {
+      // A fee is part of its product: checked against the product's version (lib/versioning).
+      await VER.checkRow(c, req, 'savings_products', req.params.id, 'deposit product');
       const { rows: [before] } = await c.query(
         'SELECT * FROM savings_product_fees WHERE product_id = $1 AND (id::text = $2 OR code = $2) FOR UPDATE', [req.params.id, req.params.feeId]);
       if (!before) return { missing: true };
@@ -493,6 +501,8 @@ router.patch('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
 router.delete('/:id/fees/:feeId', requireAuth(), async (req, res, next) => {
   try {
     const out = await withTenant(req.tenant.schema_name, async (c) => {
+      // A fee is part of its product: checked against the product's version (lib/versioning).
+      await VER.checkRow(c, req, 'savings_products', req.params.id, 'deposit product');
       const { rows: [f] } = await c.query(
         'SELECT * FROM savings_product_fees WHERE product_id = $1 AND (id::text = $2 OR code = $2) FOR UPDATE', [req.params.id, req.params.feeId]);
       if (!f) return { missing: true };

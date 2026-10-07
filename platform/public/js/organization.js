@@ -331,9 +331,11 @@ export async function orgView(filter) {
     done(await api('POST', '/api/organization/transactionChannels', d), 'Channel created');
   });
   each('channel', async (id) => {
-    const d = await channelEditor((chans.body || []).find((x) => x.id === id));
+    const cur = await api('GET', `/api/organization/transactionChannels/${encodeURIComponent(id)}`);
+    if (!cur.ok) { toast(cur.error, true); return; }
+    const d = await channelEditor(cur.body);
     if (!d) return;
-    const res = await api('PUT', `/api/organization/transactionChannels/${encodeURIComponent(id)}`, d);
+    const res = await api('PUT', `/api/organization/transactionChannels/${encodeURIComponent(id)}`, d, { ifMatch: cur.etag });
     done(res, res.body?.warning ? `Channel saved. ${res.body.warning}` : 'Channel saved');
   });
   each('channel-up', async (id) => {

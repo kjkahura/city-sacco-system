@@ -218,6 +218,7 @@ async function productDetail(p0) {
   const r = await api('GET', `/api/loan-products/${p0.id}`);
   if (!r.ok) throw new Error(r.error);
   const p = r.body;
+  const etag = r.etag;
   const words = {
     FLAT: 'Flat', REDUCING: 'Reducing', REDUCING_EQUAL_INSTALLMENTS: 'Reducing, equal installments',
     FIXED_TERM: 'Fixed term', DYNAMIC_TERM: 'Dynamic term', INTEREST_FREE: 'Interest free', TRANCHED: 'Tranched', REVOLVING: 'Revolving credit',
@@ -275,7 +276,7 @@ async function productDetail(p0) {
   $('#p-edit').addEventListener('click', async () => {
     const d = await ask(PRODUCT_FIELDS(p), `Edit ${p.id}`);
     if (!d) return;
-    const res = await api('PATCH', `/api/loan-products/${p.id}`, productBody(d));
+    const res = await api('PATCH', `/api/loan-products/${p.id}`, productBody(d), { ifMatch: etag });
     toast(res.ok ? `${p.id} saved` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) productDetail(p);
   });
@@ -283,7 +284,7 @@ async function productDetail(p0) {
   $('#p-fee').addEventListener('click', async () => {
     const d = await ask(FEE_FIELDS(), `New fee on ${p.id}`);
     if (!d) return;
-    const res = await api('POST', `/api/loan-products/${p.id}/fees`, feeBody(d));
+    const res = await api('POST', `/api/loan-products/${p.id}/fees`, feeBody(d), { ifMatch: etag });
     toast(res.ok ? `Fee ${res.body.code} added` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) productDetail(p);
   });
@@ -292,7 +293,7 @@ async function productDetail(p0) {
     if (!d) return;
     const body = feeBody(d);
     delete body.code;
-    const res = await api('PATCH', `/api/loan-products/${p.id}/fees/${f.id}`, body);
+    const res = await api('PATCH', `/api/loan-products/${p.id}/fees/${f.id}`, body, { ifMatch: etag });
     toast(res.ok ? `Fee ${f.code} saved` : `${res.error}${res.body?.errors?.[0]?.errorSource ? ': ' + res.body.errors[0].errorSource : ''}`, !res.ok);
     if (res.ok) productDetail(p);
   });

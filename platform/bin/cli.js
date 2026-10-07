@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-const { pool } = require('../src/db/pool');
+const { pool, endAll } = require('../src/db/pool');
 const { migratePlatform, migrateTenant, migrateAllTenants, drift } = require('../src/db/migrate');
 const provision = require('../src/tenancy/provision');
 const eod = require('../src/ops/eod');
@@ -348,6 +348,34 @@ const COMMANDS = {
     console.log(`pruned ${await tokens.prune(Number(arg('days', 60)))} expired refresh tokens`);
   },
 
+  // Database health (src/ops/dbHealth, docs/deploy.md "Watching the database"). Read-only.
+  async 'db:connections'() {
+    const H = require('../src/ops/dbHealth');
+    // --pool-max: the service's PGPOOL_MAX (10 in the deploy workflow); --jobs: jobs that may run at once.
+    const r = await H.connections(pool, { instances: Number(arg('instances', 1)), poolMax: Number(arg('pool-max', process.env.PGPOOL_MAX || 10)), jobs: Number(arg('jobs', 3)) });
+    console.log(`  max_connections ${r.maxConnections} (usable ${r.usable}), open now ${r.open}`);
+    for (const x of r.byApplication) console.log(`    ${x.application.padEnd(28)} ${String(x.state || '').padEnd(20)} ${x.n}`);
+    console.log(`  the platform may open ${r.platform.mayOpen}: ${r.platform.instances} instance(s) x (PGPOOL_MAX ${r.platform.poolMax}${r.platform.directMax ? ` + direct ${r.platform.directMax}` : ''}) + ${r.platform.jobs} job(s) x ${r.platform.poolMax}`);
+    console.log(`  ${r.advice}`);
+    if (!r.platform.fits) process.exitCode = 1;
+  },
+
+  async 'db:top-queries'() {
+    const H = require('../src/ops/dbHealth');
+    const rows = await H.topQueries(pool, { limit: arg('limit', 15) });
+    if (!rows) { console.log('  pg_stat_statements is not installed; turn on Query Insights (docs/deploy.md, "Watching the database")'); return; }
+    for (const r of rows) console.log(`  ${String(r.total_ms).padStart(10)} ms total  ${String(r.calls).padStart(8)} calls  ${String(r.mean_ms).padStart(9)} ms mean  ${r.query}`);
+  },
+
+  async 'db:bloat'() {
+    const H = require('../src/ops/dbHealth');
+    const rows = await H.bloat(pool, { minDead: Number(arg('min-dead', 10000)) });
+    for (const r of rows) {
+      console.log(`  ${r.attention ? 'LOOK' : 'ok  '} ${`${r.schema}.${r.table}`.padEnd(48)} live ${String(r.live).padStart(9)} dead ${String(r.dead).padStart(9)} (${(Number(r.dead_share) * 100).toFixed(1)}%)  last autovacuum ${r.last_autovacuum ? new Date(r.last_autovacuum).toISOString() : 'never'}`);
+    }
+    if (rows.some((r) => r.attention)) process.exitCode = 1;
+  },
+
   async 'tenant:drop'() {
     const slug = arg('slug');
     const out = await provision.deprovisionTenant(slug, { confirm: arg('confirm') });
@@ -368,6 +396,6 @@ const COMMANDS = {
     console.error(`error: ${e.message}`);
     process.exitCode = 1;
   } finally {
-    await pool.end();
+    await endAll();
   }
 })();

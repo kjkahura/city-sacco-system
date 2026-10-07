@@ -18,6 +18,7 @@ const CHC = require('../domain/channelConfig');
 const DOCS = require('../domain/productDocuments');
 const eod = require('../ops/eod');
 const { run } = require('../lib/handlers');
+const VER = require('../lib/versioning');
 
 /**
  * Managing the organization (the reference platform's Administration pages): details and
@@ -101,14 +102,28 @@ const channels = express.Router();
 channels.get('/', ...run((c, req) => CH.list(c, req.query.usable === 'true' ? { includeInactive: false, user: req.auth } : {})));
 channels.put('/order', ...W((c, req) => CH.rearrange(c, req.body?.order, by(req))));
 channels.post('/', ...W((c, req) => CH.create(c, req.body || {}, by(req)), 201));
-channels.patch('/:id', ...W((c, req) => CH.update(c, req.params.id, req.body || {}, by(req))));
+channels.patch('/:id', ...W(async (c, req, res) => {
+  await VER.checkRow(c, req, 'transaction_channels', req.params.id, 'transaction channel');
+  const out = await CH.update(c, req.params.id, req.body || {}, by(req));
+  res.set('ETag', VER.etagOf(out.row_version));
+  return out;
+}));
 channels.delete('/:id', ...W((c, req) => CH.remove(c, req.params.id, by(req))));
 
 // The reference platform's API v2 for channels (../domain/channelConfig), under /organization.
 organization.get('/transactionChannels', ...run((c, req) => CHC.apiList(c, { state: req.query.transactionChannelState || null })));
-organization.get('/transactionChannels/:id', ...run((c, req) => CHC.apiGet(c, req.params.id)));
+organization.get('/transactionChannels/:id', ...run(async (c, req, res) => {
+  const out = await CHC.apiGet(c, req.params.id);
+  await VER.sendRowEtag(res, c, 'transaction_channels', out.id);
+  return out;
+}));
 organization.post('/transactionChannels', ...W((c, req) => CHC.apiCreate(c, req.body, by(req)), 201));
-organization.put('/transactionChannels/:id', ...W((c, req) => CHC.apiUpdate(c, req.params.id, req.body, by(req))));
+organization.put('/transactionChannels/:id', ...W(async (c, req, res) => {
+  await VER.checkRow(c, req, 'transaction_channels', req.params.id, 'transaction channel');
+  const out = await CHC.apiUpdate(c, req.params.id, req.body, by(req));
+  await VER.sendRowEtag(res, c, 'transaction_channels', out.id);
+  return out;
+}));
 organization.delete('/transactionChannels/:id', ...W(async (c, req, res) => {
   await CHC.apiDelete(c, req.params.id, by(req));
   res.status(204).end();
@@ -150,14 +165,28 @@ customFields.get('/entities', requireAuth(), (req, res) => res.json({ entities: 
 customFields.get('/sets', ...run((c, req) => CF.sets(c, req.query.entity || null)));
 customFields.post('/sets', ...W((c, req) => CF.createSet(c, req.body || {}, by(req)), 201));
 customFields.put('/sets/order', ...W((c, req) => CF.rearrangeSets(c, req.body?.entity, req.body?.order)));
-customFields.patch('/sets/:id', ...W((c, req) => CF.updateSet(c, req.params.id, req.body || {}, by(req))));
+customFields.patch('/sets/:id', ...W(async (c, req, res) => {
+  await VER.checkRow(c, req, 'custom_field_sets', req.params.id, 'custom field set');
+  const out = await CF.updateSet(c, req.params.id, req.body || {}, by(req));
+  await VER.sendRowEtag(res, c, 'custom_field_sets', req.params.id);
+  return out;
+}));
 customFields.delete('/sets/:id', ...W((c, req) => CF.deleteSet(c, req.params.id, by(req))));
 customFields.get('/definitions', ...run((c, req) => CF.definitions(c, { entity: req.query.entity || null, setId: req.query.setId || null,
   includeInactive: req.query.includeInactive !== 'false' })));
 customFields.post('/definitions', ...W((c, req) => CF.createDefinition(c, req.body || {}, by(req)), 201));
 customFields.put('/definitions/order', ...W((c, req) => CF.rearrangeDefinitions(c, req.body?.entity, req.body?.order)));
-customFields.get('/definitions/:id', ...run((c, req) => CF.findDefinition(c, req.params.id)));
-customFields.patch('/definitions/:id', ...W((c, req) => CF.updateDefinition(c, req.params.id, req.body || {}, by(req))));
+customFields.get('/definitions/:id', ...run(async (c, req, res) => {
+  const out = await CF.findDefinition(c, req.params.id);
+  await VER.sendRowEtag(res, c, 'custom_field_definitions', req.params.id);
+  return out;
+}));
+customFields.patch('/definitions/:id', ...W(async (c, req, res) => {
+  await VER.checkRow(c, req, 'custom_field_definitions', req.params.id, 'custom field');
+  const out = await CF.updateDefinition(c, req.params.id, req.body || {}, by(req));
+  await VER.sendRowEtag(res, c, 'custom_field_definitions', req.params.id);
+  return out;
+}));
 customFields.delete('/definitions/:id', ...W((c, req) => CF.deleteDefinition(c, req.params.id, by(req))));
 // The values on any record, any state. The entity's own permission, the
 // user's branches and the member rules decide who may read or write them
@@ -176,7 +205,11 @@ customFields.put('/values/:entity/:id', ...W(async (c, req) => {
 // The reference platform's API v2 metadata: GET /customfields/:id,
 // /customfieldsets and /customfieldsets/:id/customfields (../domain/customFieldConfig).
 const customFieldsMeta = express.Router();
-customFieldsMeta.get('/:id', ...run((c, req) => CFC.customField(c, req.params.id)));
+customFieldsMeta.get('/:id', ...run(async (c, req, res) => {
+  const out = await CFC.customField(c, req.params.id);
+  await VER.sendRowEtag(res, c, 'custom_field_definitions', req.params.id);
+  return out;
+}));
 const customFieldSetsMeta = express.Router();
 customFieldSetsMeta.get('/', ...run((c, req) => CFC.customFieldSets(c, { availableFor: req.query.availableFor || null })));
 customFieldSetsMeta.get('/:id/customfields', ...run((c, req) => CFC.fieldsOfSet(c, req.params.id)));
@@ -185,19 +218,27 @@ customFieldSetsMeta.get('/:id/customfields', ...run((c, req) => CFC.fieldsOfSet(
 const configuration = express.Router();
 const YAML_TYPE = 'application/yaml; charset=utf-8';
 configuration.get('/customfields.yaml', ...run(async (c, req, res) => {
-  res.type(YAML_TYPE).send(await CFC.configurationYaml(c));
+  const text = await CFC.configurationYaml(c);
+  res.set('ETag', VER.textEtag(text)).type(YAML_TYPE).send(text);
 }));
 configuration.get('/customfields/template.yaml', requireAuth(), (req, res) => res.type(YAML_TYPE).send(CFC.template()));
 configuration.get('/transactionchannels.yaml', ...run(async (c, req, res) => {
-  res.type(YAML_TYPE).send(await CHC.configurationYaml(c));
+  const text = await CHC.configurationYaml(c);
+  res.set('ETag', VER.textEtag(text)).type(YAML_TYPE).send(text);
 }));
 configuration.get('/transactionchannels/template.yaml', requireAuth(), (req, res) => res.type(YAML_TYPE).send(CHC.template()));
 configuration.put('/transactionchannels.yaml',
   express.text({ type: ['application/yaml', 'application/x-yaml', 'text/yaml', 'text/x-yaml', 'text/plain', 'application/vnd.*+yaml'], limit: '1mb' }),
-  ...W((c, req) => CHC.applyConfiguration(c, typeof req.body === 'string' ? req.body : (req.body || {}), by(req))));
+  ...W(async (c, req) => {
+    await VER.checkFile(c, req, ['transaction_channels'], CHC.configurationYaml, 'transaction channels configuration');
+    return CHC.applyConfiguration(c, typeof req.body === 'string' ? req.body : (req.body || {}), by(req));
+  }));
 configuration.put('/customfields.yaml',
   express.text({ type: ['application/yaml', 'application/x-yaml', 'text/yaml', 'text/x-yaml', 'text/plain', 'application/vnd.*+yaml'], limit: '2mb' }),
-  ...W((c, req) => CFC.applyConfiguration(c, typeof req.body === 'string' ? req.body : (req.body || {}), by(req))));
+  ...W(async (c, req) => {
+    await VER.checkFile(c, req, ['custom_field_sets', 'custom_field_definitions'], CFC.configurationYaml, 'custom fields configuration');
+    return CFC.applyConfiguration(c, typeof req.body === 'string' ? req.body : (req.body || {}), by(req));
+  }));
 
 // --- product documents -------------------------------------------------------------
 

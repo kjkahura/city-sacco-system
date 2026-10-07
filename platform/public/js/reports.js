@@ -103,7 +103,20 @@ function reportQuery() {
 const pctText = (n) => (n === null || n === undefined ? '' : `${Number(n).toFixed(2)}%`);
 const sourceNote = (p) => (p.source === 'SNAPSHOT' ? `<p class="hint">From the end of day's positions for ${esc(p.asAt)}.</p>` : '');
 
+let lastAsAt = null;
+// The reports read through rapi, so a report served by the replica can say how current it is.
+const rapi = async (...a) => { const r = await api(...a); if (r.asAt) lastAsAt = r.asAt; return r; };
+
 async function runReport() {
+  lastAsAt = null;
+  await runReportInner();
+  const out = el('r-out');
+  if (lastAsAt && out) {
+    out.insertAdjacentHTML('afterbegin', `<p class="hint" id="r-as-at">Includes changes up to ${esc(new Date(lastAsAt).toLocaleString())}, read from the reporting copy of the database.</p>`);
+  }
+}
+
+async function runReportInner() {
   const R = reportState;
   const out = el('r-out');
   const qs = reportQuery();
@@ -112,7 +125,7 @@ async function runReport() {
   if (R.which === 'templates') return templatesReport(out);
   if (R.which === 'trial-balance') {
     qs.set('offset', R.offset); qs.set('limit', R.limit);
-    const r = await api('GET', `/api/accounting/trial-balance?${qs}`);
+    const r = await rapi('GET', `/api/accounting/trial-balance?${qs}`);
     if (!r.ok) return fail(r);
     const t = r.body;
     out.innerHTML = table([
@@ -134,7 +147,7 @@ async function runReport() {
   }
 
   if (R.which === 'balance-sheet') {
-    const r = await api('GET', `/api/reports/balance-sheet?${qs}`);
+    const r = await rapi('GET', `/api/reports/balance-sheet?${qs}`);
     if (!r.ok) return fail(r);
     const b = r.body;
     const block = (title, rows, total) => card(title, table([
@@ -150,7 +163,7 @@ async function runReport() {
   }
 
   if (R.which === 'income-statement') {
-    const r = await api('GET', `/api/reports/income-statement?${qs}`);
+    const r = await rapi('GET', `/api/reports/income-statement?${qs}`);
     if (!r.ok) return fail(r);
     const s = r.body;
     out.innerHTML = `<div class="grid">
@@ -168,7 +181,7 @@ async function runReport() {
   }
 
   if (R.which === 'portfolio-at-risk') {
-    const r = await api('GET', `/api/reports/portfolio-at-risk?${qs}`);
+    const r = await rapi('GET', `/api/reports/portfolio-at-risk?${qs}`);
     if (!r.ok) return fail(r);
     const p = r.body;
     out.innerHTML = sourceNote(p) + `<div class="grid">
@@ -188,7 +201,7 @@ async function runReport() {
 
   if (R.which === 'par-loans') {
     qs.set('offset', R.offset); qs.set('limit', R.limit);
-    const r = await api('GET', `/api/reports/portfolio-at-risk/loans?${qs}`);
+    const r = await rapi('GET', `/api/reports/portfolio-at-risk/loans?${qs}`);
     if (!r.ok) return fail(r);
     const p = r.body;
     out.innerHTML = table([
@@ -206,7 +219,7 @@ async function runReport() {
   }
 
   if (R.which === 'risk') {
-    const r = await api('GET', `/api/reports/risk?${qs}`);
+    const r = await rapi('GET', `/api/reports/risk?${qs}`);
     if (!r.ok) return fail(r);
     const k = r.body;
     out.innerHTML = sourceNote(k) + table([
@@ -226,14 +239,14 @@ async function runReport() {
   }
 
   if (R.which === 'indicators') {
-    const r = await api('GET', `/api/reports/indicators?${qs}`);
+    const r = await rapi('GET', `/api/reports/indicators?${qs}`);
     if (!r.ok) return fail(r);
     out.innerHTML = indicatorCards(r.body.indicators);
     return;
   }
 
   if (R.which === 'portfolio') {
-    const r = await api('GET', `/api/reports/portfolio?${qs}`);
+    const r = await rapi('GET', `/api/reports/portfolio?${qs}`);
     if (!r.ok) return fail(r);
     const p = r.body;
     out.innerHTML = card('Overview', `<dl class="kv">
@@ -255,7 +268,7 @@ async function runReport() {
   }
 
   if (R.which === 'organization') {
-    const r = await api('GET', '/api/reports/organization');
+    const r = await rapi('GET', '/api/reports/organization');
     if (!r.ok) return fail(r);
     const o = r.body;
     const cols = [{ label: 'Members', num: true, key: 'members' }, { label: 'Borrowers', num: true, key: 'borrowers' },
@@ -268,7 +281,7 @@ async function runReport() {
   }
 
   if (R.which === 'earnings') {
-    const r = await api('GET', `/api/reports/earnings?${qs}`);
+    const r = await rapi('GET', `/api/reports/earnings?${qs}`);
     if (!r.ok) return fail(r);
     const e = r.body;
     out.innerHTML = table([
@@ -279,7 +292,7 @@ async function runReport() {
   }
 
   if (R.which === 'cashflow') {
-    const r = await api('GET', `/api/reports/cashflow?${qs}`);
+    const r = await rapi('GET', `/api/reports/cashflow?${qs}`);
     if (!r.ok) return fail(r);
     const f = r.body;
     const b = f.balanceChanges;
@@ -296,7 +309,7 @@ async function runReport() {
   }
 
   if (R.which === 'outreach') {
-    const r = await api('GET', `/api/reports/outreach?${qs}`);
+    const r = await rapi('GET', `/api/reports/outreach?${qs}`);
     if (!r.ok) return fail(r);
     const o = r.body;
     out.innerHTML = card('Outreach', `<dl class="kv">
@@ -339,7 +352,7 @@ async function runReport() {
     return;
   }
 
-  const r = await api('GET', `/api/reports/prudential?${qs}`);
+  const r = await rapi('GET', `/api/reports/prudential?${qs}`);
   if (!r.ok) return fail(r);
   const p = r.body;
   out.innerHTML = `<p class="notice">${esc(p.disclaimer)}</p>` + table([

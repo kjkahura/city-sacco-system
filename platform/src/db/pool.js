@@ -39,6 +39,48 @@ pool.on('error', (err) => {
   console.error('[pg] idle client error', err.message);
 });
 
+/**
+ * Two optional pools beside the main one, both off unless set (docs/deploy.md,
+ * "Scaling the database"):
+ *
+ * - directPool: a direct connection to the primary for the few places that
+ *   hold a session-level advisory lock across transactions (the scheduler,
+ *   migrations, sandbox jobs). Behind a pooler in transaction mode
+ *   (PgBouncer, Cloud SQL managed connection pooling) a session lock would be
+ *   left on a server connection another client then uses, so those places
+ *   need a connection of their own. PG_DIRECT_HOST (and PG_DIRECT_PORT) name
+ *   it; unset, they use the main pool, as before.
+ * - replicaPool: a read replica for reports, the data extract and the
+ *   dashboard indicators (db/tenantContext withTenantReport). PG_REPLICA_HOST
+ *   (and PG_REPLICA_PORT) name it; unset, those read the primary, as before.
+ */
+const side = (host, port, max, name) => {
+  const p = new Pool({
+    host,
+    port: Number(port || process.env.PGPORT || 5432),
+    user: process.env.PGUSER || 'postgres',
+    password: process.env.PGPASSWORD || undefined,
+    database: process.env.PGDATABASE || 'sacco',
+    max,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 5_000,
+    application_name: name,
+  });
+  p.on('error', (err) => console.error(`[pg] ${name} idle client error`, err.message));
+  return p;
+};
+const directPool = process.env.PG_DIRECT_HOST
+  ? side(process.env.PG_DIRECT_HOST, process.env.PG_DIRECT_PORT, Number(process.env.PGPOOL_DIRECT_MAX || 3), 'sacco-platform-direct')
+  : pool;
+const replicaPool = process.env.PG_REPLICA_HOST
+  ? side(process.env.PG_REPLICA_HOST, process.env.PG_REPLICA_PORT, Number(process.env.PGPOOL_REPLICA_MAX || 10), 'sacco-platform-replica')
+  : null;
+
+/** Close every pool (tests and one-off scripts). */
+async function endAll() {
+  await Promise.all([pool, directPool !== pool ? directPool : null, replicaPool].filter(Boolean).map((p) => p.end().catch(() => {})));
+}
+
 /** Query against the platform schema. */
 async function query(text, params) {
   const client = await pool.connect();
@@ -67,4 +109,4 @@ async function transaction(fn) {
   }
 }
 
-module.exports = { pool, query, transaction };
+module.exports = { pool, directPool, replicaPool, endAll, query, transaction };

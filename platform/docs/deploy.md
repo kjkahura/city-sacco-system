@@ -53,10 +53,12 @@ gcloud services enable run.googleapis.com sqladmin.googleapis.com artifactregist
 # Images
 gcloud artifacts repositories create sacco --repository-format=docker --location="$REGION"
 
-# Database: PostgreSQL 16, daily backups at 23:00 UTC, point-in-time recovery
+# Database: PostgreSQL 16, daily backups at 23:00 UTC, point-in-time recovery, a standby in a
+# second zone (high availability, see "The database" below) and Query Insights
 gcloud sql instances create sacco-db --database-version=POSTGRES_16 --region="$REGION" \
   --edition=ENTERPRISE --tier=db-custom-1-3840 --storage-auto-increase \
-  --backup-start-time=23:00 --enable-point-in-time-recovery
+  --backup-start-time=23:00 --enable-point-in-time-recovery \
+  --availability-type=REGIONAL --insights-config-query-insights-enabled
 gcloud sql databases create sacco --instance=sacco-db
 
 # Secrets, generated here
@@ -238,11 +240,73 @@ To go back, run `gcloud compute url-maps import` with a map that has only `defau
   - migrations only move forward;
   - to undo one, restore the instance to a point in time before the deploy (Cloud SQL > Backups > point-in-time recovery). This restores every SACCO's data to that time, so it is the last resort.
 
+## The database
+
+The design behind these steps (consistency, locking, the replica, payments) is in `docs/data-architecture.md`.
+
+### High availability and failover
+
+- **What it is:** with `--availability-type=REGIONAL` (section 2), Cloud SQL keeps a standby in a second zone of the region and fails over to it on its own when the primary's zone fails. The address does not change, so the platform needs no new setting. Google's documentation gives about sixty seconds without the database during a failover.
+- **Cost:** the standby is billed like the primary, so the instance costs about twice as much.
+- **An instance created without it:** `gcloud sql instances patch sacco-db --availability-type=REGIONAL`. This restarts the instance (usually a few minutes; longer with a large disk), so do it out of hours.
+- **What the platform does during a failover:**
+  - open connections are closed; requests in flight fail with a database error and their transactions are rolled back, so nothing is half posted;
+  - new requests reconnect through the same address once the standby is up;
+  - a client that sent `Idempotency-Key` can repeat a POST safely.
+- **Rehearse it on staging** before real money, and write the result in `docs/incident-response.md`:
+  1. keep a few requests running (sign in to the console and open a report, or run `node test/load/postings.js` against staging, below);
+  2. `gcloud sql instances failover sacco-db`;
+  3. note how long requests fail, and check `/health` comes back without a restart of the service;
+  4. run `npm run cli ledger:verify -- --slug <a test SACCO>` to confirm the books still agree.
+
+### Scaling the database
+
+- **Connections:** every instance of the service opens up to `PGPOOL_MAX` connections (10 in the deploy workflow), and each job running at the same time opens its own. `npm run cli db:connections -- --instances N --pool-max 10 --jobs 3` reads the instance's `max_connections`, shows what is open, and says whether N instances and the jobs fit under 80% of it. Run it before raising `--max-instances`.
+- **A connection pooler** when they do not fit:
+  - Cloud SQL managed connection pooling (Enterprise Plus edition only) or PgBouncer, in transaction mode;
+  - the platform works with transaction mode: every setting it makes is `SET LOCAL` and ends with the transaction;
+  - three places hold a session advisory lock across transactions (the scheduler, migrations, sandbox jobs), which transaction mode does not allow. Set `PG_DIRECT_HOST` (and `PG_DIRECT_PORT`) to the instance itself, not the pooler, and those use a small pool of their own (`PGPOOL_DIRECT_MAX`, default 3).
+- **A read replica for reports:**
+  1. `gcloud sql instances create sacco-db-replica --master-instance-name=sacco-db --region="$REGION" --database-flags=hot_standby_feedback=on`. Without the flag a long report on the replica can be cancelled while the replica applies the primary's changes (the platform then reads that report from the primary). With it the primary keeps old row versions a little longer for the replica's sake, so watch `db:bloat`;
+  2. set the repository variable `CLOUD_SQL_REPLICA` to its connection name (`PROJECT:REGION:sacco-db-replica`) and deploy. The service then reads reports, the trial balance and the dashboard indicators from the replica (`PG_REPLICA_HOST`).
+  - Postings, balances and everything a posting reads stay on the primary. The data extract also stays on the primary: its cursor needs the primary's view of transactions still open.
+  - A report from the replica answers with `Data-As-At` and `Data-Source: replica`; the console shows "Includes changes up to ..." above it, and exports carry a "Data as at" line. Google describes a replica as reflecting the primary in almost real time.
+  - Reports read the primary when the replica cannot be reached (it is then skipped for 30 seconds), is more than `REPLICA_MAX_LAG_SECONDS` (default 60) behind, or cancels a report's query.
+- **Retries on conflicts:** a request that PostgreSQL ends to break a deadlock (or a serialization conflict) is run again up to twice before the caller gets `409 CONFLICT_TRY_AGAIN`. The repository variable `CONFLICT_RETRIES` changes the count; `0` turns it off.
+- **Migrations that rebuild a key:** tenant migration 052 rebuilds the primary key of the two daily rollup tables, which locks them while the index is built. On a SACCO with a large ledger, deploy it outside business hours; a migration that cannot get its lock within 5 seconds fails for that SACCO, the migration job reports it and the deploy stops before the new service starts; run the deploy again when the SACCO is quiet.
+- **Moving a SACCO to another instance** is not built yet; the path is in `docs/data-architecture.md`, "Outgrowing one instance".
+
+### Watching the database
+
+- **Query Insights** is on from section 2. On an instance created without it: `gcloud sql instances patch sacco-db --insights-config-query-insights-enabled` (older maintenance versions restart the instance). It shows the slowest statements in the console under Cloud SQL > Query insights.
+- **The heaviest statements from the command line:** run `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;` once as the `postgres` user, then `npm run cli db:top-queries`.
+- **Before adding an index:** run the statement with `EXPLAIN (ANALYZE, BUFFERS)` on staging with realistic data, and add an index (a covering one with `INCLUDE` where the plan shows a heap lookup per row) only when the plan shows the need. Write the measurement in the migration's comment.
+- **Dead rows:** `npm run cli db:bloat` lists the tables updated many times a day (balances, the daily rollups, sessions, the outbox) in every SACCO, with their dead rows and last autovacuum, and marks with `LOOK` those over 10,000 dead rows and 20% of the table. Check it monthly at first. If a table stays marked, lower its fillfactor or tighten its autovacuum in a new migration, with the reading that justified it.
+
+### Load testing
+
+`node test/load/postings.js --workers 16 --seconds 30` (or `npm run load:postings -- --workers 16`) runs concurrent cash deposits into different members' accounts in a throwaway SACCO (`loadtest`) it creates and removes, and prints postings per second, latency and the share of time spent waiting on locks. It touches no other SACCO; the database must already be migrated. Point `PG*` at staging to measure there, never at production. Measured on a 2-core test machine in October 2026, before and after the daily rollup was spread over slots (tenant migration 052):
+
+| Workers | Postings a second | 95th percentile | Time waiting on locks |
+| --- | --- | --- | --- |
+| 8, one rollup row | 138 | 159 ms | 88% |
+| 8, sixteen slots | 207 | 58 ms | 4% |
+| 16, one rollup row | 139 | 378 ms | 87% |
+| 16, sixteen slots | 209 | 102 ms | under 1% |
+
+### Choosing the region
+
+- **Latency:** the service and the database are in `europe-west1` (Belgium). Every request from Kenya crosses to Europe and back, which adds a delay each staff member feels on every screen.
+- **Closer:** `africa-south1` (Johannesburg) offers both Cloud Run and Cloud SQL. Measure from Nairobi before moving: create a small test service in each region and time requests from a SACCO's own connection.
+- **The law:** the Data Protection (General) Regulations, 2021, regulation 26, require processing in Kenya (or at least one serving copy in a Kenyan data centre) only for listed purposes of strategic interest to the state: civil registration and identity, elections, public finances administered by state organs, systems designated as protected computer systems under section 20 of the Computer Misuse and Cybercrime Act, education, and primary and secondary health care. A SACCO's member records are not on the list, unless its system is designated a protected computer system. Transfers out of Kenya still need one of the Act's grounds (appropriate safeguards, an adequacy decision, necessity, or consent). Confirm this with counsel during the ODPC registration (`docs/audits/NEXT.md`, section 3).
+- **Moving** the region is a new project setup (section 2 with another `REGION`), a restore of the database, and a change of the repository variable `GCP_REGION`.
+
 ## Limits of this setup
 
 - **Request time:** Firebase Hosting ends any request after 60 seconds. Long work (imports, the end of day) already runs in the background or as a job. A very large synchronous export could hit the limit.
 - **One instance:** the service runs at most one instance (`--max-instances 1`), because without Redis the rate limits are counted in memory per instance. To run more:
   - add a Redis instance (Memorystore, reached through a VPC connector) and set `REDIS_URL`;
+  - check the connections fit (`npm run cli db:connections -- --instances N`, "Scaling the database");
   - then raise `--max-instances`.
 - **Cold starts:** with `--min-instances 0` the first request after an idle spell waits for the container to start (a few seconds). Set `--min-instances 1` to avoid that, at the cost of an always-on instance.
 - **Backups:**
