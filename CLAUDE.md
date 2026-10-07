@@ -4,9 +4,11 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 
 ## Where the code is
 
-Everything live is under `platform/`: the API in `src/`, the back office in
-`public/`, the member portal in `portal/`. The repository root holds only
-specification markdown.
+The core banking platform is under `platform/`: the API in `src/`, the back office in
+`public/`, the member portal in `portal/`. The climate-adaptation lending layer for
+the ARCAFIM pilot is under `layer/`: a separate service that reaches the platform only
+through its API and webhooks, never its database or code (`layer/README.md`). The
+repository root otherwise holds specification markdown.
 
 Read `platform/docs/ARCHITECTURE-ESSENTIALS.md` first: two pages on tenancy, money,
 access, requests, audit, migrations and tests. Then read the sections of

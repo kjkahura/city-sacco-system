@@ -39,7 +39,19 @@ From `docs/audits/security-assessment-2026-10.md`, "What remains".
 - [ ] **A parallel run**: at least one month-end closed in both systems with matching balances, before switching over.
 - [ ] **Kenya Data Protection Act**: registration with the Office of the Data Protection Commissioner, and a data processing agreement with each SACCO (the platform operator is their processor).
 
-## 4. Product gaps (README, "Not done yet")
+## 4. ARCAFIM pilot (build plan in the project: `claude/arcafim-pilot-build-plan.md`)
+
+- [x] The tagger: `layer/`, with the draft taxonomy, redaction, keyword and Claude classifiers, the City SACCO adapter, the webhook and the back-book run.
+- [ ] Equity Bank's adaptation taxonomy and reporting template, to replace the draft (`layer/config/arcafim-taxonomy.json`).
+- [ ] Choose the model (`ARCAFIM_MODEL`) and put the Anthropic API key in Secret Manager; until then the keyword classifier tags.
+- [ ] Deploy the layer as its own Cloud Run service for the first pilot SACCO (`layer/README.md`, "Setting it up for a SACCO").
+- [ ] The review app: a tab on the loan page where credit staff confirm or correct the tag (measures the 90% accuracy target).
+- [ ] In the platform: member county as data, and a rule refusing approval of an ARCAFIM-product loan until it is tagged eligible.
+- [ ] The monthly impact reporter, in Equity's and IFAD's template.
+- [ ] Which core banking systems the three pilot SACCOs use; an adapter for each that is not this platform.
+- [ ] Climate-aware scoring (shadow mode) and member advisory (months 4 to 6).
+
+## 5. Product gaps (README, "Not done yet")
 
 - [ ] Dividends before provisioning: enforce the order, or warn.
 - [ ] Early settlement of fixed-term loans: an option to recover more than accrued interest.

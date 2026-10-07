@@ -1,0 +1,14 @@
+{
+  "name": "sacco-climate-layer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ARCAFIM climate-adaptation lending layer: tags SACCO loans against the adaptation taxonomy through the core banking API.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "cli": "node bin/layer.js",
+    "test": "node test/layer.test.js"
+  },
+  "engines": { "node": ">=22" },
+  "license": "UNLICENSED"
+}

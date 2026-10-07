@@ -122,6 +122,8 @@ jobs:
       # The backup tests call pg_dump, which must be at least the server's version (16).
       - run: pg_dump --version
       - run: npm test
+      # The climate-adaptation layer (layer/), tested against this platform in-process.
+      - run: node ../layer/test/layer.test.js
 
   deploy:
     needs: [test, scope]

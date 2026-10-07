@@ -85,6 +85,12 @@ The short version of `platform/README.md`, for a person or a coding agent starti
 - **Date-dependent suites:** some fail on certain calendar dates whatever the change, so compare against the commit before yours.
 - **Security changes** get a check in `test/hardening.test.js`.
 
+## The climate-adaptation layer (`layer/README.md`)
+
+- **What it is:** a separate service for the ARCAFIM pilot. It tags new loans against the adaptation taxonomy, from the `LOAN_CREATED` webhook, and stores the tag in the `_arcafim` loan custom field set.
+- **How it reaches the platform:** only through the API, with a narrow API key, and the signed webhook; never the database or the platform's code. Another core banking system needs only another adapter.
+- **Rules:** every tag awaits review by credit staff; a reviewed tag is never overwritten; only the redacted purpose and notes reach a model.
+
 ## Where the rest is
 
 | Topic | Where |

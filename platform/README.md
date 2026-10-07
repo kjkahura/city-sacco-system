@@ -28,6 +28,10 @@ container (`Dockerfile`) runs on Google Cloud Run in `europe-west1` with
 Cloud SQL for PostgreSQL 16, Firebase Hosting (`firebase.json`) serves it, and
 Cloudflare holds the custom domain's DNS.
 
+## The climate-adaptation layer
+
+The ARCAFIM pilot's AI layer lives beside the platform in `layer/` (its own README, service and tests). It uses only what any integrator has: an API consumer with a narrow role, the `LOAN_CREATED` webhook, and a loan custom field set (`_arcafim`) where it writes each loan's adaptation category for credit staff to review.
+
 ## The front ends, deployed apart from the API
 
 - **What they are:** the console (`public/`) and the member portal (`portal/`) are static files: plain JavaScript modules, no build step. They depend on the server for one thing only, the HTTP API under `/api` on their own origin.

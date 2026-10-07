@@ -1,0 +1,114 @@
+{
+  "version": "draft-2026-10",
+  "status": "DRAFT",
+  "note": "A working draft from the categories named in the concept note. Replace it with Equity Bank's ARCAFIM adaptation taxonomy when it is shared, and raise the version: loans tagged under an older version are tagged again. Keywords are phrases, chosen so ordinary words (processing fee, cooler box, warehouse rent) do not match; the keyword classifier is the fallback, and every tag is reviewed.",
+  "categories": [
+    {
+      "id": "irrigation",
+      "label": "Irrigation and water",
+      "description": "Irrigation equipment, water pumps, drip kits, boreholes, wells, water tanks and water harvesting for farming or livestock.",
+      "keywords": [
+        "irrigation",
+        "drip",
+        "sprinkler",
+        "water pump",
+        "borehole",
+        "water tank",
+        "water harvesting",
+        "dam",
+        "pond",
+        "umwagiliaji",
+        "kisima",
+        "tanki la maji",
+        "water well",
+        "pampu ya maji",
+        "water pan"
+      ]
+    },
+    {
+      "id": "storage",
+      "label": "Post-harvest storage",
+      "description": "Grain stores, hermetic bags, silos, cold rooms and drying equipment that reduce post-harvest loss.",
+      "keywords": [
+        "grain store",
+        "produce store",
+        "grain storage",
+        "post-harvest",
+        "post harvest",
+        "silo",
+        "hermetic",
+        "cold room",
+        "cold storage",
+        "milk cooler",
+        "solar dryer",
+        "grain dryer",
+        "drying rack",
+        "grain warehouse",
+        "ghala la nafaka",
+        "hifadhi ya nafaka"
+      ]
+    },
+    {
+      "id": "renewable_energy",
+      "label": "Renewable energy",
+      "description": "Solar pumps, solar dryers and panels, biogas and clean cooking used in farming or a rural enterprise.",
+      "keywords": [
+        "solar",
+        "biogas",
+        "renewable",
+        "photovoltaic",
+        "clean cooking",
+        "nishati ya jua"
+      ]
+    },
+    {
+      "id": "agro_processing",
+      "label": "Agro-processing",
+      "description": "Milling, processing, value addition and packaging of farm produce.",
+      "keywords": [
+        "agro-processing",
+        "agro processing",
+        "food processing",
+        "milk processing",
+        "dairy processing",
+        "fruit processing",
+        "value addition",
+        "posho mill",
+        "maize mill",
+        "grain mill",
+        "milling machine",
+        "oil press",
+        "kusindika",
+        "mashine ya kusaga"
+      ]
+    },
+    {
+      "id": "climate_smart_inputs",
+      "label": "Climate-smart inputs and practices",
+      "description": "Drought-tolerant seed, greenhouses, shade nets, conservation agriculture, agroforestry and resilient livestock breeds.",
+      "keywords": [
+        "drought tolerant",
+        "drought-tolerant",
+        "drought resistant",
+        "greenhouse",
+        "shade net",
+        "conservation agriculture",
+        "agroforestry",
+        "tree seedlings",
+        "certified seed",
+        "improved seed",
+        "fodder",
+        "silage",
+        "hay",
+        "zero grazing",
+        "pasture",
+        "mbegu bora"
+      ]
+    }
+  ],
+  "notAdaptation": {
+    "id": "not_adaptation",
+    "label": "Not climate adaptation",
+    "description": "School fees, consumption, medical bills, household goods, debt consolidation and business stock with no adaptation purpose."
+  }
+}

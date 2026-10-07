@@ -1,0 +1,53 @@
+# Test the climate-adaptation layer (layer/) when only it changes. It never deploys
+# anything: the platform's own workflow (deploy.yml) also runs this test, and the
+# layer is deployed by hand (layer/README.md) until its pilot is live.
+
+name: Layer tests
+
+on:
+  push:
+    branches: [main]
+    paths: ['layer/**', '.github/workflows/layer.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: platform
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sacco
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: sacco
+      JWT_SECRET: ci-only-secret-not-used-anywhere-else
+      NODE_ENV: test
+      SCHEDULER: 'off'
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: platform/package-lock.json
+      # The layer has no dependencies of its own; its test runs the platform in-process.
+      - run: npm ci
+      - run: node ../layer/test/layer.test.js
