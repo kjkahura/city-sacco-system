@@ -13,9 +13,14 @@ const { err, round2 } = acct;
  * constraint is NULL (unconstrained) or {"match": "ALL"|"ANY", "filters":
  * [...]} with filters of three kinds:
  *
- *   {"type": "AMOUNT", "min": 0, "max": 100000}
+ *   {"type": "AMOUNT", "min": 0, "max": 100000}       (inclusive; either may be null)
  *   {"type": "TYPE", "values": ["REPAYMENT", "DISBURSEMENT"]}
  *   {"type": "PRODUCT", "values": ["NL01"]}
+ *   {"type": "AMOUNT" | "TYPE" | "PRODUCT", "operator": "EMPTY" | "NOT_EMPTY"}
+ *
+ * Every transaction has an amount, a type and a product, so EMPTY never
+ * matches and NOT_EMPTY always does (the reference platform's operators;
+ * ./channelConfig maps the rest of them onto these filters).
  *
  * Limited usage with no filters means the channel takes none of those
  * transactions. The default channel (cash) cannot be deleted or
@@ -24,6 +29,10 @@ const { err, round2 } = acct;
  */
 
 const TYPES = ['CASH', 'MOBILE', 'TRANSFER', 'CHEQUE', 'INTERNAL', 'PAYROLL'];
+// The channels the platform posts through itself: transfers between deposit
+// accounts and dividend payouts (internal), settlement accounts (settlement)
+// and loan transfers (transfer). Like the default, they stay active.
+const SYSTEM = ['internal', 'settlement', 'transfer'];
 const ROLE = require('./roles');
 const { recordAudit } = require('../lib/auditLog');
 const TRANSACTION_TYPES = {
@@ -41,23 +50,38 @@ function normConstraints(side, v) {
   if (typeof v !== 'object') throw err(`${side}_CONSTRAINTS_ARE_NULL_OR_AN_OBJECT`, 400);
   const match = v.match || 'ALL';
   if (!['ALL', 'ANY'].includes(match)) throw err('CONSTRAINT_MATCH_IS_ALL_OR_ANY', 400);
+  if (v.filters !== undefined && !Array.isArray(v.filters)) throw err('CONSTRAINT_FILTERS_IS_A_LIST', 400);
   const filters = (v.filters || []).map((f) => {
+    if (!f || typeof f !== 'object') throw err('A_CONSTRAINT_FILTER_IS_AN_OBJECT', 400);
     const type = String(f.type || '').toUpperCase();
+    if (f.operator !== undefined && f.operator !== null) {
+      const operator = String(f.operator).toUpperCase();
+      if (!['EMPTY', 'NOT_EMPTY'].includes(operator)) throw err('A_FILTER_OPERATOR_IS_EMPTY_OR_NOT_EMPTY', 400);
+      if (!['AMOUNT', 'TYPE', 'PRODUCT'].includes(type)) throw err('FILTER_TYPE_IS_AMOUNT_TYPE_OR_PRODUCT', 400);
+      return { type, operator };
+    }
     if (type === 'AMOUNT') {
-      const min = f.min === undefined || f.min === null || f.min === '' ? null : round2(f.min);
-      const max = f.max === undefined || f.max === null || f.max === '' ? null : round2(f.max);
+      const amount = (x, what) => {
+        if (x === undefined || x === null || x === '') return null;
+        const n = Number(x);
+        if (!Number.isFinite(n) || n < 0) throw err(`AMOUNT_FILTER_${what}_IS_A_NUMBER_NOT_BELOW_ZERO`, 400);
+        return round2(n);
+      };
+      const min = amount(f.min, 'MIN');
+      const max = amount(f.max, 'MAX');
       if (min === null && max === null) throw err('AN_AMOUNT_FILTER_NEEDS_A_MIN_OR_A_MAX', 400);
       if (min !== null && max !== null && min > max) throw err('AMOUNT_FILTER_MIN_ABOVE_MAX', 400);
       return { type, min, max };
     }
     if (type === 'TYPE') {
-      const values = (f.values || []).map((x) => String(x).toUpperCase());
+      if (!Array.isArray(f.values)) throw err(`TYPE_FILTER_VALUES_ARE: ${TRANSACTION_TYPES[side].join(', ')}`, 400);
+      const values = [...new Set(f.values.map((x) => String(x).toUpperCase()))];
       const bad = values.filter((x) => !TRANSACTION_TYPES[side].includes(x));
       if (!values.length || bad.length) throw err(`TYPE_FILTER_VALUES_ARE: ${TRANSACTION_TYPES[side].join(', ')}`, 400);
       return { type, values };
     }
     if (type === 'PRODUCT') {
-      const values = (f.values || []).map(String);
+      const values = Array.isArray(f.values) ? [...new Set(f.values.map(String))] : [];
       if (!values.length) throw err('A_PRODUCT_FILTER_NEEDS_PRODUCTS', 400);
       return { type, values };
     }
@@ -77,6 +101,21 @@ async function find(c, id) {
   const { rows: [ch] } = await c.query('SELECT * FROM transaction_channels WHERE id = $1', [id]);
   if (!ch) throw err(`UNKNOWN_TRANSACTION_CHANNEL: ${id}`, 404);
   return ch;
+}
+
+/** A product filter names products of its side: loan products for loans, deposit products for deposits. */
+async function assertProducts(c, side, json, before = null) {
+  if (!json) return;
+  const named = (con) => (con ? con.filters.filter((f) => f.type === 'PRODUCT' && !f.operator).flatMap((f) => f.values) : []);
+  const con = typeof json === 'string' ? JSON.parse(json) : json;
+  // Only products new to the channel: one it already names may since have been deleted.
+  const had = new Set(named(before));
+  const ids = [...new Set(named(con))].filter((id) => !had.has(id));
+  if (!ids.length) return;
+  const table = side === 'LOAN' ? 'loan_products' : 'savings_products';
+  const { rows } = await c.query(`SELECT id FROM ${table} WHERE id = ANY($1)`, [ids]);
+  const unknown = ids.filter((id) => !rows.some((r) => r.id === id));
+  if (unknown.length) throw err(`UNKNOWN_${side === 'LOAN' ? 'LOAN' : 'DEPOSIT'}_PRODUCTS: ${unknown.join(', ')}`, 400);
 }
 
 async function assertGl(c, code) {
@@ -118,6 +157,8 @@ function shape(body, creating) {
 async function create(c, body = {}, { createdBy } = {}) {
   const cols = shape(body, true);
   await ROLE.assertKnown(c, cols.usage_roles);
+  await assertProducts(c, 'LOAN', cols.loan_constraints);
+  await assertProducts(c, 'SAVINGS', cols.savings_constraints);
   if (!cols.gl_account_code) throw err('A_CHANNEL_NEEDS_A_GL_ACCOUNT', 400);
   await assertGl(c, cols.gl_account_code);
   const { rows: [n] } = await c.query('SELECT COALESCE(max(sort_order), 0) + 1 AS n FROM transaction_channels');
@@ -135,11 +176,15 @@ async function update(c, id, body = {}, { createdBy } = {}) {
   const before = await find(c, id);
   const cols = shape(body, false);
   await ROLE.assertKnown(c, cols.usage_roles);
+  await assertProducts(c, 'LOAN', cols.loan_constraints, before.loan_constraints);
+  await assertProducts(c, 'SAVINGS', cols.savings_constraints, before.savings_constraints);
   if (cols.gl_account_code !== undefined) {
-    if (!cols.gl_account_code) throw err('A_CHANNEL_NEEDS_A_GL_ACCOUNT', 400);
+    // A channel created without one (the seeded internal channel) may stay without one.
+    if (!cols.gl_account_code && before.gl_account_code) throw err('A_CHANNEL_NEEDS_A_GL_ACCOUNT', 400);
     await assertGl(c, cols.gl_account_code);
   }
   if (before.is_default && cols.is_active === false) throw err('THE_DEFAULT_CHANNEL_CANNOT_BE_DEACTIVATED', 409);
+  if (SYSTEM.includes(before.id) && before.is_active && cols.is_active === false) throw err(`SYSTEM_CHANNEL_CANNOT_BE_DEACTIVATED: the platform posts through ${before.id}`, 409);
   const keys = Object.keys(cols);
   if (!keys.length) throw err('NO_UPDATABLE_FIELDS', 400);
   const { rows: [after] } = await c.query(
@@ -156,6 +201,7 @@ async function update(c, id, body = {}, { createdBy } = {}) {
 async function remove(c, id, { createdBy } = {}) {
   const ch = await find(c, id);
   if (ch.is_default) throw err('THE_DEFAULT_CHANNEL_CANNOT_BE_DELETED', 409);
+  if (SYSTEM.includes(ch.id)) throw err(`SYSTEM_CHANNEL_CANNOT_BE_DELETED: the platform posts through ${ch.id}`, 409);
   const { rows: [u] } = await c.query(
     `SELECT (SELECT count(*) FROM transactions WHERE channel_id = $1) + (SELECT count(*) FROM journal_entries WHERE channel_id = $1) AS n`, [ch.id]);
   if (Number(u.n) > 0) throw err('CHANNEL_HAS_BEEN_USED: deactivate it instead', 409);
@@ -179,6 +225,7 @@ async function rearrange(c, ids, { createdBy } = {}) {
 function passes(con, { type, amount, productId }) {
   if (!con) return true;
   const tests = con.filters.map((f) => {
+    if (f.operator) return f.operator === 'NOT_EMPTY';
     if (f.type === 'AMOUNT') return (f.min === null || amount >= f.min) && (f.max === null || amount <= f.max);
     if (f.type === 'TYPE') return f.values.includes(type);
     return f.values.includes(String(productId));
@@ -207,4 +254,4 @@ async function assertUsable(c, id, { side = null, type = null, amount = 0, produ
   return ch;
 }
 
-module.exports = { list, find, create, update, remove, rearrange, assertUsable, TRANSACTION_TYPES, TYPES };
+module.exports = { list, find, create, update, remove, rearrange, assertUsable, normConstraints, TRANSACTION_TYPES, TYPES, SYSTEM };

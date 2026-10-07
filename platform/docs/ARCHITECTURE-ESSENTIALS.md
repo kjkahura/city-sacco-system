@@ -81,7 +81,7 @@ The short version of `platform/README.md`, for a person or a coding agent starti
 
 - **Setup:** each suite in `test/` is a plain Node script against a real Postgres. It creates its own tenants and prints `N passed, M failed`.
 - **Commands:** `npm test` runs the suites in order. `npm run test:browser` runs the console and portal in a real browser.
-- **Size:** about 3,600 checks across the suites.
+- **Size:** about 3,700 checks across the suites.
 - **Date-dependent suites:** some fail on certain calendar dates whatever the change, so compare against the commit before yours.
 - **Security changes** get a check in `test/hardening.test.js`.
 

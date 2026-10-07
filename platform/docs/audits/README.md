@@ -30,6 +30,7 @@ The same files are kept in the claude.ai project "CoreBanking Service" under `cl
 | 22 | Getting Started and Sandbox | audit in the "Getting Started and Sandbox audit" commit, build in the "Getting Started and Sandbox" commit | [audit](audit-getting-started-and-sandbox.md), [build log](build-log-getting-started-and-sandbox.md) |
 | 23 | Apps | audit in the "Apps audit" commit, build in the "Apps" commit | [audit](audit-apps.md), [build log](build-log-apps.md) |
 | 24 | Security assessment (OWASP Top 10:2025, API Top 10:2023, ASVS 5.0, STRIDE) | review and fixes in the "Security review" commit, the remaining fixes in the "Security hardening follow-up" commit | [assessment](security-assessment-2026-10.md) |
+| 25 | Transaction Channels | audit in the "Transaction Channels audit" commit, build in the "Transaction Channels" commit | [audit](audit-transaction-channels.md), [build log](build-log-transaction-channels.md) |
 
 The open work, from deployment to real members' money, is tracked in [NEXT.md](NEXT.md).
 

@@ -14,6 +14,7 @@ const IDT = require('../domain/idTemplates');
 const CUR = require('../domain/currencies');
 const CF = require('../domain/customFields');
 const CFC = require('../domain/customFieldConfig');
+const CHC = require('../domain/channelConfig');
 const DOCS = require('../domain/productDocuments');
 const eod = require('../ops/eod');
 const { run } = require('../lib/handlers');
@@ -103,6 +104,16 @@ channels.post('/', ...W((c, req) => CH.create(c, req.body || {}, by(req)), 201))
 channels.patch('/:id', ...W((c, req) => CH.update(c, req.params.id, req.body || {}, by(req))));
 channels.delete('/:id', ...W((c, req) => CH.remove(c, req.params.id, by(req))));
 
+// The reference platform's API v2 for channels (../domain/channelConfig), under /organization.
+organization.get('/transactionChannels', ...run((c, req) => CHC.apiList(c, { state: req.query.transactionChannelState || null })));
+organization.get('/transactionChannels/:id', ...run((c, req) => CHC.apiGet(c, req.params.id)));
+organization.post('/transactionChannels', ...W((c, req) => CHC.apiCreate(c, req.body, by(req)), 201));
+organization.put('/transactionChannels/:id', ...W((c, req) => CHC.apiUpdate(c, req.params.id, req.body, by(req))));
+organization.delete('/transactionChannels/:id', ...W(async (c, req, res) => {
+  await CHC.apiDelete(c, req.params.id, by(req));
+  res.status(204).end();
+}));
+
 // --- ID templates ------------------------------------------------------------
 
 const idTemplates = express.Router();
@@ -177,6 +188,13 @@ configuration.get('/customfields.yaml', ...run(async (c, req, res) => {
   res.type(YAML_TYPE).send(await CFC.configurationYaml(c));
 }));
 configuration.get('/customfields/template.yaml', requireAuth(), (req, res) => res.type(YAML_TYPE).send(CFC.template()));
+configuration.get('/transactionchannels.yaml', ...run(async (c, req, res) => {
+  res.type(YAML_TYPE).send(await CHC.configurationYaml(c));
+}));
+configuration.get('/transactionchannels/template.yaml', requireAuth(), (req, res) => res.type(YAML_TYPE).send(CHC.template()));
+configuration.put('/transactionchannels.yaml',
+  express.text({ type: ['application/yaml', 'application/x-yaml', 'text/yaml', 'text/x-yaml', 'text/plain', 'application/vnd.*+yaml'], limit: '1mb' }),
+  ...W((c, req) => CHC.applyConfiguration(c, typeof req.body === 'string' ? req.body : (req.body || {}), by(req))));
 configuration.put('/customfields.yaml',
   express.text({ type: ['application/yaml', 'application/x-yaml', 'text/yaml', 'text/x-yaml', 'text/plain', 'application/vnd.*+yaml'], limit: '2mb' }),
   ...W((c, req) => CFC.applyConfiguration(c, typeof req.body === 'string' ? req.body : (req.body || {}), by(req))));

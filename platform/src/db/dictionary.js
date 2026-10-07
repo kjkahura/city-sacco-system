@@ -442,8 +442,8 @@ const COLUMNS = {
   'transaction_channels.gl_account_code': 'The GL account the channel posts to (gl_accounts.code).',
   'transaction_channels.is_default': 'Whether it is the predefined channel (cash), which cannot be deleted or deactivated.',
   'transaction_channels.usage_roles': 'Roles that may post through it; NULL: all users.',
-  'transaction_channels.loan_constraints': 'Which loan transactions it takes: NULL for all, or {"match", "filters"}.',
-  'transaction_channels.savings_constraints': 'Which deposit transactions it takes: NULL for all, or {"match", "filters"}.',
+  'transaction_channels.loan_constraints': 'Which loan transactions it takes: NULL for all, or {"match", "filters"} (AMOUNT min/max, TYPE and PRODUCT values, or an EMPTY/NOT_EMPTY operator).',
+  'transaction_channels.savings_constraints': 'Which deposit transactions it takes: NULL for all, or {"match", "filters"} (AMOUNT min/max, TYPE and PRODUCT values, or an EMPTY/NOT_EMPTY operator).',
   // custom fields and documents
   'custom_field_definitions.set_id': 'The set (custom_field_sets.id); NULL on guarantors and collateral.',
   'custom_field_definitions.entity': 'The entity the field belongs to, for example MEMBER or LOAN_ACCOUNT.',

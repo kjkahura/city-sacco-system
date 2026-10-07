@@ -20,7 +20,7 @@ what went wrong without them.
 cd platform
 npm install
 npm run migrate      # platform schema, then every tenant
-npm test             # about 3,600 checks in 52 suites; run this after every change
+npm test             # about 3,700 checks in 53 suites; run this after every change
 npm start
 ```
 

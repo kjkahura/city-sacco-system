@@ -367,6 +367,8 @@ src/
     customFields.js    custom field sets, definitions, values, rights, search
     customFieldConfig.js  the reference platform's metadata shapes and
                        configuration as code for custom fields
+    channelConfig.js   transaction channels in the reference platform's
+                       API v2 shape and configuration as code
     dataImport/        the Excel data import: definitions.js, parse.js,
                        execute.js, workbooks.js, lifecycle.js; index.js
                        keeps the one public API
@@ -2262,7 +2264,14 @@ Organization page covers all of it.
   deposit constraints by amount, transaction type and product, matched ALL
   or ANY, are checked on disbursements, repayments, recoveries, deposits and
   withdrawals. The `internal` repayment flag and the `offsetPledge`
-  withdrawal flag are refused from the wire.
+  withdrawal flag are refused from the wire. The channels the platform
+  posts through itself (`internal`, `settlement`, `transfer`) cannot be
+  deleted or deactivated. `/api/organization/transactionChannels` is the
+  reference platform's API v2 for them, with its constraint operators
+  (EQUALS, MORE_THAN, LESS_THAN, BETWEEN, IN, EMPTY, NOT_EMPTY), and
+  `GET`/`PUT /api/configuration/transactionchannels.yaml` its configuration
+  as code (`docs/audits/audit-transaction-channels.md`). The console sets
+  constraints in a form, one row per filter.
 - **ID templates.** `/api/id-templates`: ID type, issuing authority, an input
   mask (# digit, @ letter, $ either), mandatory, allow attachments; a toggle
   for Other documents. Members carry documents

@@ -10,6 +10,7 @@ import { branchDetail } from './accounts.js';
 import { clientsSetup } from './groups.js';
 import { opt } from './products.js';
 import { fieldsCard, groupedEditor, wireFields } from './fields.js';
+import { channelEditor, constraintsText } from './channelEditor.js';
 
 // --------------------------------------------------------------------------
 // Organization (the reference platform's Administration: organization details, branding,
@@ -18,8 +19,6 @@ import { fieldsCard, groupedEditor, wireFields } from './fields.js';
 // --------------------------------------------------------------------------
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const listOf = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter(Boolean) : []);
-const rolesOf = (v) => { const l = listOf(v).map((x) => x.toUpperCase()); return l.length ? l : null; };
 
 export async function fileBase64(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -140,7 +139,7 @@ export async function orgView(filter) {
   const manage = ['TENANT_ADMIN', 'MANAGER'].includes(S.user.role);
   const [org, eodS, branches, centres, cal, chans, idt, rates, curs] = await Promise.all([
     api('GET', '/api/organization'), api('GET', '/api/organization/eod'), api('GET', '/api/branches'), api('GET', '/api/centres'),
-    api('GET', '/api/holidays'), api('GET', '/api/transaction-channels'), api('GET', '/api/id-templates'), api('GET', '/api/index-rates'),
+    api('GET', '/api/holidays'), api('GET', '/api/organization/transactionChannels'), api('GET', '/api/id-templates'), api('GET', '/api/index-rates'),
     api('GET', '/api/currencies'),
   ]);
   const fieldsHtml = await fieldsCard(manage);
@@ -149,7 +148,6 @@ export async function orgView(filter) {
   const e = eodS.body || {};
   const c = cal.body || { general: [], branches: [], currencies: [], nonWorkingDays: [] };
   const holidayRows = [...c.general, ...c.branches, ...c.currencies];
-  const con = (x) => (!x ? 'unconstrained' : `${x.match}: ${x.filters.map((f) => (f.type === 'AMOUNT' ? `amount ${f.min ?? ''}–${f.max ?? ''}` : `${f.type.toLowerCase()} ${f.values.join('/')}`)).join(', ') || 'none'}`);
   view().innerHTML = `
     <div class="toolbar"><h1>Organization</h1></div>
     <p class="hint">The organization's setup, after the reference platform's Managing your Organization pages. Changes are audited.</p>
@@ -203,10 +201,10 @@ export async function orgView(filter) {
   ], holidayRows, { empty: 'No holidays' })}</div>
     ${manage ? '<button class="secondary" id="holiday-add">Add holiday</button> <button class="secondary" id="nwd-edit">Non-working days</button> <button class="secondary" id="calendar-sync">Sync open loans</button>' : ''}`)}
     ${card('Transaction channels', `<div id="org-channels">${table([
-    { label: '#', num: true, key: 'sort_order' }, { label: 'ID', key: 'id' }, { label: 'Name', key: 'name' }, { label: 'GL', key: 'gl_account_code' },
-    { label: 'Roles', value: (x) => (x.usage_roles ? x.usage_roles.join(', ') : 'all users') },
-    { label: 'Loans', value: (x) => con(x.loan_constraints) }, { label: 'Deposits', value: (x) => con(x.savings_constraints) },
-    { label: 'Active', value: (x) => (x.is_active ? (x.is_default ? 'yes (default)' : 'yes') : 'no') },
+    { label: '#', num: true, value: (x) => (chans.body || []).indexOf(x) + 1 }, { label: 'ID', key: 'id' }, { label: 'Name', key: 'name' }, { label: 'GL', key: 'glAccount' },
+    { label: 'Roles', value: (x) => (x.availableForAll ? 'all users' : x.usageRights.join(', ')) },
+    { label: 'Loans', value: (x) => constraintsText(x.loanConstraints) }, { label: 'Deposits', value: (x) => constraintsText(x.depositConstraints) },
+    { label: 'Active', value: (x) => (x.state === 'ACTIVE' ? (x.isDefault ? 'yes (default)' : 'yes') : 'no') },
     { label: '', html: true, value: (x) => (manage ? `<button class="link" data-channel="${esc(x.id)}">edit</button> <button class="link" data-channel-up="${esc(x.id)}">up</button>` : '') },
   ], chans.body || [], { empty: 'No channels' })}</div>
     ${manage ? '<button class="secondary" id="channel-add">New channel</button>' : ''}`)}
@@ -327,32 +325,16 @@ export async function orgView(filter) {
     done(await api('PUT', '/api/holidays/non-working-days', { days: Object.entries(d).filter(([, v]) => v === 'non-working').map(([k]) => Number(k)) }), 'Non-working days saved');
   });
   on('#calendar-sync', async () => { const res = await api('POST', '/api/holidays/sync', {}); done(res, res.ok ? `${res.body.installments || 0} installment(s) re-dated` : ''); });
-  const channelForm = async (x = {}) => ask([
-    ...(x.id ? [] : [{ label: 'ID (no spaces)', name: 'id' }]),
-    { label: 'Name', name: 'name', value: x.name || '' },
-    { label: 'Type', name: 'channelType', options: ['CASH', 'MOBILE', 'TRANSFER', 'CHEQUE', 'INTERNAL', 'PAYROLL'], value: x.channel_type || 'CASH' },
-    { label: 'GL account', name: 'glAccount', value: x.gl_account_code || '' },
-    opt({ label: 'Roles that may use it (comma separated; blank: all users)', name: 'usageRoles', value: (x.usage_roles || []).join(', ') }),
-    { label: 'Loan constraints (JSON, blank: unconstrained)', name: 'loanConstraints', type: 'textarea', rows: 3, required: false,
-      value: x.loan_constraints ? JSON.stringify(x.loan_constraints) : '', hint: '{"match":"ALL","filters":[{"type":"AMOUNT","max":50000},{"type":"TYPE","values":["REPAYMENT"]}]}' },
-    { label: 'Deposit constraints (JSON, blank: unconstrained)', name: 'savingsConstraints', type: 'textarea', rows: 3, required: false,
-      value: x.savings_constraints ? JSON.stringify(x.savings_constraints) : '', hint: 'Types DEPOSIT, WITHDRAWAL; products by ID' },
-    ...(x.id ? [{ label: 'Active', name: 'isActive', options: ['true', 'false'], value: String(x.is_active) }] : []),
-  ], x.id ? `Channel ${x.id}` : 'New channel');
-  const channelBody = (d) => {
-    const parse = (v) => (v ? JSON.parse(v) : null);
-    return { ...d, usageRoles: rolesOf(d.usageRoles), loanConstraints: parse(d.loanConstraints), savingsConstraints: parse(d.savingsConstraints),
-      ...(d.isActive !== undefined ? { isActive: d.isActive === 'true' } : {}) };
-  };
   on('#channel-add', async () => {
-    const d = await channelForm();
+    const d = await channelEditor();
     if (!d) return;
-    try { done(await api('POST', '/api/transaction-channels', channelBody(d)), 'Channel created'); } catch { toast('Constraints must be JSON', true); }
+    done(await api('POST', '/api/organization/transactionChannels', d), 'Channel created');
   });
   each('channel', async (id) => {
-    const d = await channelForm((chans.body || []).find((x) => x.id === id));
+    const d = await channelEditor((chans.body || []).find((x) => x.id === id));
     if (!d) return;
-    try { done(await api('PATCH', `/api/transaction-channels/${id}`, channelBody(d)), 'Channel saved'); } catch { toast('Constraints must be JSON', true); }
+    const res = await api('PUT', `/api/organization/transactionChannels/${encodeURIComponent(id)}`, d);
+    done(res, res.body?.warning ? `Channel saved. ${res.body.warning}` : 'Channel saved');
   });
   each('channel-up', async (id) => {
     const ids = (chans.body || []).map((x) => x.id);

@@ -62,5 +62,6 @@ From `docs/audits/security-assessment-2026-10.md`, "What remains".
 
 Move items here with the date and the commit, newest first.
 
+- [x] 2026-10: transaction channels after the reference platform: API v2, configuration as code, constraint operators, the console form (`docs/audits/build-log-transaction-channels.md`).
 - [x] 2026-10: front ends deployed apart from the API (`c23c45b`); `npm audit` gates the deploy (`3e6257e`).
 - [x] 2026-10: security review and follow-up: every code finding fixed (`docs/audits/security-assessment-2026-10.md`).

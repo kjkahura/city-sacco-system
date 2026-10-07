@@ -649,6 +649,33 @@ const T = (fn) => withTenant(SCHEMA, fn);
     await page.fill('dialog[open] input[name=date]', '2026-10-20');
     await page.click('dialog[open] button[value=ok]');
     await page.waitForFunction(() => /Mashujaa Day/.test(document.querySelector('#org-holidays')?.textContent || ''));
+    // The channel form: constraints set with rows, not typed as JSON.
+    await page.click('#channel-add');
+    await page.waitForSelector('dialog[open] #channel-form');
+    await page.fill('dialog[open] input[name=id]', 'agentpay');
+    await page.fill('dialog[open] input[name=name]', 'Agent payments');
+    await page.fill('dialog[open] input[name=glAccount]', '100-210');
+    const loanSide = 'dialog[open] fieldset[data-side=loan]';
+    await page.selectOption(`${loanSide} select[data-k=usage]`, 'LIMITED');
+    await page.click(`${loanSide} [data-add]`);
+    await page.selectOption(`${loanSide} [data-row] select[data-k=operator]`, 'MORE_THAN');
+    await page.fill(`${loanSide} [data-row] input[data-k=value]`, '5000');
+    await page.click(`${loanSide} [data-add]`);
+    await page.selectOption(`${loanSide} [data-row] >> nth=1 >> select[data-k=criteria]`, 'TYPE');
+    await page.check(`${loanSide} [data-row] >> nth=1 >> input[value=REPAYMENT]`);
+    await page.selectOption(`${loanSide} select[data-k=match]`, 'ANY');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /Agent payments/.test(document.querySelector('#org-channels')?.textContent || ''));
+    const agentRow = await page.locator('#org-channels tr', { hasText: 'agentpay' }).textContent();
+    check('a channel is created with constraints set in the form', /any of: amount more than 5000\.00, type in REPAYMENT/.test(agentRow), agentRow);
+    await page.click('[data-channel="agentpay"]');
+    await page.waitForSelector('dialog[open] #channel-form');
+    check('and the form opens with its filters', await page.locator('dialog[open] fieldset[data-side=loan] [data-row]').count() === 2
+      && await page.inputValue('dialog[open] fieldset[data-side=loan] [data-row] input[data-k=value]') === '5000.00');
+    await page.selectOption('dialog[open] fieldset[data-side=loan] select[data-k=usage]', 'UNCONSTRAINED');
+    await page.click('dialog[open] button[value=ok]');
+    await page.waitForFunction(() => /agentpay.*unconstrained.*unconstrained/s.test([...document.querySelectorAll('#org-channels tr')].find((r) => /agentpay/.test(r.textContent))?.textContent || ''));
+    check('and an edit saves it unconstrained', true);
 
     section('administration: fields');
     await openAdmin(page, 'fields');

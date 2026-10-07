@@ -296,6 +296,12 @@ const RULES = [
   ['GET', '/transaction-channels', 'VIEW_TRANSACTION_CHANNELS'],
   ['POST', '/transaction-channels', 'CREATE_TRANSACTION_CHANNELS'], ['PUT', '/transaction-channels/order', 'EDIT_TRANSACTION_CHANNELS'],
   ['PATCH', '/transaction-channels/:id', 'EDIT_TRANSACTION_CHANNELS'], ['DELETE', '/transaction-channels/:id', 'DELETE_TRANSACTION_CHANNELS'],
+  // The reference platform's API v2 and configuration as code for channels (a PUT of the file creates, edits and deletes).
+  ['GET', '/organization/transactionChannels', 'VIEW_TRANSACTION_CHANNELS'], ['GET', '/organization/transactionChannels/:id', 'VIEW_TRANSACTION_CHANNELS'],
+  ['POST', '/organization/transactionChannels', 'CREATE_TRANSACTION_CHANNELS'], ['PUT', '/organization/transactionChannels/:id', 'EDIT_TRANSACTION_CHANNELS'],
+  ['DELETE', '/organization/transactionChannels/:id', 'DELETE_TRANSACTION_CHANNELS'],
+  ['GET', '/configuration/transactionchannels.yaml', 'VIEW_TRANSACTION_CHANNELS'], ['GET', '/configuration/transactionchannels/template.yaml', 'VIEW_TRANSACTION_CHANNELS'],
+  ['PUT', '/configuration/transactionchannels.yaml', { all: ['CREATE_TRANSACTION_CHANNELS', 'EDIT_TRANSACTION_CHANNELS', 'DELETE_TRANSACTION_CHANNELS'] }],
   ['GET', '/id-templates', OPEN], ['*', '/id-templates', 'MANAGE_GENERAL_SETUP'], ['*', '/id-templates/*', 'MANAGE_GENERAL_SETUP'],
   ['GET', '/currencies', OPEN], ['GET', '/currencies/*', OPEN],
   ['POST', '/currencies', 'MANAGE_CURRENCIES'], ['PATCH', '/currencies/:code', 'MANAGE_CURRENCIES'], ['DELETE', '/currencies/:code', 'MANAGE_CURRENCIES'],
