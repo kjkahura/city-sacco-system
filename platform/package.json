@@ -45,7 +45,7 @@
     "jsonwebtoken": "^9.0.3",
     "nodemailer": "^10.0.14",
     "pg": "^8.23.0",
-    "redis": "^6.2.1"
+    "redis": "^6.3.0"
   },
   "private": true,
   "engines": {
