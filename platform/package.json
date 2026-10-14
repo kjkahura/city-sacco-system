@@ -52,6 +52,6 @@
     "node": ">=18.0.0"
   },
   "devDependencies": {
-    "smtp-server": "^3.19.17"
+    "smtp-server": "^3.19.21"
   }
 }
